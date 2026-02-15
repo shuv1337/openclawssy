@@ -7,6 +7,15 @@ import (
 	"strings"
 )
 
+var protectedControlFiles = map[string]bool{
+	"config.json": true,
+	"master.key":  true,
+	"secrets.enc": true,
+	"SOUL.md":     true,
+	"RULES.md":    true,
+	"SPECPLAN.md": true,
+}
+
 func HasTraversal(path string) bool {
 	clean := filepath.Clean(path)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
@@ -74,7 +83,33 @@ func resolvePath(workspace, target string, write bool) (string, error) {
 		return "", &PathError{Path: target, Reason: "outside workspace"}
 	}
 
+	if write && isProtectedControlPath(candidate) {
+		return "", &PathError{Path: target, Reason: "protected control-plane path"}
+	}
+
 	return candidate, nil
+}
+
+func isProtectedControlPath(absPath string) bool {
+	parts := strings.Split(filepath.ToSlash(absPath), "/")
+	for i := 0; i < len(parts); i++ {
+		if parts[i] != ".openclawssy" {
+			continue
+		}
+		if i+1 >= len(parts) {
+			return true
+		}
+		base := filepath.Base(absPath)
+		if protectedControlFiles[base] {
+			return true
+		}
+		if i+3 < len(parts) && parts[i+1] == "agents" {
+			if protectedControlFiles[base] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isWithinWorkspace(workspaceReal, pathReal string) bool {

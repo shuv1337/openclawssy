@@ -59,3 +59,8 @@ jobs:
           else
             echo "missing ./cmd/openclawssy"
           fi
+
+      - name: Smoke CLI
+        run: |
+          ./bin/openclawssy --help || true
+          ./bin/openclawssy doctor

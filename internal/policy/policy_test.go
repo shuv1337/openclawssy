@@ -75,3 +75,43 @@ func TestSymlinkEscapeDeniedOnWrite(t *testing.T) {
 		t.Fatalf("expected symlink write escape denial")
 	}
 }
+
+func TestProtectedPathDeniedOnWrite(t *testing.T) {
+	root := t.TempDir()
+	ws := root
+	if err := os.MkdirAll(filepath.Join(root, ".openclawssy", "agents", "default"), 0o755); err != nil {
+		t.Fatalf("mkdir control plane: %v", err)
+	}
+
+	enf := NewEnforcer(ws, map[string][]string{"agent": {"fs.write"}})
+	if _, err := enf.ResolveWritePath(ws, ".openclawssy/config.json"); err == nil {
+		t.Fatalf("expected protected config denial")
+	}
+	if _, err := enf.ResolveWritePath(ws, ".openclawssy/agents/default/SOUL.md"); err == nil {
+		t.Fatalf("expected protected SOUL denial")
+	}
+	if _, err := enf.ResolveWritePath(ws, ".openclawssy/secrets.enc"); err == nil {
+		t.Fatalf("expected protected secrets denial")
+	}
+}
+
+func TestProtectedPathDeniedViaSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior requires elevated privileges on many windows setups")
+	}
+	root := t.TempDir()
+	ws := root
+	if err := os.MkdirAll(filepath.Join(root, ".openclawssy", "agents", "default"), 0o755); err != nil {
+		t.Fatalf("mkdir control plane: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "workspace"), 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, ".openclawssy"), filepath.Join(root, "workspace", "cp")); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+	enf := NewEnforcer(ws, map[string][]string{"agent": {"fs.write"}})
+	if _, err := enf.ResolveWritePath(ws, "workspace/cp/config.json"); err == nil {
+		t.Fatalf("expected symlink protected path denial")
+	}
+}

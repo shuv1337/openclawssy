@@ -2,6 +2,8 @@
 
 Welcome. This is the fastest safe path to try Openclawssy locally.
 
+Think of this as your first walk through the Ussyverse: small scope, clean controls, and auditable outcomes.
+
 ## 1) Build
 
 ```bash
@@ -52,3 +54,5 @@ curl -s -X POST http://127.0.0.1:8080/v1/runs \
 ## Important warning
 
 This project is still a prototype. Use it only in disposable dev environments.
+
+Ussyverse rule #1: if it matters, isolate it.

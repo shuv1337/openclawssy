@@ -134,7 +134,9 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 
 	enforcer := policy.NewEnforcer(e.workspaceDir, map[string][]string{agentID: e.allowedTools(cfg)})
 	registry := tools.NewRegistry(enforcer, aud)
-	if err := tools.RegisterCore(registry); err != nil {
+	if err := tools.RegisterCoreWithOptions(registry, tools.CoreOptions{
+		EnableShellExec: cfg.Shell.EnableExec && cfg.Sandbox.Active && strings.ToLower(cfg.Sandbox.Provider) != "none",
+	}); err != nil {
 		return RunResult{}, fmt.Errorf("runtime: register core tools: %w", err)
 	}
 
@@ -186,22 +188,32 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 	if runErr == nil {
 		durationMS := time.Since(start).Milliseconds()
 		toolCount := len(out.ToolCalls)
-		artifactPath, err = artifacts.WriteRunBundle(
-			e.rootDir,
-			agentID,
-			runID,
-			map[string]any{"agent_id": agentID, "message": message},
-			map[string]any{"final_text": out.FinalText},
-			out.ToolCalls,
-			map[string]any{
-				"started_at":      out.StartedAt,
-				"completed_at":    out.CompletedAt,
-				"duration_ms":     durationMS,
-				"tool_call_count": toolCount,
-				"provider":        model.ProviderName(),
-				"model":           model.ModelName(),
-			},
-		)
+		toolLines := make([]string, 0, len(out.ToolCalls))
+		for _, rec := range out.ToolCalls {
+			b, mErr := json.Marshal(rec)
+			if mErr != nil {
+				runErr = mErr
+				break
+			}
+			toolLines = append(toolLines, string(b))
+		}
+		if runErr == nil {
+			artifactPath, err = artifacts.WriteRunBundleV1(e.rootDir, agentID, runID, artifacts.BundleV1Input{
+				Input:     map[string]any{"agent_id": agentID, "message": message},
+				PromptMD:  out.Prompt,
+				ToolCalls: toolLines,
+				OutputMD:  out.FinalText,
+				Meta: map[string]any{
+					"started_at":      out.StartedAt,
+					"completed_at":    out.CompletedAt,
+					"duration_ms":     durationMS,
+					"tool_call_count": toolCount,
+					"provider":        model.ProviderName(),
+					"model":           model.ModelName(),
+				},
+				MirrorJSON: true,
+			})
+		}
 		if err != nil {
 			runErr = err
 		}
@@ -277,7 +289,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, call agent.ToolCallReque
 }
 
 func (e *Engine) allowedTools(cfg config.Config) []string {
-	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.edit", "code.search"}
+	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.edit", "code.search", "time.now"}
 	if cfg.Shell.EnableExec && cfg.Sandbox.Active && strings.ToLower(cfg.Sandbox.Provider) != "none" {
 		toolsList = append(toolsList, "shell.exec")
 	}

@@ -42,3 +42,24 @@ func TestWriteRunBundleWritesExpectedFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteRunBundleV1WritesExpectedFiles(t *testing.T) {
+	root := t.TempDir()
+	runDir, err := WriteRunBundleV1(root, "agent-1", "run-2", BundleV1Input{
+		Input:     map[string]any{"message": "hi"},
+		PromptMD:  "# prompt",
+		ToolCalls: []string{`{"id":"1"}`},
+		OutputMD:  "done",
+		Meta:      map[string]any{"duration_ms": 5},
+	})
+	if err != nil {
+		t.Fatalf("WriteRunBundleV1 failed: %v", err)
+	}
+
+	files := []string{"input.json", "prompt.md", "toolcalls.jsonl", "output.md", "meta.json"}
+	for _, name := range files {
+		if _, err := os.Stat(filepath.Join(runDir, name)); err != nil {
+			t.Fatalf("missing %s: %v", name, err)
+		}
+	}
+}

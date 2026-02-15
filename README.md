@@ -1,6 +1,39 @@
 # Openclawssy
 
-Openclawssy is a minimal, secure-by-default Go agent runtime and gateway.
+Openclawssy is a minimal, secure-by-default AI agent runtime and gateway for builders who prefer discipline over chaos.
+
+**The pitch:** an alternative to OpenClaw for the sensible, thinking gentleman `🎩🚬`.
+
+Welcome to the **Ussyverse**: the tiny but principled corner of agent tooling where we ship calm systems, clear logs, and fewer regrettable surprises.
+
+- Small surface area, explicit contracts, auditable artifacts.
+- Security-first defaults (deny by default, loopback by default, network off by default).
+- Real operational controls (scheduler, dashboard, Discord bridge, secret ingestion).
+
+## Why Openclawssy
+
+- Predictable architecture: plans, contracts, and artifacts before platform bloat.
+- Operator control: agent cannot mutate core permissions, config, or secret store.
+- Easy to self-host: one Go binary, simple config, practical defaults.
+- Built for iteration: run bundles, audit trails, and strict capability gates.
+
+## Ussyverse Principles
+
+- No mystical auto-magic: contracts and artifacts first.
+- No permission shape-shifting: control-plane files are protected.
+- No bloat by default: only the tools required to get real work done.
+- No vibes-only operations: logs, bundles, and reproducible runs.
+
+## Highlights
+
+- CLI: `init`, `setup`, `ask`, `run`, `serve`, `cron`, `doctor`
+- Channels: local HTTP API + Discord bot bridge
+- Dashboard: HTTPS admin panel for status/config/secrets ingestion
+- Tooling: fs/code tools, `time.now`, sandbox-gated `shell.exec`
+- Security: encrypted secret store, append-only audit logs, path/symlink guards
+- Providers: OpenAI, OpenRouter, Requesty, ZAI, generic OpenAI-compatible endpoints
+
+Ussyverse flavor, practical core.
 
 ## Prototype Warning
 
@@ -33,6 +66,12 @@ make test
 make build
 ```
 
+Install globally if you prefer:
+
+```bash
+go install ./cmd/openclawssy
+```
+
 Minimal first run:
 
 ```bash
@@ -46,6 +85,14 @@ Then open:
 - `https://127.0.0.1:8080/dashboard` (if TLS enabled)
 - `http://127.0.0.1:8080/dashboard` (if TLS disabled)
 
+## 5-Minute Tour
+
+1. `openclawssy setup` to pick model/provider and optional Discord/TLS.
+2. `openclawssy doctor -v` to verify readiness.
+3. `openclawssy ask -agent default -message "hello"` for a synchronous run.
+4. `openclawssy run -agent default -message '/tool time.now {}'` for tool flow.
+5. `openclawssy serve --token change-me` and monitor in `/dashboard`.
+
 Expected CLI commands for the `openclawssy` binary:
 
 ```bash
@@ -53,6 +100,7 @@ openclawssy init
 openclawssy setup
 openclawssy ask "hello"
 openclawssy run --agent default --message "summarize changes"
+openclawssy run --agent default --message-file ./prompt.txt
 openclawssy serve --addr 127.0.0.1:8787 --token local-dev-token
 openclawssy cron add --agent default --schedule "@every 1h" --message "status report"
 openclawssy doctor
@@ -134,6 +182,23 @@ Example tool call through runner:
 openclawssy run -agent default -message '/tool shell.exec {"command":"pwd"}'
 ```
 
+Time utility example:
+
+```bash
+openclawssy run -agent default -message '/tool time.now {}'
+```
+
+## Run Bundle Format (v1)
+
+Every successful run writes:
+- `runs/<run-id>/input.json`
+- `runs/<run-id>/prompt.md`
+- `runs/<run-id>/toolcalls.jsonl`
+- `runs/<run-id>/output.md`
+- `runs/<run-id>/meta.json` (`bundle_version: 1`)
+
+This artifact-first layout is intentional: every run should be reproducible, inspectable, and debuggable.
+
 ## HTTP and Chat Queue
 
 - HTTP run API: `POST /v1/runs`, `GET /v1/runs/{id}`
@@ -185,6 +250,8 @@ If you are evaluating this project for production, please don't yet.
 - Use test credentials only.
 - Assume data loss is possible.
 - Track changes between commits before every upgrade.
+
+If you need battle-tested enterprise controls today, this is not that product yet.
 
 ## Project Layout
 - `cmd/openclawssy/` - CLI entrypoint and command wiring.

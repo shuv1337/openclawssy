@@ -1,5 +1,7 @@
 # Project Status
 
+_Ussyverse status board for operators and contributors._
+
 ## Current state
 
 Openclawssy is a **prototype in development**.
@@ -23,3 +25,5 @@ What is not production-ready:
 
 Do not deploy this to production.
 Use only local/dev environments with test credentials.
+
+Ussyverse maturity label today: **Prototype / Builder Preview**.

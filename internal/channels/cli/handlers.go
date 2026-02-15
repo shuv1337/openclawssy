@@ -21,9 +21,10 @@ type AskInput struct {
 }
 
 type RunInput struct {
-	AgentID  string
-	Message  string
-	Detached bool
+	AgentID     string
+	Message     string
+	MessageFile string
+	Detached    bool
 }
 
 type DoctorInput struct {
@@ -131,13 +132,14 @@ func (h Handlers) HandleRun(ctx context.Context, args []string) int {
 	fs.SetOutput(h.errorWriter())
 	fs.StringVar(&input.AgentID, "agent", "default", "agent id")
 	fs.StringVar(&input.Message, "message", "", "run message")
+	fs.StringVar(&input.MessageFile, "message-file", "", "path to message file")
 	fs.BoolVar(&input.Detached, "detach", false, "queue and return immediately")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	if input.Message == "" {
-		return h.fail(errors.New("-message is required"))
+	if input.Message == "" && input.MessageFile == "" {
+		return h.fail(errors.New("either -message or -message-file is required"))
 	}
 
 	output, err := h.Run.Run(ctx, input)
