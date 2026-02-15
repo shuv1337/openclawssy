@@ -1,0 +1,139 @@
+package httpchannel
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+)
+
+type FileRunStore struct {
+	path string
+
+	mu   sync.RWMutex
+	runs map[string]Run
+}
+
+type persistedRuns struct {
+	Runs []Run `json:"runs"`
+}
+
+func NewFileRunStore(path string) (*FileRunStore, error) {
+	if path == "" {
+		return nil, fmt.Errorf("runs file path is required")
+	}
+	s := &FileRunStore{path: path, runs: make(map[string]Run)}
+	if err := s.load(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *FileRunStore) Create(_ context.Context, run Run) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runs[run.ID] = run
+	return run, s.saveLocked()
+}
+
+func (s *FileRunStore) Get(_ context.Context, id string) (Run, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	run, ok := s.runs[id]
+	if !ok {
+		return Run{}, ErrRunNotFound
+	}
+	return run, nil
+}
+
+func (s *FileRunStore) Update(_ context.Context, run Run) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.runs[run.ID]; !ok {
+		return ErrRunNotFound
+	}
+	s.runs[run.ID] = run
+	return s.saveLocked()
+}
+
+func (s *FileRunStore) List(_ context.Context) ([]Run, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	runs := make([]Run, 0, len(s.runs))
+	for _, run := range s.runs {
+		runs = append(runs, run)
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.After(runs[j].CreatedAt) })
+	return runs, nil
+}
+
+func (s *FileRunStore) load() error {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read runs store: %w", err)
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	var p persistedRuns
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("parse runs store: %w", err)
+	}
+	for _, run := range p.Runs {
+		s.runs[run.ID] = run
+	}
+	return nil
+}
+
+func (s *FileRunStore) saveLocked() error {
+	runs := make([]Run, 0, len(s.runs))
+	for _, run := range s.runs {
+		runs = append(runs, run)
+	}
+	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.Before(runs[j].CreatedAt) })
+
+	data, err := json.MarshalIndent(persistedRuns{Runs: runs}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal runs store: %w", err)
+	}
+	data = append(data, '\n')
+	return atomicWrite(s.path, data, 0o600)
+}
+
+func atomicWrite(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".tmp-runs-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
+}

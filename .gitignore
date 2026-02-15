@@ -1,0 +1,24 @@
+# Binaries
+bin/
+openclawssy
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build/test artifacts
+*.test
+*.out
+coverage.out
+
+# Temp and editor artifacts
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+.DS_Store
+
+# Openclawssy runtime data
+.openclawssy/
