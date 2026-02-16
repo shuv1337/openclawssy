@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"openclawssy/internal/agent"
 	"openclawssy/internal/config"
@@ -347,6 +348,171 @@ func TestProviderModelMapsShellSnippetsToCoreTools(t *testing.T) {
 	}
 	if resp.ToolCalls[0].Name != "fs.list" || resp.ToolCalls[1].Name != "fs.read" {
 		t.Fatalf("unexpected tool names: %q, %q", resp.ToolCalls[0].Name, resp.ToolCalls[1].Name)
+	}
+}
+
+func TestProviderModelRetriesOnTimeout(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			time.Sleep(80 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "retry succeeded",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	model.httpClient = &http.Client{Timeout: 30 * time.Millisecond}
+
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "hi"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if resp.FinalText != "retry succeeded" {
+		t.Fatalf("unexpected final text: %q", resp.FinalText)
+	}
+	if calls < 2 {
+		t.Fatalf("expected retry attempt, got %d call(s)", calls)
+	}
+}
+
+func TestProviderModelIgnoresUnknownToolNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "I'll wait a second. time.sleep(1)",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "wait"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no parsed tool calls, got %d", len(resp.ToolCalls))
+	}
+}
+
+func TestProviderModelSynthesizesWriteFromCodeBlock(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "Here you go:\n```python\nprint(\"hello\")\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "create hello.py with a simple print"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "fs.write" {
+		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
+		t.Fatalf("decode tool args: %v", err)
+	}
+	if args["path"] != "hello.py" {
+		t.Fatalf("unexpected write path: %#v", args["path"])
+	}
+	if !strings.Contains(args["content"].(string), "print(\"hello\")") {
+		t.Fatalf("unexpected synthesized content: %#v", args["content"])
+	}
+}
+
+func TestProviderModelParsesBashFencedBlockToShellExec(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```bash\nls -la\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "run ls"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "shell.exec" {
+		t.Fatalf("unexpected tool name: %q", resp.ToolCalls[0].Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
+		t.Fatalf("decode args: %v", err)
+	}
+	if args["command"] != "bash" {
+		t.Fatalf("expected bash command, got %#v", args["command"])
+	}
+}
+
+func TestProviderModelCanonicalizesBashExecAlias(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": `{"tool_name":"bash.exec","arguments":{"command":"pwd"}}`,
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "run bash"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "shell.exec" {
+		t.Fatalf("expected canonical shell.exec, got %q", resp.ToolCalls[0].Name)
+	}
+}
+
+func TestProviderModelToolDirectiveSupportsBashAlias(t *testing.T) {
+	model := testProviderModel(t, "http://unused.local")
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Message: `/tool bash.exec {"command":"pwd"}`})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "shell.exec" {
+		t.Fatalf("expected canonical shell.exec, got %q", resp.ToolCalls[0].Name)
 	}
 }
 

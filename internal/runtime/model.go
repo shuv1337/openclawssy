@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -23,6 +24,26 @@ type ProviderModel struct {
 	apiKey       string
 	headers      map[string]string
 	httpClient   *http.Client
+}
+
+const (
+	defaultProviderTimeout = 90 * time.Second
+	providerMaxAttempts    = 2
+	providerRetryBackoff   = 700 * time.Millisecond
+	toolNamePattern        = `[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*`
+)
+
+var toolNameAliases = map[string]string{
+	"fs.read":       "fs.read",
+	"fs.list":       "fs.list",
+	"fs.write":      "fs.write",
+	"fs.edit":       "fs.edit",
+	"code.search":   "code.search",
+	"time.now":      "time.now",
+	"shell.exec":    "shell.exec",
+	"bash.exec":     "shell.exec",
+	"terminal.exec": "shell.exec",
+	"terminal.run":  "shell.exec",
 }
 
 type SecretLookup func(name string) (string, bool, error)
@@ -65,7 +86,7 @@ func NewProviderModel(cfg config.Config, lookup SecretLookup) (*ProviderModel, e
 		baseURL:      base,
 		apiKey:       apiKey,
 		headers:      headers,
-		httpClient:   &http.Client{Timeout: 60 * time.Second},
+		httpClient:   &http.Client{Timeout: defaultProviderTimeout},
 	}, nil
 }
 
@@ -96,9 +117,72 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 		return agent.ModelResponse{}, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, m.baseURL+"/chat/completions", bytes.NewReader(raw))
+	var payload struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error any `json:"error"`
+	}
+	statusCode, err := m.doChatCompletionWithRetry(ctx, raw, &payload)
 	if err != nil {
 		return agent.ModelResponse{}, err
+	}
+	if statusCode >= 300 {
+		return agent.ModelResponse{}, fmt.Errorf("provider %s request failed: status=%d error=%v", m.providerName, statusCode, payload.Error)
+	}
+	if len(payload.Choices) == 0 {
+		return agent.ModelResponse{}, errors.New("provider returned no choices")
+	}
+
+	content := strings.TrimSpace(payload.Choices[0].Message.Content)
+
+	// Check if the model's response contains tool calls in JSON blocks.
+	toolCalls := parseToolCallsFromResponse(content, req.Message)
+	if len(toolCalls) == 0 {
+		toolCalls = parseToolCallsFromResponse(stripThinkingTags(content), req.Message)
+	}
+	if len(toolCalls) > 0 {
+		return agent.ModelResponse{ToolCalls: toolCalls}, nil
+	}
+
+	return agent.ModelResponse{FinalText: stripThinkingTags(content)}, nil
+}
+
+func (m *ProviderModel) doChatCompletionWithRetry(ctx context.Context, raw []byte, payload any) (int, error) {
+	if m.httpClient == nil {
+		m.httpClient = &http.Client{Timeout: defaultProviderTimeout}
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= providerMaxAttempts; attempt++ {
+		statusCode, err := m.doChatCompletionOnce(ctx, raw, payload)
+		if err == nil {
+			return statusCode, nil
+		}
+		lastErr = err
+		if !shouldRetryProviderError(err) || attempt == providerMaxAttempts {
+			return 0, err
+		}
+
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(providerRetryBackoff):
+		}
+	}
+
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return 0, errors.New("provider request failed")
+}
+
+func (m *ProviderModel) doChatCompletionOnce(ctx context.Context, raw []byte, payload any) (int, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, m.baseURL+"/chat/completions", bytes.NewReader(raw))
+	if err != nil {
+		return 0, err
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+m.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -108,40 +192,36 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 
 	resp, err := m.httpClient.Do(httpReq)
 	if err != nil {
-		return agent.ModelResponse{}, err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
-	var payload struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Error any `json:"error"`
+	if err := json.NewDecoder(resp.Body).Decode(payload); err != nil {
+		return 0, err
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return agent.ModelResponse{}, err
+	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+		return resp.StatusCode, fmt.Errorf("retryable provider status: %d", resp.StatusCode)
 	}
-	if resp.StatusCode >= 300 {
-		return agent.ModelResponse{}, fmt.Errorf("provider %s request failed: status=%d error=%v", m.providerName, resp.StatusCode, payload.Error)
-	}
-	if len(payload.Choices) == 0 {
-		return agent.ModelResponse{}, errors.New("provider returned no choices")
-	}
+	return resp.StatusCode, nil
+}
 
-	content := strings.TrimSpace(payload.Choices[0].Message.Content)
-
-	// Check if the model's response contains tool calls in JSON blocks.
-	toolCalls := parseToolCallsFromResponse(content)
-	if len(toolCalls) == 0 {
-		toolCalls = parseToolCallsFromResponse(stripThinkingTags(content))
+func shouldRetryProviderError(err error) bool {
+	if err == nil {
+		return false
 	}
-	if len(toolCalls) > 0 {
-		return agent.ModelResponse{ToolCalls: toolCalls}, nil
+	if errors.Is(err, context.Canceled) {
+		return false
 	}
-
-	return agent.ModelResponse{FinalText: stripThinkingTags(content)}, nil
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "retryable provider status") ||
+		strings.Contains(strings.ToLower(err.Error()), "timeout") ||
+		strings.Contains(strings.ToLower(err.Error()), "too many requests")
 }
 
 func appendToolResultsPrompt(prompt string, results []agent.ToolCallResult) string {
@@ -207,7 +287,10 @@ func stripThinkingTags(s string) string {
 func parseToolDirective(message string) (agent.ModelResponse, error) {
 	rest := strings.TrimSpace(strings.TrimPrefix(message, "/tool "))
 	parts := strings.SplitN(rest, " ", 2)
-	toolName := strings.TrimSpace(parts[0])
+	toolName, ok := canonicalToolName(parts[0])
+	if !ok {
+		return agent.ModelResponse{}, fmt.Errorf("unsupported tool name: %s", strings.TrimSpace(parts[0]))
+	}
 	if toolName == "" {
 		return agent.ModelResponse{}, errors.New("tool name is required")
 	}
@@ -221,7 +304,7 @@ func parseToolDirective(message string) (agent.ModelResponse, error) {
 	return agent.ModelResponse{ToolCalls: []agent.ToolCallRequest{{ID: "tool-1", Name: toolName, Arguments: argBytes}}}, nil
 }
 
-func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
+func parseToolCallsFromResponse(content, userMessage string) []agent.ToolCallRequest {
 	var toolCalls []agent.ToolCallRequest
 	xmlTagRe := regexp.MustCompile(`(?is)<[^>]+>`)
 
@@ -236,38 +319,9 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 		}
 		jsonContent := strings.TrimSpace(match[1])
 
-		// Try to parse as a tool call
-		var toolCall struct {
-			ToolName  string         `json:"tool_name"`
-			Name      string         `json:"name"`
-			Arguments map[string]any `json:"arguments"`
-			Args      map[string]any `json:"args"`
-		}
-
-		if err := json.Unmarshal([]byte(jsonContent), &toolCall); err == nil {
-			// Check if it has a tool name
-			toolName := toolCall.ToolName
-			if toolName == "" {
-				toolName = toolCall.Name
-			}
-			if toolName != "" {
-				// Get arguments
-				args := toolCall.Arguments
-				if args == nil {
-					args = toolCall.Args
-				}
-				if args == nil {
-					args = map[string]any{}
-				}
-
-				argBytes, _ := json.Marshal(args)
-				toolCalls = append(toolCalls, agent.ToolCallRequest{
-					ID:        fmt.Sprintf("tool-%d", i+1),
-					Name:      toolName,
-					Arguments: argBytes,
-				})
-				continue
-			}
+		if call, ok := parseJSONToolCall(jsonContent, i+1); ok {
+			toolCalls = append(toolCalls, call)
+			continue
 		}
 
 		// Try parsing as direct tool call syntax: tool_name(args)
@@ -279,11 +333,14 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 
 	// Also look for inline function calls not in code blocks
 	// Pattern: fs.list(path=".") or fs.list(".")
-	inlineRe := regexp.MustCompile(`\b(fs\.\w+|code\.\w+|shell\.\w+|time\.\w+)\s*\(([^)]*)\)`)
+	inlineRe := regexp.MustCompile(`\b(` + toolNamePattern + `)\s*\(([^)]*)\)`)
 	inlineMatches := inlineRe.FindAllStringSubmatch(content, -1)
 	for _, match := range inlineMatches {
 		if len(match) >= 2 {
-			toolName := strings.TrimSpace(match[1])
+			toolName, ok := canonicalToolName(match[1])
+			if !ok {
+				continue
+			}
 			argsStr := ""
 			if len(match) >= 3 {
 				argsStr = match[2]
@@ -306,15 +363,23 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 		}
 	}
 
+	// Support fenced bash/sh command snippets by mapping to shell.exec.
+	for _, call := range parseBashCodeBlocks(content, len(toolCalls)+1) {
+		toolCalls = append(toolCalls, call)
+	}
+
 	// Support XML function blocks occasionally emitted by models.
 	// Pattern: <function=fs.list><path>.</path></function>
-	xmlFunctionRe := regexp.MustCompile(`(?is)<function=(fs\.\w+|code\.\w+|shell\.\w+|time\.\w+)>\s*(.*?)\s*</function>`)
+	xmlFunctionRe := regexp.MustCompile(`(?is)<function=(` + toolNamePattern + `)>\s*(.*?)\s*</function>`)
 	xmlFunctionMatches := xmlFunctionRe.FindAllStringSubmatch(content, -1)
 	for _, match := range xmlFunctionMatches {
 		if len(match) < 2 {
 			continue
 		}
-		toolName := strings.TrimSpace(match[1])
+		toolName, ok := canonicalToolName(match[1])
+		if !ok {
+			continue
+		}
 		argsBody := ""
 		if len(match) >= 3 {
 			argsBody = strings.TrimSpace(match[2])
@@ -352,13 +417,16 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 
 	// Also support bracket-style directives occasionally emitted by models.
 	// Pattern: [fs.list] path: .
-	bracketRe := regexp.MustCompile(`(?m)^\s*\[(fs\.\w+|code\.\w+|shell\.\w+|time\.\w+)\]\s*(.*)$`)
+	bracketRe := regexp.MustCompile(`(?m)^\s*\[(` + toolNamePattern + `)\]\s*(.*)$`)
 	bracketMatches := bracketRe.FindAllStringSubmatch(content, -1)
 	for _, match := range bracketMatches {
 		if len(match) < 2 {
 			continue
 		}
-		toolName := strings.TrimSpace(match[1])
+		toolName, ok := canonicalToolName(match[1])
+		if !ok {
+			continue
+		}
 		argsStr := ""
 		if len(match) >= 3 {
 			argsStr = strings.TrimSpace(match[2])
@@ -373,13 +441,16 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 	}
 
 	// Support one-line command style: fs.list /path
-	toolLineRe := regexp.MustCompile(`(?m)^\s*(fs\.\w+|code\.\w+|shell\.\w+|time\.\w+)\s+([^\n]+)$`)
+	toolLineRe := regexp.MustCompile(`(?m)^\s*(` + toolNamePattern + `)\s+([^\n]+)$`)
 	toolLineMatches := toolLineRe.FindAllStringSubmatch(content, -1)
 	for _, match := range toolLineMatches {
 		if len(match) < 3 {
 			continue
 		}
-		toolName := strings.TrimSpace(match[1])
+		toolName, ok := canonicalToolName(match[1])
+		if !ok {
+			continue
+		}
 		args := parseArgsString(strings.TrimSpace(match[2]))
 		argBytes, _ := json.Marshal(args)
 		toolCalls = append(toolCalls, agent.ToolCallRequest{
@@ -390,13 +461,19 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 	}
 
 	// Map common shell snippets to workspace-safe tools.
-	for _, call := range parseShellSnippets(content, len(toolCalls)+1) {
+	for _, call := range parseShellSnippets(removeFencedCodeBlocks(content), len(toolCalls)+1) {
 		toolCalls = append(toolCalls, call)
+	}
+
+	if len(toolCalls) == 0 {
+		if call, ok := synthesizeWriteCallFromResponse(content, userMessage, len(toolCalls)+1); ok {
+			toolCalls = append(toolCalls, call)
+		}
 	}
 
 	// Also support XML-like tool markers occasionally emitted by models.
 	// Pattern: <tool_call>fs.read ...
-	xmlNameRe := regexp.MustCompile(`(?is)^\s*(fs\.\w+|code\.\w+|shell\.\w+|time\.\w+)\b`)
+	xmlNameRe := regexp.MustCompile(`(?is)^\s*(` + toolNamePattern + `)\b`)
 	segments := strings.Split(content, "<tool_call>")
 	if len(segments) > 1 {
 		for _, seg := range segments[1:] {
@@ -404,7 +481,10 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 			if len(match) < 2 {
 				continue
 			}
-			toolName := strings.TrimSpace(match[1])
+			toolName, ok := canonicalToolName(match[1])
+			if !ok {
+				continue
+			}
 			argsStr := strings.TrimSpace(strings.TrimPrefix(seg, match[0]))
 			argsStr = xmlTagRe.ReplaceAllString(argsStr, " ")
 			args := parseArgsString(argsStr)
@@ -420,9 +500,149 @@ func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
 	return dedupeToolCalls(toolCalls)
 }
 
+func synthesizeWriteCallFromResponse(content, userMessage string, ordinal int) (agent.ToolCallRequest, bool) {
+	if !looksLikeCreateRequest(userMessage) {
+		return agent.ToolCallRequest{}, false
+	}
+
+	path := extractFilenameFromText(userMessage)
+	if path == "" {
+		path = extractFilenameFromText(content)
+	}
+	if path == "" {
+		return agent.ToolCallRequest{}, false
+	}
+
+	body := extractCodeBody(content)
+	if strings.TrimSpace(body) == "" {
+		return agent.ToolCallRequest{}, false
+	}
+
+	argBytes, _ := json.Marshal(map[string]any{
+		"path":    path,
+		"content": body,
+	})
+	return agent.ToolCallRequest{
+		ID:        fmt.Sprintf("tool-synth-%d", ordinal),
+		Name:      "fs.write",
+		Arguments: argBytes,
+	}, true
+}
+
+func looksLikeCreateRequest(message string) bool {
+	m := strings.ToLower(strings.TrimSpace(message))
+	if m == "" {
+		return false
+	}
+	if !strings.Contains(m, "create") && !strings.Contains(m, "write") && !strings.Contains(m, "make") && !strings.Contains(m, "save") {
+		return false
+	}
+	return regexp.MustCompile(`\.[A-Za-z0-9]{1,8}\b`).MatchString(m)
+}
+
+func extractFilenameFromText(text string) string {
+	re := regexp.MustCompile(`([A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,8})`)
+	matches := re.FindAllString(text, -1)
+	for _, m := range matches {
+		m = strings.TrimSpace(strings.Trim(m, `"'`))
+		if strings.HasPrefix(m, "http://") || strings.HasPrefix(m, "https://") {
+			continue
+		}
+		if strings.Contains(m, "..") {
+			continue
+		}
+		return m
+	}
+	return ""
+}
+
+func extractCodeBody(content string) string {
+	fenced := regexp.MustCompile("```(?:[A-Za-z0-9_+-]+)?\\s*([\\s\\S]*?)```")
+	blocks := fenced.FindAllStringSubmatch(content, -1)
+	if len(blocks) > 0 {
+		best := ""
+		for _, block := range blocks {
+			if len(block) < 2 {
+				continue
+			}
+			candidate := strings.TrimSpace(block[1])
+			if len(candidate) > len(best) {
+				best = candidate
+			}
+		}
+		if best != "" {
+			return best
+		}
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) >= 4 {
+		if strings.HasPrefix(strings.TrimSpace(lines[0]), "#") {
+			return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+		}
+	}
+
+	return ""
+}
+
+func parseBashCodeBlocks(content string, ordinalStart int) []agent.ToolCallRequest {
+	re := regexp.MustCompile("(?is)```(?:bash|sh)\\s*([\\s\\S]*?)```")
+	matches := re.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	calls := make([]agent.ToolCallRequest, 0, len(matches))
+	nextOrdinal := ordinalStart
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		block := strings.TrimSpace(match[1])
+		if block == "" {
+			continue
+		}
+
+		lines := strings.Split(block, "\n")
+		cleaned := make([]string, 0, len(lines))
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "$ ") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "$ "))
+			}
+			if line == "" {
+				continue
+			}
+			cleaned = append(cleaned, line)
+		}
+		if len(cleaned) == 0 {
+			continue
+		}
+
+		script := strings.Join(cleaned, "\n")
+		argBytes, _ := json.Marshal(map[string]any{
+			"command": "bash",
+			"args":    []string{"-lc", script},
+		})
+		calls = append(calls, agent.ToolCallRequest{
+			ID:        fmt.Sprintf("tool-bash-%d", nextOrdinal),
+			Name:      "shell.exec",
+			Arguments: argBytes,
+		})
+		nextOrdinal++
+	}
+
+	return calls
+}
+
+func removeFencedCodeBlocks(content string) string {
+	re := regexp.MustCompile("```(?:[A-Za-z0-9_+-]+)?\\s*[\\s\\S]*?```")
+	return re.ReplaceAllString(content, "")
+}
+
 func parseShellSnippets(content string, ordinalStart int) []agent.ToolCallRequest {
-	listRe := regexp.MustCompile(`(?m)^\s*ls(?:\s+-[A-Za-z]+)*\s*(.*?)\s*$`)
-	catRe := regexp.MustCompile(`(?m)^\s*cat\s+([^\s]+)\s*$`)
+	listRe := regexp.MustCompile(`(?m)^\s*(?:\$\s*)?ls(?:\s+-[A-Za-z]+)*\s*(.*?)\s*$`)
+	catRe := regexp.MustCompile(`(?m)^\s*(?:\$\s*)?cat\s+([^\s]+)\s*$`)
 
 	calls := make([]agent.ToolCallRequest, 0, 4)
 	nextOrdinal := ordinalStart
@@ -484,11 +704,8 @@ func parseJSONToolCall(raw string, ordinal int) (agent.ToolCallRequest, bool) {
 		return agent.ToolCallRequest{}, false
 	}
 
-	toolName := strings.TrimSpace(firstString(obj, "tool_name", "tool", "tool_code", "name", "function", "function_name"))
-	if toolName == "" {
-		return agent.ToolCallRequest{}, false
-	}
-	if !regexp.MustCompile(`^(fs|code|shell|time)\.\w+$`).MatchString(toolName) {
+	toolName, ok := canonicalToolName(firstString(obj, "tool_name", "tool", "tool_code", "name", "function", "function_name"))
+	if !ok || toolName == "" {
 		return agent.ToolCallRequest{}, false
 	}
 
@@ -603,7 +820,10 @@ func parseFunctionCall(content string) *agent.ToolCallRequest {
 		return nil
 	}
 
-	toolName := strings.TrimSpace(matches[1])
+	toolName, ok := canonicalToolName(matches[1])
+	if !ok {
+		return nil
+	}
 	argsStr := ""
 	if len(matches) >= 3 {
 		argsStr = matches[2]
@@ -678,4 +898,16 @@ func providerEndpoint(cfg config.Config, provider string) (config.ProviderEndpoi
 	default:
 		return config.ProviderEndpointConfig{}, fmt.Errorf("unsupported provider: %s", provider)
 	}
+}
+
+func canonicalToolName(name string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	if key == "" {
+		return "", false
+	}
+	canonical, ok := toolNameAliases[key]
+	if !ok {
+		return "", false
+	}
+	return canonical, true
 }

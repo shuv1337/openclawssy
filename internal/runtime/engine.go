@@ -244,7 +244,7 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 
 func (e *Engine) loadPromptDocs(agentID string) ([]agent.ArtifactDoc, error) {
 	agentRoot := filepath.Join(e.agentsDir, agentID)
-	docs := make([]agent.ArtifactDoc, 0, len(promptDocOrder)+1)
+	docs := make([]agent.ArtifactDoc, 0, len(promptDocOrder)+2)
 	for _, name := range promptDocOrder {
 		path := filepath.Join(agentRoot, name)
 		data, err := os.ReadFile(path)
@@ -257,14 +257,19 @@ func (e *Engine) loadPromptDocs(agentID string) ([]agent.ArtifactDoc, error) {
 		docs = append(docs, agent.ArtifactDoc{Name: name, Content: string(data)})
 	}
 	docs = append(docs, agent.ArtifactDoc{Name: "RUNTIME_CONTEXT.md", Content: runtimeContextDoc(e.workspaceDir)})
+	docs = append(docs, agent.ArtifactDoc{Name: "TOOL_CALLING_BEST_PRACTICES.md", Content: toolCallingBestPracticesDoc()})
 	return docs, nil
 }
 
 func runtimeContextDoc(workspaceDir string) string {
 	return fmt.Sprintf(
-		"# RUNTIME_CONTEXT\n\n- Workspace root: %s\n- File tools (fs.read/fs.list/fs.write/fs.edit/code.search) can only access paths inside workspace root.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy.\n- If the user asks about files in home directory, explain this limitation and offer to list the workspace instead.\n- Keep responses task-focused; do not mention HANDOFF/SPECPLAN/DEVPLAN unless the user explicitly asks about them.\n",
+		"# RUNTIME_CONTEXT\n\n- Workspace root: %s\n- File tools (fs.read/fs.list/fs.write/fs.edit/code.search) can only access paths inside workspace root.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy.\n- If shell.exec is enabled by policy, run shell commands through `bash -lc` in shell.exec args.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy even when using shell.exec.\n- If the user asks about files in home directory, explain this limitation and offer to list the workspace instead.\n- Keep responses task-focused; do not mention HANDOFF/SPECPLAN/DEVPLAN unless the user explicitly asks about them.\n",
 		workspaceDir,
 	)
+}
+
+func toolCallingBestPracticesDoc() string {
+	return "# TOOL_CALLING_BEST_PRACTICES\n\n- Use only registered tool names: fs.read, fs.list, fs.write, fs.edit, code.search, time.now, shell.exec.\n- Preferred format for tool calls is a fenced JSON object with tool_name and arguments.\n- Example:\n```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```\n- For bash commands use shell.exec with command=`bash` and args=[\"-lc\", \"<script>\"].\n- Do not invent tool names (for example time.sleep is invalid).\n- Do not claim file edits or command results until a matching tool.result is observed.\n- Keep one clear tool call at a time, then continue after reading the result.\n"
 }
 
 type RegistryExecutor struct {
@@ -284,6 +289,7 @@ func (r *RegistryExecutor) Execute(ctx context.Context, call agent.ToolCallReque
 			return agent.ToolCallResult{ID: call.ID}, fmt.Errorf("runtime: invalid tool args: %w", err)
 		}
 	}
+	args = normalizeToolArgs(call.Name, args)
 
 	res, err := r.Registry.Execute(ctx, r.AgentID, call.Name, r.Workspace, args)
 	if err != nil {
@@ -294,6 +300,170 @@ func (r *RegistryExecutor) Execute(ctx context.Context, call agent.ToolCallReque
 		return agent.ToolCallResult{ID: call.ID}, err
 	}
 	return agent.ToolCallResult{ID: call.ID, Output: string(b)}, nil
+}
+
+func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
+	if args == nil {
+		args = map[string]any{}
+	}
+
+	ensurePath := func() {
+		if getStringArg(args, "path") != "" {
+			args["path"] = sanitizePathArg(getStringArg(args, "path"))
+			return
+		}
+		for _, key := range []string{"file", "filename", "target", "name"} {
+			if value := getStringArg(args, key); value != "" {
+				args["path"] = sanitizePathArg(value)
+				return
+			}
+		}
+	}
+
+	switch toolName {
+	case "fs.list":
+		ensurePath()
+		if getStringArg(args, "path") == "" {
+			args["path"] = "."
+		}
+	case "fs.read":
+		ensurePath()
+	case "fs.write":
+		ensurePath()
+		if getStringArg(args, "content") == "" {
+			for _, key := range []string{"text", "body", "code", "value", "data", "newText"} {
+				if value := getStringArg(args, key); value != "" {
+					args["content"] = value
+					break
+				}
+			}
+		}
+		if getStringArg(args, "content") == "" {
+			path := getStringArg(args, "path")
+			if idx := strings.Index(path, ","); idx > 0 {
+				pathPart := strings.TrimSpace(path[:idx])
+				rest := strings.TrimSpace(path[idx+1:])
+				pathPart = trimMatchingQuotes(pathPart)
+				pathPart = strings.Trim(pathPart, `"'`)
+				rest = strings.TrimSpace(strings.TrimPrefix(rest, "\"\"\""))
+				rest = strings.TrimSpace(strings.TrimSuffix(rest, "\"\"\""))
+				rest = trimMatchingQuotes(rest)
+				if pathPart != "" {
+					args["path"] = pathPart
+				}
+				if rest != "" {
+					args["content"] = rest
+				}
+			}
+		}
+	case "fs.edit":
+		ensurePath()
+		if getStringArg(args, "old") == "" {
+			for _, key := range []string{"find", "from"} {
+				if value := getStringArg(args, key); value != "" {
+					args["old"] = value
+					break
+				}
+			}
+		}
+		if getStringArg(args, "new") == "" {
+			for _, key := range []string{"replace", "to", "newText", "value"} {
+				if value := getStringArg(args, key); value != "" {
+					args["new"] = value
+					break
+				}
+			}
+		}
+	case "code.search":
+		if getStringArg(args, "pattern") == "" {
+			if value := getStringArg(args, "query"); value != "" {
+				args["pattern"] = value
+			}
+		}
+	case "shell.exec":
+		if getStringArg(args, "command") == "" {
+			if value := getStringArg(args, "cmd"); value != "" {
+				args["command"] = value
+			} else if value := getStringArg(args, "path"); value != "" {
+				args["command"] = value
+			}
+		}
+		command := getStringArg(args, "command")
+		if command != "" && strings.Contains(command, " ") && len(getStringSliceArg(args, "args")) == 0 {
+			args["command"] = "bash"
+			args["args"] = []string{"-lc", command}
+		}
+	}
+
+	return args
+}
+
+func getStringArg(args map[string]any, key string) string {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(s)
+}
+
+func getStringSliceArg(args map[string]any, key string) []string {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil
+	}
+	out := make([]string, 0)
+	switch raw := v.(type) {
+	case []string:
+		for _, item := range raw {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+	case []any:
+		for _, item := range raw {
+			s := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func trimMatchingQuotes(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) < 2 {
+		return v
+	}
+	if (strings.HasPrefix(v, `"`) && strings.HasSuffix(v, `"`)) || (strings.HasPrefix(v, `'`) && strings.HasSuffix(v, `'`)) {
+		return strings.TrimSpace(v[1 : len(v)-1])
+	}
+	return v
+}
+
+func sanitizePathArg(path string) string {
+	path = strings.TrimSpace(path)
+	path = trimMatchingQuotes(path)
+	path = strings.Trim(path, "`")
+	if path == "```" {
+		return ""
+	}
+	if strings.HasPrefix(path, "```") {
+		path = strings.TrimPrefix(path, "```")
+	}
+	if strings.HasSuffix(path, "```") {
+		path = strings.TrimSuffix(path, "```")
+	}
+	path = strings.TrimSpace(path)
+	if path == "" || path == "-" {
+		return ""
+	}
+	return path
 }
 
 func (e *Engine) allowedTools(cfg config.Config) []string {
