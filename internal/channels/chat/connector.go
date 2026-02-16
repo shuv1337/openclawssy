@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -35,7 +34,7 @@ type QueuedRun struct {
 	Status string
 }
 
-type QueueFunc func(ctx context.Context, agentID, message, source string) (QueuedRun, error)
+type QueueFunc func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error)
 
 type Connector struct {
 	Allowlist      *Allowlist
@@ -135,16 +134,11 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		return Result{}, err
 	}
 
-	history, err := c.Store.ReadRecentMessages(session.SessionID, chatstore.ClampHistoryCount(c.HistoryLimit, 50))
-	if err != nil {
-		return Result{}, err
-	}
 	if err := c.Store.AppendMessage(session.SessionID, chatstore.Message{Role: "user", Content: msg.Text}); err != nil {
 		return Result{}, err
 	}
 
-	queuedMessage := prependHistory(history, msg.Text)
-	queued, err := c.Queue(ctx, agentID, queuedMessage, source)
+	queued, err := c.Queue(ctx, agentID, msg.Text, source, session.SessionID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -183,35 +177,4 @@ func (c *Connector) resolveOrCreateActiveSession(agentID, source, userID, roomID
 		return c.createAndSetActiveSession(agentID, source, userID, roomID)
 	}
 	return session, nil
-}
-
-func prependHistory(history []chatstore.Message, message string) string {
-	if len(history) == 0 {
-		return message
-	}
-
-	sorted := append([]chatstore.Message(nil), history...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].TS.Equal(sorted[j].TS) {
-			return i < j
-		}
-		return sorted[i].TS.Before(sorted[j].TS)
-	})
-
-	var b strings.Builder
-	b.WriteString("CHAT_HISTORY:\n")
-	for _, item := range sorted {
-		role := strings.ToUpper(strings.TrimSpace(item.Role))
-		if role == "" {
-			role = "USER"
-		}
-		b.WriteString("[")
-		b.WriteString(role)
-		b.WriteString("] ")
-		b.WriteString(strings.TrimSpace(item.Content))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(message)
-	return b.String()
 }

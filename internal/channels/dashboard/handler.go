@@ -2,10 +2,14 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	httpchannel "openclawssy/internal/channels/http"
+	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
 	"openclawssy/internal/secrets"
 )
@@ -24,6 +28,9 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/status", h.getStatus)
 	mux.HandleFunc("/api/admin/config", h.handleConfig)
 	mux.HandleFunc("/api/admin/secrets", h.handleSecrets)
+	mux.HandleFunc("/api/admin/chat/sessions", h.listChatSessions)
+	mux.HandleFunc("/api/admin/chat/sessions/", h.chatSessionMessages)
+	mux.HandleFunc("/api/admin/debug/runs/", h.getRunTrace)
 }
 
 func (h *Handler) serveDashboard(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +148,125 @@ func (h *Handler) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
+func (h *Handler) getRunTrace(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/admin/debug/runs/")
+	if suffix == r.URL.Path || !strings.HasSuffix(suffix, "/trace") {
+		http.NotFound(w, r)
+		return
+	}
+	runID := strings.TrimSpace(strings.TrimSuffix(suffix, "/trace"))
+	if runID == "" || strings.Contains(runID, "/") {
+		http.Error(w, "invalid run id", http.StatusBadRequest)
+		return
+	}
+
+	run, err := h.store.Get(r.Context(), runID)
+	if err != nil {
+		if errors.Is(err, httpchannel.ErrRunNotFound) {
+			http.Error(w, "run not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load run", http.StatusInternalServerError)
+		return
+	}
+	if len(run.Trace) == 0 {
+		http.Error(w, "trace not available for run", http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"run_id": run.ID,
+		"trace":  run.Trace,
+	})
+}
+
+func (h *Handler) listChatSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	store, err := chatstore.NewStore(filepath.Join(h.rootDir, ".openclawssy", "agents"))
+	if err != nil {
+		http.Error(w, "failed to open chat store", http.StatusInternalServerError)
+		return
+	}
+
+	q := r.URL.Query()
+	agentID := strings.TrimSpace(q.Get("agent_id"))
+	if agentID == "" {
+		agentID = "default"
+	}
+	userID := strings.TrimSpace(q.Get("user_id"))
+	if userID == "" {
+		userID = "dashboard_user"
+	}
+	roomID := strings.TrimSpace(q.Get("room_id"))
+	if roomID == "" {
+		roomID = "dashboard"
+	}
+	channel := strings.TrimSpace(q.Get("channel"))
+	if channel == "" {
+		channel = "dashboard"
+	}
+
+	sessions, err := store.ListSessions(agentID, userID, roomID, channel)
+	if err != nil {
+		http.Error(w, "failed to list sessions", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"sessions": sessions})
+}
+
+func (h *Handler) chatSessionMessages(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/admin/chat/sessions/")
+	if suffix == r.URL.Path || !strings.HasSuffix(suffix, "/messages") {
+		http.NotFound(w, r)
+		return
+	}
+	sessionID := strings.TrimSpace(strings.TrimSuffix(suffix, "/messages"))
+	if sessionID == "" || strings.Contains(sessionID, "/") {
+		http.Error(w, "invalid session id", http.StatusBadRequest)
+		return
+	}
+
+	limit := 200
+	if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 1 || parsed > 1000 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	store, err := chatstore.NewStore(filepath.Join(h.rootDir, ".openclawssy", "agents"))
+	if err != nil {
+		http.Error(w, "failed to open chat store", http.StatusInternalServerError)
+		return
+	}
+	msgs, err := store.ReadRecentMessages(sessionID, limit)
+	if err != nil {
+		if errors.Is(err, chatstore.ErrSessionNotFound) {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to load messages", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"session_id": sessionID, "messages": msgs})
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -165,6 +291,29 @@ body{font-family:ui-monospace,Menlo,monospace;background:#0b1020;color:#e8eefc;m
 .chat-input input{flex:1;padding:12px;border:1px solid #333;background:#151b2e;color:#e8eefc;border-radius:6px;font-size:1em}
 .chat-input button{padding:12px 24px;background:#2a5;border:none;color:#fff;border-radius:6px;cursor:pointer;font-weight:bold}
 .chat-input button:hover{background:#3b6}
+.chat-controls{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px 0}
+.chat-controls button{padding:8px 12px;background:#355d7f;color:#fff;border:none;border-radius:6px;cursor:pointer}
+.chat-controls input{padding:8px 10px;border:1px solid #333;background:#151b2e;color:#e8eefc;border-radius:6px;min-width:250px}
+.tool-pane{border:1px solid #2a3447;background:#111a2e;border-radius:8px;padding:10px;margin:0 0 10px 0;max-height:160px;overflow-y:auto}
+.tool-pane h4{margin:0;color:#8fb8dc;font-size:0.85em}
+.tool-item{font-size:0.8em;line-height:1.4;padding:6px 0;border-top:1px solid #22324a}
+.tool-item:first-of-type{border-top:none;padding-top:0}
+.tool-empty{color:#7187a0;font-size:0.8em}
+.tool-preview{color:#d6e2f0}
+.tool-full{margin-top:6px;padding:8px;background:#0c1426;border:1px solid #1f3048;border-radius:4px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.session-pane{border:1px solid #2a3447;background:#111a2e;border-radius:8px;padding:10px;margin:0 0 10px 0;max-height:180px;overflow-y:auto}
+.session-pane h4{margin:0;color:#8fb8dc;font-size:0.85em}
+.session-item{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:0.8em;line-height:1.3;padding:6px 0;border-top:1px solid #22324a}
+.session-item:first-of-type{border-top:none;padding-top:0}
+.session-meta{color:#90a7c0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-actions button{padding:4px 8px;background:#2f5476;border:none;color:#e8eefc;border-radius:4px;cursor:pointer}
+.session-actions button:hover{background:#3a658e}
+.pane-header{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.pane-controls{display:flex;align-items:center;gap:6px;flex:1;justify-content:flex-end;flex-wrap:wrap}
+.pane-search{min-width:150px;max-width:240px;flex:1}
+.pane-search input{width:100%;padding:6px 8px;border:1px solid #2c3b55;background:#0b1020;color:#dbe7f4;border-radius:4px;font-size:0.78em}
+.pane-select select{padding:6px 8px;border:1px solid #2c3b55;background:#0b1020;color:#dbe7f4;border-radius:4px;font-size:0.76em}
+.session-active-tag{display:inline-block;margin-left:6px;padding:2px 6px;background:#204966;border:1px solid #356a91;border-radius:10px;color:#d9ecff;font-size:0.72em}
 .status-section{background:#151b2e;padding:15px 20px;border-top:1px solid #2a3447;max-height:200px;overflow-y:auto}
 .status-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .status-header h3{margin:0;font-size:0.9em;color:#8a9}
@@ -214,9 +363,17 @@ summary{cursor:pointer;color:#9db2d4}
 <div class="main-content">
 <div class="chat-section">
 <div class="chat-container" id="chatHistory"></div>
+<div class="tool-pane" id="toolPane"><div class="pane-header"><h4>Tool Activity</h4><div class="pane-controls"><div class="pane-select"><select id="toolStatusFilter" onchange="renderToolActivity()"><option value="all">All</option><option value="errors">Errors</option><option value="output">Output</option></select></div><div class="pane-search"><input id="toolFilter" placeholder="Filter tool activity" oninput="renderToolActivity()"/></div></div></div><div id="toolHistory" class="tool-empty">No tool activity yet.</div></div>
+<div class="session-pane"><div class="pane-header"><h4>Recent Sessions</h4><div class="pane-controls"><div class="pane-select"><select id="sessionSortMode" onchange="renderSessionList()"><option value="recent">Recent</option><option value="oldest">Oldest</option><option value="active">Active First</option></select></div><div class="pane-search"><input id="sessionFilter" placeholder="Filter sessions" oninput="renderSessionList()"/></div></div></div><div id="sessionList" class="tool-empty">No sessions yet.</div></div>
+<div class="chat-controls">
+<button onclick="startNewChat()">New chat</button>
+<button onclick="listChats()">List chats</button>
+<button onclick="refreshSessions()">Refresh sessions</button>
+<input id="resumeSessionID" placeholder="session id for /resume"/>
+<button onclick="resumeChat()">Resume</button>
+</div>
 <div class="chat-input">
 <input id="chatMessage" placeholder="Type your message and press Enter..." onkeypress="if(event.key==='Enter')sendChat()"/>
-<button onclick="startNewChat()">New chat</button>
 <button onclick="sendChat()">Send</button>
 </div>
 </div>
@@ -338,6 +495,9 @@ summary{cursor:pointer;color:#9db2d4}
 
 <script>
 let chatMessages=[];
+let toolActivity=[];
+let knownSessions=[];
+let currentActiveSessionID='';
 let currentConfig=null;
 
 function byId(id){return document.getElementById(id);}
@@ -580,6 +740,11 @@ text=text.replace(/\n/g,'\u003cbr\u003e');
 return text;
 }
 
+function normalizeForSearch(value){
+if(value===undefined||value===null)return'';
+return String(value).toLowerCase();
+}
+
 function renderChat(){
 const container=byId('chatHistory');
 container.innerHTML=chatMessages.map(function(m){
@@ -591,14 +756,201 @@ return'<div class="chat-message '+roleClass+'"><strong>'+roleLabel+':</strong><b
 container.scrollTop=container.scrollHeight;
 }
 
-async function pollRun(runId){
-for(let i=0;i<60;i++){
+function renderToolActivity(){
+const container=byId('toolHistory');
+if(!container)return;
+const filterInput=byId('toolFilter');
+const query=normalizeForSearch(filterInput?filterInput.value.trim():'');
+const statusMode=((byId('toolStatusFilter')&&byId('toolStatusFilter').value)||'all').toLowerCase();
+if(toolActivity.length===0){
+container.className='tool-empty';
+container.textContent='No tool activity yet.';
+return;
+}
+const filtered=toolActivity.filter(function(item){
+if(statusMode==='errors' && !(item&&item.error))return false;
+if(statusMode==='output' && (item&&item.error))return false;
+if(!query)return true;
+const blob=normalizeForSearch((item&&item.tool)||'')+' '+normalizeForSearch((item&&item.callID)||'')+' '+normalizeForSearch((item&&item.output)||'')+' '+normalizeForSearch((item&&item.error)||'');
+return blob.indexOf(query)!==-1;
+});
+if(filtered.length===0){
+container.className='tool-empty';
+container.textContent='No tool activity matches this filter.';
+return;
+}
+container.className='';
+container.innerHTML=filtered.slice(-10).map(function(item){
+const tool=item.tool||'unknown.tool';
+const callID=item.callID?(' ['+item.callID+']'):'';
+const label=item.error?'error':'output';
+const payload=item.error?item.error:item.output;
+return '<div class="tool-item"><strong>'+tool+callID+'</strong><br>'+renderToolPayload(label,payload)+'</div>';
+}).join('');
+}
+
+function renderToolPayload(label,payload){
+if(!payload)return formatContent(label+': (empty)');
+const value=String(payload);
+if(value.length<=180){
+return formatContent(label+': '+value);
+}
+const shortText=formatContent(label+': '+value.slice(0,180)+'...');
+const fullText=formatContent(value);
+return '<div class="tool-preview">'+shortText+'</div><details><summary>Show full '+label+'</summary><div class="tool-full">'+fullText+'</div></details>';
+}
+
+function compactToolText(value,maxLen){
+if(!value)return '';
+const v=String(value).trim();
+if(v.length<=maxLen)return v;
+return v.slice(0,maxLen)+'...';
+}
+
+function appendToolActivityFromRun(run){
+if(!run||!run.trace||!Array.isArray(run.trace.tool_execution_results))return;
+run.trace.tool_execution_results.forEach(function(item){
+if(!item||typeof item!=='object')return;
+toolActivity.push({
+tool:item.tool||'unknown.tool',
+callID:item.tool_call_id||'',
+output:compactToolText(item.output||'',5000),
+error:compactToolText(item.error||'',5000)
+});
+});
+renderToolActivity();
+}
+
+function toSessionLine(session){
+const ts=session&&session.updated_at?new Date(session.updated_at):null;
+const when=(ts&& !Number.isNaN(ts.getTime()))?ts.toLocaleString():'unknown time';
+return {id:session.session_id||'',label:(session.session_id||'unknown')+' - '+when};
+}
+
+function renderSessionList(){
+const container=byId('sessionList');
+if(!container)return;
+if(!Array.isArray(knownSessions)||knownSessions.length===0){
+container.className='tool-empty';
+container.textContent='No sessions yet.';
+return;
+}
+const filterInput=byId('sessionFilter');
+const query=normalizeForSearch(filterInput?filterInput.value.trim():'');
+const filteredSessions=knownSessions.filter(function(session){
+if(!query)return true;
+const line=toSessionLine(session);
+const blob=normalizeForSearch(line.id)+' '+normalizeForSearch(line.label)+' '+normalizeForSearch(session&&session.title?session.title:'');
+return blob.indexOf(query)!==-1;
+});
+const sortMode=((byId('sessionSortMode')&&byId('sessionSortMode').value)||'recent').toLowerCase();
+const sorted=filteredSessions.slice().sort(function(a,b){
+const aTS=(a&&a.updated_at)?new Date(a.updated_at).getTime():0;
+const bTS=(b&&b.updated_at)?new Date(b.updated_at).getTime():0;
+if(sortMode==='oldest'){
+return aTS-bTS;
+}
+if(sortMode==='active'){
+const aActive=(a&&a.session_id===currentActiveSessionID)?1:0;
+const bActive=(b&&b.session_id===currentActiveSessionID)?1:0;
+if(aActive!==bActive)return bActive-aActive;
+}
+return bTS-aTS;
+});
+if(filteredSessions.length===0){
+container.className='tool-empty';
+container.textContent='No sessions match this filter.';
+return;
+}
+container.className='';
+container.innerHTML=sorted.slice(0,20).map(function(session){
+const line=toSessionLine(session);
+if(!line.id)return '';
+const activeTag=(line.id===currentActiveSessionID)?'<span class="session-active-tag">active</span>':'';
+const actionLabel=(line.id===currentActiveSessionID)?'Reopen':'Open';
+return '<div class="session-item"><div class="session-meta">'+line.label+activeTag+'</div><div class="session-actions"><button onclick="openSession(\''+line.id+'\')">'+actionLabel+'</button></div></div>';
+}).join('');
+}
+
+function maybeExtractSessionID(responseText){
+const text=String(responseText||'').trim();
+if(!text)return'';
+let match=text.match(/^Started new chat:\s*(\S+)/i);
+if(match&&match[1])return match[1];
+match=text.match(/^Resumed chat:\s*(\S+)/i);
+if(match&&match[1])return match[1];
+return'';
+}
+
+async function refreshSessions(){
+const data=await j('/api/admin/chat/sessions?agent_id=default&user_id=dashboard_user&room_id=dashboard&channel=dashboard');
+if(!data||data.error||!Array.isArray(data.sessions)){
+return;
+}
+knownSessions=data.sessions;
+renderSessionList();
+}
+
+async function loadSessionMessages(sessionID){
+const data=await j('/api/admin/chat/sessions/'+encodeURIComponent(sessionID)+'/messages?limit=200');
+if(!data||data.error||!Array.isArray(data.messages)){
+return;
+}
+chatMessages=[];
+toolActivity=[];
+data.messages.forEach(function(msg){
+if(!msg||typeof msg!=='object')return;
+if(msg.role==='tool'){
+let parsed={};
+try{parsed=JSON.parse(msg.content||'{}');}catch(e){parsed={};}
+toolActivity.push({
+tool:msg.tool_name||parsed.tool||'unknown.tool',
+callID:msg.tool_call_id||parsed.id||'',
+output:compactToolText(parsed.output||msg.content||'',5000),
+error:compactToolText(parsed.error||'',5000)
+});
+return;
+}
+if(msg.role==='assistant' || msg.role==='user'){
+chatMessages.push({role:msg.role,content:msg.content||''});
+}
+});
+renderToolActivity();
+renderChat();
+}
+
+async function openSession(sessionID){
+if(!sessionID)return;
+currentActiveSessionID=sessionID;
+byId('resumeSessionID').value=sessionID;
+await sendChatWithText('/resume '+sessionID);
+await loadSessionMessages(sessionID);
+}
+
+async function pollRun(runId,maxSeconds){
+const timeoutSeconds=(typeof maxSeconds==='number'&&maxSeconds>0)?maxSeconds:120;
+for(let i=0;i<timeoutSeconds;i++){
 await new Promise(function(resolve){setTimeout(resolve,1000);});
 const run=await j('/v1/runs/'+runId);
-if(run.status==='completed'&&run.output)return run.output;
-if(run.status==='failed')return'Error: '+(run.error||'Run failed');
+if(run.status==='completed')return run;
+if(run.status==='failed')return run;
 }
-return'Timeout waiting for response';
+return{status:'running',id:runId,error:'Still running after '+timeoutSeconds+'s'};
+}
+
+async function continuePollingRun(runId,thinkingIdx){
+const run=await pollRun(runId,240);
+if(run.status==='failed'){
+chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+(run.error||'Run failed')};
+}else if(run.status==='completed'){
+const output=(run.output&&run.output.trim())?run.output:'(completed with no output)';
+chatMessages[thinkingIdx]={role:'assistant',content:output};
+appendToolActivityFromRun(run);
+}else{
+chatMessages[thinkingIdx]={role:'assistant',content:'Run '+runId+' is still running. Use Status > Refresh to check progress.'};
+}
+renderChat();
+loadStatus();
 }
 
 async function sendChat(){
@@ -607,6 +959,19 @@ await sendChatWithText('');
 
 async function startNewChat(){
 await sendChatWithText('/new');
+}
+
+async function listChats(){
+await sendChatWithText('/chats');
+}
+
+async function resumeChat(){
+const sessionID=byId('resumeSessionID').value.trim();
+if(!sessionID){
+alert('Session id required to resume chat');
+return;
+}
+await sendChatWithText('/resume '+sessionID);
 }
 
 async function sendChatWithText(forcedMessage){
@@ -624,12 +989,33 @@ const result=await j('/v1/chat/messages',{method:'POST',body:JSON.stringify({use
 if(result.error){
 chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+result.error};
 }else if(result.id){
-const output=await pollRun(result.id);
+const run=await pollRun(result.id,120);
+if(run.status==='failed'){
+chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+(run.error||'Run failed')};
+}else if(run.status==='running'){
+chatMessages[thinkingIdx]={role:'assistant',content:'Run '+result.id+' is still processing. I will keep polling and update this message.'};
+continuePollingRun(result.id,thinkingIdx);
+}else{
+const output=(run.output&&run.output.trim())?run.output:'(completed with no output)';
 chatMessages[thinkingIdx]={role:'assistant',content:output};
+appendToolActivityFromRun(run);
+}
 }else if(result.response){
 chatMessages[thinkingIdx]={role:'assistant',content:result.response};
+const extractedSessionID=maybeExtractSessionID(result.response);
+if(extractedSessionID){
+currentActiveSessionID=extractedSessionID;
+if(byId('resumeSessionID'))byId('resumeSessionID').value=extractedSessionID;
+}
 }else{
 chatMessages[thinkingIdx]={role:'assistant',content:JSON.stringify(result)};
+}
+if(message==='/new' && !result.error){
+toolActivity=[];
+renderToolActivity();
+}
+if(message==='/new' || message==='/resume' || message.indexOf('/resume ')===0 || message==='/chats'){
+await refreshSessions();
 }
 renderChat();
 loadStatus();
@@ -649,6 +1035,8 @@ el.addEventListener('change',updateRawPreview);
 }
 
 wireFormPreviewUpdates();
+renderToolActivity();
+refreshSessions();
 loadStatus();
 loadConfig();
 setInterval(loadStatus,30000);

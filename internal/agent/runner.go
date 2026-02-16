@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -10,9 +12,14 @@ var (
 	ErrModelRequired            = errors.New("agent runner requires model")
 	ErrToolExecutorRequired     = errors.New("agent runner requires tool executor for tool calls")
 	ErrToolIterationCapExceeded = errors.New("agent runner tool iteration cap exceeded")
+	ErrRepeatedToolCall         = errors.New("agent runner blocked repeated tool call")
 )
 
-const DefaultToolIterationCap = 8
+const (
+	DefaultToolIterationCap = 8
+	DefaultToolTimeout      = 45 * time.Second
+	RepeatedToolFailAfter   = 3
+)
 
 // Runner executes the model/tool loop for a single run.
 type Runner struct {
@@ -44,14 +51,29 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	out := RunOutput{StartedAt: time.Now().UTC()}
 	out.Prompt = assembler(input.ArtifactDocs, input.PerFileByteLimit)
 
+	messages := append([]ChatMessage(nil), input.Messages...)
+	if len(messages) == 0 {
+		messages = []ChatMessage{{Role: "user", Content: input.Message}}
+	}
+
 	toolResults := make([]ToolCallResult, 0)
 	toolIterations := 0
+	lastToolCallKey := ""
+	lastToolCallHadError := false
+	repeatedToolBlocks := 0
+	toolTimeout := time.Duration(input.ToolTimeoutMS) * time.Millisecond
+	if toolTimeout <= 0 {
+		toolTimeout = DefaultToolTimeout
+	}
 
 	for {
 		resp, err := r.Model.Generate(ctx, ModelRequest{
-			Prompt:      out.Prompt,
-			Message:     input.Message,
-			ToolResults: append([]ToolCallResult(nil), toolResults...),
+			SystemPrompt: out.Prompt,
+			Messages:     append([]ChatMessage(nil), messages...),
+			AllowedTools: append([]string(nil), input.AllowedTools...),
+			Prompt:       out.Prompt,
+			Message:      input.Message,
+			ToolResults:  append([]ToolCallResult(nil), toolResults...),
 		})
 		if err != nil {
 			out.CompletedAt = time.Now().UTC()
@@ -75,12 +97,35 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 
 		for _, call := range resp.ToolCalls {
+			callKey := call.Name + "|" + string(call.Arguments)
+			if callKey != "|" && callKey == lastToolCallKey && !lastToolCallHadError {
+				repeatedToolBlocks++
+				reason := fmt.Sprintf("repeated tool call blocked (%d/%d): same tool+arguments as previous successful call", repeatedToolBlocks, RepeatedToolFailAfter)
+				record := ToolCallRecord{
+					Request: call,
+					Result:  ToolCallResult{ID: call.ID, Error: reason},
+				}
+				now := time.Now().UTC()
+				record.StartedAt = now
+				record.CompletedAt = now
+				out.ToolCalls = append(out.ToolCalls, record)
+				toolResults = append(toolResults, record.Result)
+				if repeatedToolBlocks >= RepeatedToolFailAfter {
+					out.CompletedAt = time.Now().UTC()
+					return out, ErrRepeatedToolCall
+				}
+				continue
+			}
+			repeatedToolBlocks = 0
+
 			record := ToolCallRecord{
 				Request:   call,
 				StartedAt: time.Now().UTC(),
 			}
 
-			result, execErr := r.ToolExecutor.Execute(ctx, call)
+			execCtx, cancel := context.WithTimeout(ctx, toolTimeout)
+			result, execErr := r.ToolExecutor.Execute(execCtx, call)
+			cancel()
 			if result.ID == "" {
 				result.ID = call.ID
 			}
@@ -93,6 +138,8 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 			out.ToolCalls = append(out.ToolCalls, record)
 			toolResults = append(toolResults, result)
+			lastToolCallKey = callKey
+			lastToolCallHadError = strings.TrimSpace(result.Error) != ""
 		}
 
 		toolIterations++

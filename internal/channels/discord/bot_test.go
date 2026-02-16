@@ -88,3 +88,31 @@ func TestWaitForTerminalRun(t *testing.T) {
 		}
 	})
 }
+
+func TestFormatToolActivity(t *testing.T) {
+	t.Run("renders tool summary", func(t *testing.T) {
+		trace := map[string]any{
+			"tool_execution_results": []any{
+				map[string]any{"tool": "fs.list", "tool_call_id": "tool-1", "output": `{"entries":["a.txt"]}`},
+				map[string]any{"tool": "fs.read", "tool_call_id": "tool-2", "error": "not found"},
+			},
+		}
+		out := formatToolActivity("run_1", trace)
+		if !strings.Contains(out, "Tool activity for run `run_1`:") {
+			t.Fatalf("unexpected header: %q", out)
+		}
+		if !strings.Contains(out, "1) fs.list [tool-1]") {
+			t.Fatalf("missing first tool line: %q", out)
+		}
+		if !strings.Contains(out, "2) fs.read [tool-2] -> error: not found") {
+			t.Fatalf("missing error line: %q", out)
+		}
+	})
+
+	t.Run("returns empty when no tools", func(t *testing.T) {
+		out := formatToolActivity("run_1", map[string]any{})
+		if out != "" {
+			t.Fatalf("expected empty summary, got %q", out)
+		}
+	})
+}

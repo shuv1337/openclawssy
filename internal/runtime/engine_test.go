@@ -2,10 +2,16 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"openclawssy/internal/chatstore"
+	"openclawssy/internal/config"
 )
 
 func TestEngineInitCreatesAgentArtifacts(t *testing.T) {
@@ -57,6 +63,12 @@ func TestEngineExecuteWritesRunBundle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(res.ArtifactPath, "output.json")); err != nil {
 		t.Fatalf("expected output bundle file: %v", err)
+	}
+	if res.Trace == nil {
+		t.Fatal("expected trace envelope in run result")
+	}
+	if _, ok := res.Trace["input_message_hash"]; !ok {
+		t.Fatalf("expected input_message_hash in trace, got %#v", res.Trace)
 	}
 }
 
@@ -150,5 +162,78 @@ func TestNormalizeToolArgsShellCommandFallbackToBashLC(t *testing.T) {
 	list, ok := args["args"].([]string)
 	if !ok || len(list) != 2 || list[0] != "-lc" || list[1] != "ls -la" {
 		t.Fatalf("unexpected shell args normalization: %#v", args["args"])
+	}
+}
+
+func TestExecuteWithInputUsesStructuredHistoryForSession(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	chat, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := chat.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := chat.AppendMessage(session.SessionID, chatstore.Message{Role: "user", Content: "list files in ."}); err != nil {
+		t.Fatalf("append user message: %v", err)
+	}
+	if err := chat.AppendMessage(session.SessionID, chatstore.Message{Role: "assistant", Content: "There are two files."}); err != nil {
+		t.Fatalf("append assistant message: %v", err)
+	}
+
+	var captured struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "done"}}}})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "create file foo.txt", Source: "dashboard", SessionID: session.SessionID})
+	if err != nil {
+		t.Fatalf("execute with input: %v", err)
+	}
+
+	if len(captured.Messages) < 4 {
+		t.Fatalf("expected system + 3 chat messages, got %d", len(captured.Messages))
+	}
+	if captured.Messages[1].Role != "user" || captured.Messages[1].Content != "list files in ." {
+		t.Fatalf("unexpected first history message: %+v", captured.Messages[1])
+	}
+	if captured.Messages[2].Role != "assistant" || captured.Messages[2].Content != "There are two files." {
+		t.Fatalf("unexpected assistant history message: %+v", captured.Messages[2])
+	}
+	if captured.Messages[len(captured.Messages)-1].Role != "user" || captured.Messages[len(captured.Messages)-1].Content != "create file foo.txt" {
+		t.Fatalf("expected current instruction as final user turn, got %+v", captured.Messages[len(captured.Messages)-1])
 	}
 }

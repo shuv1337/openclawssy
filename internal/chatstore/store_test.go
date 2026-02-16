@@ -2,6 +2,7 @@ package chatstore
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -192,5 +193,85 @@ func TestClampHistoryCount(t *testing.T) {
 	}
 	if got := ClampHistoryCount(500, 50); got != 50 {
 		t.Fatalf("expected clamp to 50, got %d", got)
+	}
+}
+
+func TestReadRecentMessagesSkipsMalformedLines(t *testing.T) {
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := store.AppendMessage(session.SessionID, Message{Role: "user", Content: "ok"}); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	msgPath := filepath.Join(agentsRoot, "default", "memory", "chats", session.SessionID, "messages.jsonl")
+	f, err := os.OpenFile(msgPath, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("open messages file: %v", err)
+	}
+	if _, err := f.WriteString("{not-json}\n"); err != nil {
+		t.Fatalf("write malformed line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close messages file: %v", err)
+	}
+
+	msgs, err := store.ReadRecentMessages(session.SessionID, 10)
+	if err != nil {
+		t.Fatalf("read recent messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected one valid message, got %d", len(msgs))
+	}
+	if msgs[0].Content != "ok" {
+		t.Fatalf("unexpected message: %+v", msgs[0])
+	}
+}
+
+func TestSessionMetaRecoversFromBackup(t *testing.T) {
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := store.AppendMessage(session.SessionID, Message{Role: "user", Content: "hello"}); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	metaPath := filepath.Join(agentsRoot, "default", "memory", "chats", session.SessionID, "meta.json")
+	bakPath := metaPath + ".bak"
+	metaBytes, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta: %v", err)
+	}
+	if err := os.WriteFile(bakPath, metaBytes, 0o600); err != nil {
+		t.Fatalf("write backup: %v", err)
+	}
+	if err := os.WriteFile(metaPath, []byte("{invalid-json}"), 0o600); err != nil {
+		t.Fatalf("corrupt meta: %v", err)
+	}
+
+	reloaded, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	got, err := reloaded.GetSession(session.SessionID)
+	if err != nil {
+		t.Fatalf("get session from backup: %v", err)
+	}
+	if got.SessionID != session.SessionID {
+		t.Fatalf("unexpected session loaded from backup: %+v", got)
 	}
 }

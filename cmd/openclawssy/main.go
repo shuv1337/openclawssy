@@ -106,7 +106,7 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 		return 1
 	}
 	schedulerExec := scheduler.NewExecutor(jobsStore, time.Second, func(agentID string, message string) {
-		_, _ = httpchannel.QueueRun(context.Background(), runStore, exec, agentID, message, "scheduler")
+		_, _ = httpchannel.QueueRun(context.Background(), runStore, exec, agentID, message, "scheduler", "")
 	})
 	schedulerExec.Start()
 	defer schedulerExec.Stop()
@@ -127,7 +127,7 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 				if err != nil {
 					return discord.RunStatus{}, err
 				}
-				return discord.RunStatus{Status: run.Status, Output: run.Output, Error: run.Error, ArtifactPath: run.ArtifactPath}, nil
+				return discord.RunStatus{Status: run.Status, Output: run.Output, Error: run.Error, ArtifactPath: run.ArtifactPath, Trace: run.Trace}, nil
 			},
 		)
 		if err != nil {
@@ -352,12 +352,12 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 
 type runtimeExecutor struct{ engine *runtime.Engine }
 
-func (e runtimeExecutor) Execute(ctx context.Context, agentID, message string) (httpchannel.ExecutionResult, error) {
-	res, err := e.engine.Execute(ctx, agentID, message)
+func (e runtimeExecutor) Execute(ctx context.Context, input httpchannel.ExecutionInput) (httpchannel.ExecutionResult, error) {
+	res, err := e.engine.ExecuteWithInput(ctx, runtime.ExecuteInput{AgentID: input.AgentID, Message: input.Message, Source: input.Source, SessionID: input.SessionID})
 	if err != nil {
-		return httpchannel.ExecutionResult{}, err
+		return httpchannel.ExecutionResult{Trace: res.Trace, Provider: res.Provider, Model: res.Model, ToolCalls: res.ToolCalls}, err
 	}
-	return httpchannel.ExecutionResult{Output: res.FinalText, ArtifactPath: res.ArtifactPath, DurationMS: res.DurationMS, ToolCalls: res.ToolCalls, Provider: res.Provider, Model: res.Model}, nil
+	return httpchannel.ExecutionResult{Output: res.FinalText, ArtifactPath: res.ArtifactPath, DurationMS: res.DurationMS, ToolCalls: res.ToolCalls, Provider: res.Provider, Model: res.Model, Trace: res.Trace}, nil
 }
 
 func buildSharedChatConnector(cfg config.Config, store httpchannel.RunStore, exec httpchannel.RunExecutor) (*chat.Connector, error) {
@@ -379,8 +379,8 @@ func buildSharedChatConnector(cfg config.Config, store httpchannel.RunStore, exe
 		DefaultAgentID: defaultAgentID,
 		Store:          chatStore,
 		HistoryLimit:   30,
-		Queue: func(ctx context.Context, agentID, message, source string) (chat.QueuedRun, error) {
-			run, err := httpchannel.QueueRun(ctx, store, exec, agentID, message, source)
+		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (chat.QueuedRun, error) {
+			run, err := httpchannel.QueueRun(ctx, store, exec, agentID, message, source, sessionID)
 			if err != nil {
 				return chat.QueuedRun{}, err
 			}

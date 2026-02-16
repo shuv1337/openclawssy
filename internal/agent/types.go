@@ -17,9 +17,12 @@ type RunInput struct {
 	AgentID           string        `json:"agent_id"`
 	RunID             string        `json:"run_id"`
 	Message           string        `json:"message"`
+	Messages          []ChatMessage `json:"messages,omitempty"`
 	ArtifactDocs      []ArtifactDoc `json:"artifact_docs"`
 	PerFileByteLimit  int           `json:"per_file_byte_limit"`
 	MaxToolIterations int           `json:"max_tool_iterations"`
+	ToolTimeoutMS     int           `json:"tool_timeout_ms,omitempty"`
+	AllowedTools      []string      `json:"allowed_tools,omitempty"`
 }
 
 // RunOutput is the finalized output contract for a run.
@@ -33,9 +36,21 @@ type RunOutput struct {
 
 // ModelRequest is sent to the model on each loop iteration.
 type ModelRequest struct {
-	Prompt      string           `json:"prompt"`
-	Message     string           `json:"message"`
-	ToolResults []ToolCallResult `json:"tool_results"`
+	SystemPrompt string           `json:"system_prompt,omitempty"`
+	Messages     []ChatMessage    `json:"messages,omitempty"`
+	AllowedTools []string         `json:"allowed_tools,omitempty"`
+	Prompt       string           `json:"prompt,omitempty"`
+	Message      string           `json:"message,omitempty"`
+	ToolResults  []ToolCallResult `json:"tool_results"`
+}
+
+// ChatMessage is a role-tagged conversational turn passed to the model.
+type ChatMessage struct {
+	Role       string    `json:"role"`
+	Content    string    `json:"content"`
+	Name       string    `json:"name,omitempty"`
+	ToolCallID string    `json:"tool_call_id,omitempty"`
+	TS         time.Time `json:"ts,omitempty"`
 }
 
 // ToolCallRequest is a model-requested tool invocation.

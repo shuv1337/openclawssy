@@ -115,6 +115,114 @@ func TestProviderModelRoutesToolResultsBackThroughModel(t *testing.T) {
 	}
 }
 
+func TestProviderModelSendsStructuredHistoryMessages(t *testing.T) {
+	var captured requestCapture
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{"content": "ok"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	_, err := model.Generate(context.Background(), agent.ModelRequest{
+		SystemPrompt: "system",
+		Messages: []agent.ChatMessage{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "done"},
+			{Role: "user", Content: "second"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(captured.Messages) != 4 {
+		t.Fatalf("expected 4 messages, got %d", len(captured.Messages))
+	}
+	if captured.Messages[0].Role != "system" {
+		t.Fatalf("expected system role first, got %q", captured.Messages[0].Role)
+	}
+	if captured.Messages[1].Role != "user" || captured.Messages[1].Content != "first" {
+		t.Fatalf("unexpected first history message: %+v", captured.Messages[1])
+	}
+	if captured.Messages[2].Role != "assistant" || captured.Messages[2].Content != "done" {
+		t.Fatalf("unexpected second history message: %+v", captured.Messages[2])
+	}
+	if captured.Messages[3].Role != "user" || captured.Messages[3].Content != "second" {
+		t.Fatalf("unexpected final user message: %+v", captured.Messages[3])
+	}
+}
+
+func TestProviderModelTraceCapturesModelInputAndToolExtraction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	collector := newRunTraceCollector("run_1", "chat_1", "dashboard", "list files")
+	ctx := withRunTraceCollector(context.Background(), collector)
+
+	resp, err := model.Generate(ctx, agent.ModelRequest{
+		SystemPrompt: "system",
+		Messages:     []agent.ChatMessage{{Role: "user", Content: "list files"}},
+		AllowedTools: []string{"fs.list"},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
+	}
+
+	trace := collector.Snapshot()
+	if trace == nil {
+		t.Fatal("expected trace snapshot")
+	}
+	inputs, ok := trace["model_inputs"].([]any)
+	if !ok || len(inputs) != 1 {
+		t.Fatalf("expected one model input trace entry, got %#v", trace["model_inputs"])
+	}
+	entry, ok := inputs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected model input trace shape: %#v", inputs[0])
+	}
+	if entry["message"] != "list files" {
+		t.Fatalf("unexpected traced message: %#v", entry["message"])
+	}
+	if entry["history_injected"] != false {
+		t.Fatalf("expected history_injected=false, got %#v", entry["history_injected"])
+	}
+
+	extractions, ok := trace["extracted_tool_calls"].([]any)
+	if !ok || len(extractions) == 0 {
+		t.Fatalf("expected tool extraction trace entries, got %#v", trace["extracted_tool_calls"])
+	}
+	extract, ok := extractions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected extraction trace shape: %#v", extractions[0])
+	}
+	if extract["accepted"] != true {
+		t.Fatalf("expected accepted extraction, got %#v", extract["accepted"])
+	}
+	if extract["parsed_tool_name"] != "fs.list" {
+		t.Fatalf("unexpected parsed tool name: %#v", extract["parsed_tool_name"])
+	}
+}
+
 func TestProviderModelStripsThinkTagsFromFinalText(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -167,7 +275,7 @@ func TestProviderModelParsesToolCallsAfterThinkTagStripping(t *testing.T) {
 	}
 }
 
-func TestProviderModelParsesBracketStyleToolCalls(t *testing.T) {
+func TestProviderModelIgnoresBracketStyleToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -185,22 +293,12 @@ func TestProviderModelParsesBracketStyleToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.list" {
-		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("decode tool args: %v", err)
-	}
-	if args["path"] != "." {
-		t.Fatalf("unexpected path arg: %#v", args["path"])
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
-func TestProviderModelParsesPlainJSONToolObject(t *testing.T) {
+func TestProviderModelIgnoresUnfencedJSONToolObject(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -218,22 +316,12 @@ func TestProviderModelParsesPlainJSONToolObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.write" {
-		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("decode tool args: %v", err)
-	}
-	if args["path"] != "test.md" || args["content"] != "test" {
-		t.Fatalf("unexpected args: %#v", args)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
-func TestProviderModelParsesXMLStyleToolCalls(t *testing.T) {
+func TestProviderModelIgnoresXMLStyleToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -251,22 +339,12 @@ func TestProviderModelParsesXMLStyleToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.read" {
-		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("decode tool args: %v", err)
-	}
-	if args["path"] != "test.md" {
-		t.Fatalf("unexpected args: %#v", args)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
-func TestProviderModelParsesXMLFunctionBlockToolCalls(t *testing.T) {
+func TestProviderModelIgnoresXMLFunctionBlockToolCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -284,22 +362,12 @@ func TestProviderModelParsesXMLFunctionBlockToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.list" {
-		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("decode tool args: %v", err)
-	}
-	if args["path"] != "." {
-		t.Fatalf("unexpected args: %#v", args)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
-func TestProviderModelParsesToolCodeAndParametersJSON(t *testing.T) {
+func TestProviderModelRequiresCanonicalToolJSONFields(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -317,15 +385,12 @@ func TestProviderModelParsesToolCodeAndParametersJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.list" {
-		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
-func TestProviderModelMapsShellSnippetsToCoreTools(t *testing.T) {
+func TestProviderModelIgnoresShellSnippets(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -343,11 +408,8 @@ func TestProviderModelMapsShellSnippetsToCoreTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 2 {
-		t.Fatalf("expected two tool calls, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.list" || resp.ToolCalls[1].Name != "fs.read" {
-		t.Fatalf("unexpected tool names: %q, %q", resp.ToolCalls[0].Name, resp.ToolCalls[1].Name)
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
@@ -407,7 +469,53 @@ func TestProviderModelIgnoresUnknownToolNames(t *testing.T) {
 	}
 }
 
-func TestProviderModelSynthesizesWriteFromCodeBlock(t *testing.T) {
+func TestProviderModelRejectsToolCallsNotInAllowlist(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "list files", AllowedTools: []string{"fs.read"}})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %d", len(resp.ToolCalls))
+	}
+}
+
+func TestProviderModelRejectsToolResultAsCallableTool(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{\"tool_name\":\"tool.result\",\"arguments\":{}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "test"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %d", len(resp.ToolCalls))
+	}
+}
+
+func TestProviderModelDoesNotSynthesizeWriteCalls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -425,25 +533,12 @@ func TestProviderModelSynthesizesWriteFromCodeBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "fs.write" {
-		t.Fatalf("unexpected tool call name: %q", resp.ToolCalls[0].Name)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("decode tool args: %v", err)
-	}
-	if args["path"] != "hello.py" {
-		t.Fatalf("unexpected write path: %#v", args["path"])
-	}
-	if !strings.Contains(args["content"].(string), "print(\"hello\")") {
-		t.Fatalf("unexpected synthesized content: %#v", args["content"])
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
-func TestProviderModelParsesBashFencedBlockToShellExec(t *testing.T) {
+func TestProviderModelIgnoresNonJSONFencedBlocks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -461,18 +556,8 @@ func TestProviderModelParsesBashFencedBlockToShellExec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate failed: %v", err)
 	}
-	if len(resp.ToolCalls) != 1 {
-		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
-	}
-	if resp.ToolCalls[0].Name != "shell.exec" {
-		t.Fatalf("unexpected tool name: %q", resp.ToolCalls[0].Name)
-	}
-	var args map[string]any
-	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
-		t.Fatalf("decode args: %v", err)
-	}
-	if args["command"] != "bash" {
-		t.Fatalf("expected bash command, got %#v", args["command"])
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool call, got %d", len(resp.ToolCalls))
 	}
 }
 
@@ -482,7 +567,7 @@ func TestProviderModelCanonicalizesBashExecAlias(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{
 				map[string]any{"message": map[string]string{
-					"content": `{"tool_name":"bash.exec","arguments":{"command":"pwd"}}`,
+					"content": "```json\n{\"tool_name\":\"bash.exec\",\"arguments\":{\"command\":\"pwd\"}}\n```",
 				}},
 			},
 		})

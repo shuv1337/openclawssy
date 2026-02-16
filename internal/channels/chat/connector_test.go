@@ -23,8 +23,11 @@ func TestConnectorQueuesAllowedMessage(t *testing.T) {
 		RateLimiter:    limiter,
 		DefaultAgentID: "default",
 		Store:          store,
-		Queue: func(ctx context.Context, agentID, message, source string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
 			_ = ctx
+			if sessionID == "" {
+				t.Fatal("expected session id")
+			}
 			if agentID != "default" || source != "chat" {
 				t.Fatalf("unexpected queue args: agent=%s source=%s", agentID, source)
 			}
@@ -54,7 +57,7 @@ func TestConnectorRejectsUnallowlisted(t *testing.T) {
 			}
 			return store
 		}(),
-		Queue: func(ctx context.Context, agentID, message, source string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
 			return QueuedRun{}, nil
 		},
 	}
@@ -75,7 +78,10 @@ func TestConnectorNewResumeAndChatsCommands(t *testing.T) {
 	connector := &Connector{
 		Store:          store,
 		DefaultAgentID: "default",
-		Queue: func(ctx context.Context, agentID, message, source string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
+			if sessionID == "" {
+				t.Fatal("expected session id")
+			}
 			queued++
 			return QueuedRun{ID: "run-1", Status: "queued"}, nil
 		},
@@ -113,18 +119,20 @@ func TestConnectorNewResumeAndChatsCommands(t *testing.T) {
 	}
 }
 
-func TestConnectorPrependsHistoryAndAppendsUserMessage(t *testing.T) {
+func TestConnectorQueuesRawMessageAndStoresHistory(t *testing.T) {
 	store, err := chatstore.NewStore(filepath.Join(t.TempDir(), ".openclawssy", "agents"))
 	if err != nil {
 		t.Fatalf("new chat store: %v", err)
 	}
 
 	var queuedMessage string
+	var queuedSessionID string
 	connector := &Connector{
 		Store:          store,
 		DefaultAgentID: "default",
-		Queue: func(ctx context.Context, agentID, message, source string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
 			queuedMessage = message
+			queuedSessionID = sessionID
 			return QueuedRun{ID: "run-1", Status: "queued"}, nil
 		},
 	}
@@ -136,14 +144,11 @@ func TestConnectorPrependsHistoryAndAppendsUserMessage(t *testing.T) {
 		t.Fatalf("second message: %v", err)
 	}
 
-	if !strings.Contains(queuedMessage, "CHAT_HISTORY:") {
-		t.Fatalf("expected CHAT_HISTORY block, got: %q", queuedMessage)
+	if queuedMessage != "second" {
+		t.Fatalf("expected raw message, got: %q", queuedMessage)
 	}
-	if !strings.Contains(queuedMessage, "[USER] first") {
-		t.Fatalf("expected previous message in history, got: %q", queuedMessage)
-	}
-	if !strings.HasSuffix(queuedMessage, "second") {
-		t.Fatalf("expected original message at end, got: %q", queuedMessage)
+	if queuedSessionID == "" {
+		t.Fatal("expected queued session id")
 	}
 
 	sessions, err := store.ListSessions("default", "u1", "dashboard", "dashboard")
@@ -163,5 +168,8 @@ func TestConnectorPrependsHistoryAndAppendsUserMessage(t *testing.T) {
 	}
 	if msgs[0].Content != "first" || msgs[1].Content != "second" {
 		t.Fatalf("unexpected stored messages: %+v", msgs)
+	}
+	if sessions[0].SessionID != queuedSessionID {
+		t.Fatalf("expected queued session %q, got %q", sessions[0].SessionID, queuedSessionID)
 	}
 }

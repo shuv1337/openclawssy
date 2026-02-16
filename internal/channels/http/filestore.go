@@ -7,8 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
+
+const defaultMaxPersistedRuns = 2000
+
+var fileRunStoreMaxPersistedRuns = defaultMaxPersistedRuns
 
 type FileRunStore struct {
 	path string
@@ -92,6 +97,8 @@ func (s *FileRunStore) load() error {
 }
 
 func (s *FileRunStore) saveLocked() error {
+	s.compactLocked()
+
 	runs := make([]Run, 0, len(s.runs))
 	for _, run := range s.runs {
 		runs = append(runs, run)
@@ -104,6 +111,44 @@ func (s *FileRunStore) saveLocked() error {
 	}
 	data = append(data, '\n')
 	return atomicWrite(s.path, data, 0o600)
+}
+
+func (s *FileRunStore) compactLocked() {
+	maxRuns := fileRunStoreMaxPersistedRuns
+	if maxRuns <= 0 || len(s.runs) <= maxRuns {
+		return
+	}
+
+	terminal := make([]Run, 0, len(s.runs))
+	for _, run := range s.runs {
+		switch strings.ToLower(strings.TrimSpace(run.Status)) {
+		case "completed", "failed", "cancelled":
+			terminal = append(terminal, run)
+		}
+	}
+	if len(terminal) == 0 {
+		return
+	}
+
+	toRemove := len(s.runs) - maxRuns
+	if toRemove <= 0 {
+		return
+	}
+
+	sort.Slice(terminal, func(i, j int) bool {
+		if terminal[i].UpdatedAt.Equal(terminal[j].UpdatedAt) {
+			return terminal[i].CreatedAt.Before(terminal[j].CreatedAt)
+		}
+		return terminal[i].UpdatedAt.Before(terminal[j].UpdatedAt)
+	})
+
+	for _, run := range terminal {
+		if toRemove <= 0 {
+			break
+		}
+		delete(s.runs, run.ID)
+		toRemove--
+	}
 }
 
 func atomicWrite(path string, data []byte, perm os.FileMode) error {

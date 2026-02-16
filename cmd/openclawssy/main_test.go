@@ -21,10 +21,13 @@ func TestChatAdaptersRouteBySource(t *testing.T) {
 	connector := &chat.Connector{
 		Store:          store,
 		DefaultAgentID: "default",
-		Queue: func(ctx context.Context, agentID, message, source string) (chat.QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (chat.QueuedRun, error) {
 			_ = ctx
 			_ = agentID
 			_ = message
+			if sessionID == "" {
+				t.Fatal("expected session id")
+			}
 			sources = append(sources, source)
 			return chat.QueuedRun{ID: "run-1", Status: "queued"}, nil
 		},

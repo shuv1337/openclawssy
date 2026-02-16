@@ -45,6 +45,7 @@ type Message struct {
 	TS         time.Time `json:"ts"`
 	RunID      string    `json:"run_id,omitempty"`
 	ToolCallID string    `json:"tool_call_id,omitempty"`
+	ToolName   string    `json:"tool_name,omitempty"`
 }
 
 type CreateSessionInput struct {
@@ -263,7 +264,7 @@ func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, erro
 		}
 		var m Message
 		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			return nil, fmt.Errorf("chatstore: parse message line: %w", err)
+			continue
 		}
 		all = append(all, m)
 	}
@@ -347,7 +348,7 @@ func (s *Store) GetActiveSessionPointer(agentID, channel, userID, roomID string)
 	defer s.mu.RUnlock()
 
 	path := s.activePointerPath(agentID, channel, userID, roomID)
-	b, err := os.ReadFile(path)
+	b, err := readFileWithBackup(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", ErrSessionNotFound
@@ -426,7 +427,7 @@ func (s *Store) sessionDirByIDLocked(sessionID string) (string, error) {
 }
 
 func readSessionMeta(path string) (Session, error) {
-	b, err := os.ReadFile(path)
+	b, err := readFileWithBackup(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Session{}, ErrSessionNotFound
@@ -455,6 +456,10 @@ func writeJSONFile(path string, value any) error {
 		return fmt.Errorf("chatstore: create parent dir: %w", err)
 	}
 
+	if existing, err := os.ReadFile(path); err == nil && len(existing) > 0 {
+		_ = os.WriteFile(path+".bak", existing, 0o600)
+	}
+
 	tmp, err := os.CreateTemp(dir, ".tmp-chatstore-*")
 	if err != nil {
 		return fmt.Errorf("chatstore: create temp file: %w", err)
@@ -480,6 +485,28 @@ func writeJSONFile(path string, value any) error {
 		return fmt.Errorf("chatstore: rename temp file: %w", err)
 	}
 	return nil
+}
+
+func readFileWithBackup(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err == nil {
+		if json.Valid(b) {
+			return b, nil
+		}
+		backup, backupErr := os.ReadFile(path + ".bak")
+		if backupErr == nil && json.Valid(backup) {
+			return backup, nil
+		}
+		return nil, fmt.Errorf("chatstore: invalid json at %s", path)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	backup, backupErr := os.ReadFile(path + ".bak")
+	if backupErr == nil && json.Valid(backup) {
+		return backup, nil
+	}
+	return nil, err
 }
 
 func ensureFile(path string, mode os.FileMode) error {

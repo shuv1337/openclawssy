@@ -39,6 +39,7 @@ type RunStatus struct {
 	Output       string
 	Error        string
 	ArtifactPath string
+	Trace        map[string]any
 }
 
 type MessageHandler func(ctx context.Context, msg Message) (Response, error)
@@ -180,8 +181,15 @@ func (b *Bot) awaitAndPostResult(s *discordgo.Session, m *discordgo.MessageCreat
 		if strings.TrimSpace(run.Error) != "" {
 			msg += ": " + run.Error
 		}
+		if toolSummary := formatToolActivity(runID, run.Trace); toolSummary != "" {
+			b.sendChunked(s, m, toolSummary)
+		}
 		_, _ = s.ChannelMessageSendReply(m.ChannelID, msg, m.Reference())
 		return
+	}
+
+	if toolSummary := formatToolActivity(runID, run.Trace); toolSummary != "" {
+		b.sendChunked(s, m, toolSummary)
 	}
 
 	final := strings.TrimSpace(run.Output)
@@ -192,6 +200,46 @@ func (b *Bot) awaitAndPostResult(s *discordgo.Session, m *discordgo.MessageCreat
 		final = fmt.Sprintf("%s\n\nartifact: `%s`", final, run.ArtifactPath)
 	}
 	b.sendChunked(s, m, final)
+}
+
+func formatToolActivity(runID string, trace map[string]any) string {
+	if len(trace) == 0 {
+		return ""
+	}
+	rawEntries, ok := trace["tool_execution_results"].([]any)
+	if !ok || len(rawEntries) == 0 {
+		return ""
+	}
+
+	lines := []string{"Tool activity for run `" + strings.TrimSpace(runID) + "`:"}
+	for i, raw := range rawEntries {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		tool := strings.TrimSpace(fmt.Sprintf("%v", entry["tool"]))
+		if tool == "" {
+			tool = "unknown.tool"
+		}
+		callID := strings.TrimSpace(fmt.Sprintf("%v", entry["tool_call_id"]))
+		summary := fmt.Sprintf("%d) %s", i+1, tool)
+		if callID != "" && callID != "<nil>" {
+			summary += " [" + callID + "]"
+		}
+		if errText := strings.TrimSpace(fmt.Sprintf("%v", entry["error"])); errText != "" && errText != "<nil>" {
+			summary += " -> error: " + errText
+		} else if outText := strings.TrimSpace(fmt.Sprintf("%v", entry["output"])); outText != "" && outText != "<nil>" {
+			if len(outText) > 180 {
+				outText = outText[:180] + "..."
+			}
+			summary += " -> output: " + outText
+		}
+		lines = append(lines, summary)
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 func waitForTerminalRun(ctx context.Context, runID string, runStatus RunStatusFunc, interval time.Duration) (RunStatus, error) {

@@ -13,6 +13,7 @@ import (
 	"openclawssy/internal/agent"
 	"openclawssy/internal/artifacts"
 	"openclawssy/internal/audit"
+	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
 	"openclawssy/internal/policy"
 	"openclawssy/internal/sandbox"
@@ -36,6 +37,14 @@ type RunResult struct {
 	ToolCalls    int
 	Provider     string
 	Model        string
+	Trace        map[string]any
+}
+
+type ExecuteInput struct {
+	AgentID   string
+	Message   string
+	Source    string
+	SessionID string
 }
 
 func NewEngine(rootDir string) (*Engine, error) {
@@ -102,10 +111,19 @@ func (e *Engine) Init(agentID string, force bool) error {
 }
 
 func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResult, error) {
-	if strings.TrimSpace(agentID) == "" {
+	return e.ExecuteWithInput(ctx, ExecuteInput{AgentID: agentID, Message: message})
+}
+
+func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResult, error) {
+	agentID := strings.TrimSpace(in.AgentID)
+	message := strings.TrimSpace(in.Message)
+	source := strings.TrimSpace(in.Source)
+	sessionID := strings.TrimSpace(in.SessionID)
+
+	if agentID == "" {
 		return RunResult{}, errors.New("runtime: agent id is required")
 	}
-	if strings.TrimSpace(message) == "" {
+	if message == "" {
 		return RunResult{}, errors.New("runtime: message is required")
 	}
 
@@ -130,9 +148,19 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 		return RunResult{}, fmt.Errorf("runtime: init audit logger: %w", err)
 	}
 
-	_ = aud.LogEvent(ctx, audit.EventRunStart, map[string]any{"run_id": runID, "agent_id": agentID, "message": message})
+	startEvent := map[string]any{"run_id": runID, "agent_id": agentID, "message": message}
+	if source != "" {
+		startEvent["source"] = source
+	}
+	if sessionID != "" {
+		startEvent["session_id"] = sessionID
+	}
+	_ = aud.LogEvent(ctx, audit.EventRunStart, startEvent)
 
-	enforcer := policy.NewEnforcer(e.workspaceDir, map[string][]string{agentID: e.allowedTools(cfg)})
+	allowedTools := e.allowedTools(cfg)
+	traceCollector := newRunTraceCollector(runID, sessionID, source, message)
+	ctx = withRunTraceCollector(ctx, traceCollector)
+	enforcer := policy.NewEnforcer(e.workspaceDir, map[string][]string{agentID: allowedTools})
 	registry := tools.NewRegistry(enforcer, aud)
 	if err := tools.RegisterCoreWithOptions(registry, tools.CoreOptions{
 		EnableShellExec: cfg.Shell.EnableExec && cfg.Sandbox.Active && strings.ToLower(cfg.Sandbox.Provider) != "none",
@@ -174,14 +202,31 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 		MaxToolIterations: 8,
 	}
 
+	modelMessages := []agent.ChatMessage{{Role: "user", Content: message}}
+	if sessionID != "" {
+		history, historyErr := e.loadSessionMessages(sessionID, 50)
+		if historyErr != nil {
+			return RunResult{}, historyErr
+		}
+		if len(history) > 0 {
+			modelMessages = history
+		}
+	}
+	if len(modelMessages) == 0 || !hasTrailingUserMessage(modelMessages, message) {
+		modelMessages = append(modelMessages, agent.ChatMessage{Role: "user", Content: message})
+	}
+
 	start := time.Now().UTC()
 	out, runErr := runner.Run(ctx, agent.RunInput{
 		AgentID:           agentID,
 		RunID:             runID,
 		Message:           message,
+		Messages:          modelMessages,
 		ArtifactDocs:      docs,
 		PerFileByteLimit:  16 * 1024,
 		MaxToolIterations: 8,
+		ToolTimeoutMS:     int((45 * time.Second) / time.Millisecond),
+		AllowedTools:      allowedTools,
 	})
 
 	artifactPath := ""
@@ -217,9 +262,20 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 		if err != nil {
 			runErr = err
 		}
+		if runErr == nil && sessionID != "" {
+			if err := e.appendRunConversation(sessionID, runID, out); err != nil {
+				runErr = err
+			}
+		}
 	}
 
 	fields := map[string]any{"run_id": runID, "agent_id": agentID}
+	if source != "" {
+		fields["source"] = source
+	}
+	if sessionID != "" {
+		fields["session_id"] = sessionID
+	}
 	if runErr != nil {
 		fields["error"] = runErr.Error()
 	} else {
@@ -227,8 +283,19 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 	}
 	_ = aud.LogEvent(ctx, audit.EventRunEnd, fields)
 
+	traceCollector.RecordToolExecution(out.ToolCalls)
+	traceSnapshot := traceCollector.Snapshot()
+
 	if runErr != nil {
-		return RunResult{}, runErr
+		return RunResult{
+			RunID:        runID,
+			ArtifactPath: artifactPath,
+			DurationMS:   time.Since(start).Milliseconds(),
+			ToolCalls:    len(out.ToolCalls),
+			Provider:     model.ProviderName(),
+			Model:        model.ModelName(),
+			Trace:        traceSnapshot,
+		}, runErr
 	}
 
 	return RunResult{
@@ -239,7 +306,92 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 		ToolCalls:    len(out.ToolCalls),
 		Provider:     model.ProviderName(),
 		Model:        model.ModelName(),
+		Trace:        traceSnapshot,
 	}, nil
+}
+
+func (e *Engine) loadSessionMessages(sessionID string, limit int) ([]agent.ChatMessage, error) {
+	store, err := chatstore.NewStore(e.agentsDir)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: init chat store: %w", err)
+	}
+	history, err := store.ReadRecentMessages(sessionID, chatstore.ClampHistoryCount(limit, 200))
+	if err != nil {
+		return nil, fmt.Errorf("runtime: read chat history: %w", err)
+	}
+	out := make([]agent.ChatMessage, 0, len(history))
+	for _, msg := range history {
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		if role == "" {
+			role = "user"
+		}
+		content := strings.TrimSpace(msg.Content)
+		if content == "" {
+			continue
+		}
+		out = append(out, agent.ChatMessage{
+			Role:       role,
+			Content:    content,
+			Name:       strings.TrimSpace(msg.ToolName),
+			ToolCallID: strings.TrimSpace(msg.ToolCallID),
+			TS:         msg.TS,
+		})
+	}
+	return out, nil
+}
+
+func hasTrailingUserMessage(messages []agent.ChatMessage, currentMessage string) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	last := messages[len(messages)-1]
+	role := strings.ToLower(strings.TrimSpace(last.Role))
+	if role != "" && role != "user" {
+		return false
+	}
+	return strings.TrimSpace(last.Content) == strings.TrimSpace(currentMessage)
+}
+
+func (e *Engine) appendRunConversation(sessionID, runID string, out agent.RunOutput) error {
+	store, err := chatstore.NewStore(e.agentsDir)
+	if err != nil {
+		return fmt.Errorf("runtime: init chat store: %w", err)
+	}
+	for _, rec := range out.ToolCalls {
+		payload, marshalErr := json.Marshal(map[string]any{
+			"tool":   rec.Request.Name,
+			"id":     rec.Request.ID,
+			"output": rec.Result.Output,
+			"error":  rec.Result.Error,
+		})
+		if marshalErr != nil {
+			return fmt.Errorf("runtime: marshal tool result: %w", marshalErr)
+		}
+		ts := rec.CompletedAt
+		if ts.IsZero() {
+			ts = time.Now().UTC()
+		}
+		if err := store.AppendMessage(sessionID, chatstore.Message{
+			Role:       "tool",
+			Content:    string(payload),
+			TS:         ts,
+			RunID:      runID,
+			ToolCallID: rec.Request.ID,
+			ToolName:   rec.Request.Name,
+		}); err != nil {
+			return fmt.Errorf("runtime: append tool message: %w", err)
+		}
+	}
+	if strings.TrimSpace(out.FinalText) != "" {
+		ts := out.CompletedAt
+		if ts.IsZero() {
+			ts = time.Now().UTC()
+		}
+		if err := store.AppendMessage(sessionID, chatstore.Message{Role: "assistant", Content: out.FinalText, TS: ts, RunID: runID}); err != nil {
+			return fmt.Errorf("runtime: append assistant message: %w", err)
+		}
+	}
+	return nil
 }
 
 func (e *Engine) loadPromptDocs(agentID string) ([]agent.ArtifactDoc, error) {

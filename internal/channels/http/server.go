@@ -47,13 +47,20 @@ type ChatResponse struct {
 	Response string `json:"response,omitempty"`
 }
 
+type ExecutionInput struct {
+	AgentID   string
+	Message   string
+	Source    string
+	SessionID string
+}
+
 type RunExecutor interface {
-	Execute(ctx context.Context, agentID, message string) (ExecutionResult, error)
+	Execute(ctx context.Context, input ExecutionInput) (ExecutionResult, error)
 }
 
 type NopExecutor struct{}
 
-func (NopExecutor) Execute(_ context.Context, _ string, _ string) (ExecutionResult, error) {
+func (NopExecutor) Execute(_ context.Context, _ ExecutionInput) (ExecutionResult, error) {
 	return ExecutionResult{Output: "queued"}, nil
 }
 
@@ -176,9 +183,12 @@ func (s *Server) wait(ctx context.Context, errCh <-chan error) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpServer.Shutdown(shutdownCtx)
+		if err := WaitForQueuedRuns(shutdownCtx); err != nil {
+			return fmt.Errorf("shutdown before in-flight runs drained: %w", err)
+		}
 		return ctx.Err()
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -212,7 +222,7 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := QueueRun(r.Context(), s.store, s.executor, req.AgentID, req.Message, "http")
+	created, err := QueueRun(r.Context(), s.store, s.executor, req.AgentID, req.Message, "http", "")
 	if err != nil {
 		http.Error(w, "failed to queue run", http.StatusInternalServerError)
 		return
