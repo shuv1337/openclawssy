@@ -35,7 +35,7 @@ func TestEngineInitCreatesAgentArtifacts(t *testing.T) {
 
 func TestEngineExecuteWritesRunBundle(t *testing.T) {
 	root := t.TempDir()
-	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ZAI_API_KEY", "test-key")
 	e, err := NewEngine(root)
 	if err != nil {
 		t.Fatalf("new engine: %v", err)

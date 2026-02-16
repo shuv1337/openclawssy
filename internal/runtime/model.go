@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -146,7 +147,16 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 	if len(payload.Choices) == 0 {
 		return agent.ModelResponse{}, errors.New("provider returned no choices")
 	}
-	return agent.ModelResponse{FinalText: strings.TrimSpace(payload.Choices[0].Message.Content)}, nil
+
+	content := strings.TrimSpace(payload.Choices[0].Message.Content)
+
+	// Check if the model's response contains tool calls in JSON blocks
+	toolCalls := parseToolCallsFromResponse(content)
+	if len(toolCalls) > 0 {
+		return agent.ModelResponse{ToolCalls: toolCalls}, nil
+	}
+
+	return agent.ModelResponse{FinalText: content}, nil
 }
 
 func parseToolDirective(message string) (agent.ModelResponse, error) {
@@ -164,6 +174,153 @@ func parseToolDirective(message string) (agent.ModelResponse, error) {
 	}
 	argBytes, _ := json.Marshal(args)
 	return agent.ModelResponse{ToolCalls: []agent.ToolCallRequest{{ID: "tool-1", Name: toolName, Arguments: argBytes}}}, nil
+}
+
+func parseToolCallsFromResponse(content string) []agent.ToolCallRequest {
+	var toolCalls []agent.ToolCallRequest
+
+	// Look for JSON code blocks that might contain tool calls
+	// Pattern: ```json ... ``` or ``` ... ```
+	re := regexp.MustCompile("```(?:json)?\\s*([\\s\\S]*?)```")
+	matches := re.FindAllStringSubmatch(content, -1)
+
+	for i, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		jsonContent := strings.TrimSpace(match[1])
+
+		// Try to parse as a tool call
+		var toolCall struct {
+			ToolName  string         `json:"tool_name"`
+			Name      string         `json:"name"`
+			Arguments map[string]any `json:"arguments"`
+			Args      map[string]any `json:"args"`
+		}
+
+		if err := json.Unmarshal([]byte(jsonContent), &toolCall); err == nil {
+			// Check if it has a tool name
+			toolName := toolCall.ToolName
+			if toolName == "" {
+				toolName = toolCall.Name
+			}
+			if toolName != "" {
+				// Get arguments
+				args := toolCall.Arguments
+				if args == nil {
+					args = toolCall.Args
+				}
+				if args == nil {
+					args = map[string]any{}
+				}
+
+				argBytes, _ := json.Marshal(args)
+				toolCalls = append(toolCalls, agent.ToolCallRequest{
+					ID:        fmt.Sprintf("tool-%d", i+1),
+					Name:      toolName,
+					Arguments: argBytes,
+				})
+				continue
+			}
+		}
+
+		// Try parsing as direct tool call syntax: tool_name(args)
+		// Pattern: fs.list(path=".") or fs.list(".")
+		if call := parseFunctionCall(jsonContent); call != nil {
+			toolCalls = append(toolCalls, *call)
+		}
+	}
+
+	// Also look for inline function calls not in code blocks
+	// Pattern: fs.list(path=".") or fs.list(".")
+	inlineRe := regexp.MustCompile(`\b(fs\.\w+|code\.\w+|shell\.\w+|time\.\w+)\s*\(([^)]*)\)`)
+	inlineMatches := inlineRe.FindAllStringSubmatch(content, -1)
+	for _, match := range inlineMatches {
+		if len(match) >= 2 {
+			toolName := strings.TrimSpace(match[1])
+			argsStr := ""
+			if len(match) >= 3 {
+				argsStr = match[2]
+			}
+			args := parseArgsString(argsStr)
+			argBytes, _ := json.Marshal(args)
+			toolCalls = append(toolCalls, agent.ToolCallRequest{
+				ID:        fmt.Sprintf("tool-inline-%d", len(toolCalls)+1),
+				Name:      toolName,
+				Arguments: argBytes,
+			})
+		}
+	}
+
+	return toolCalls
+}
+
+func parseFunctionCall(content string) *agent.ToolCallRequest {
+	// Parse function call syntax like: fs.list(path=".") or fs.list(".")
+	re := regexp.MustCompile(`^(\w+\.\w+)\s*\((.*)\)$`)
+	matches := re.FindStringSubmatch(strings.TrimSpace(content))
+	if len(matches) < 2 {
+		return nil
+	}
+
+	toolName := strings.TrimSpace(matches[1])
+	argsStr := ""
+	if len(matches) >= 3 {
+		argsStr = matches[2]
+	}
+
+	args := parseArgsString(argsStr)
+	argBytes, _ := json.Marshal(args)
+
+	return &agent.ToolCallRequest{
+		ID:        fmt.Sprintf("tool-func-%d", time.Now().UnixNano()),
+		Name:      toolName,
+		Arguments: argBytes,
+	}
+}
+
+func parseArgsString(argsStr string) map[string]any {
+	args := map[string]any{}
+	argsStr = strings.TrimSpace(argsStr)
+
+	if argsStr == "" {
+		return args
+	}
+
+	// Try to parse as JSON first
+	if err := json.Unmarshal([]byte(argsStr), &args); err == nil {
+		return args
+	}
+
+	// Parse key=value pairs
+	// Pattern: key="value", key='value', key=value, or just "value" (positional)
+	re := regexp.MustCompile(`(\w+)\s*=\s*("[^"]*"|'[^']*'|[^,\s]+)`)
+	pairs := re.FindAllStringSubmatch(argsStr, -1)
+
+	for _, pair := range pairs {
+		if len(pair) >= 3 {
+			key := strings.TrimSpace(pair[1])
+			value := strings.TrimSpace(pair[2])
+			// Remove quotes
+			if (strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)) ||
+				(strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`)) {
+				value = value[1 : len(value)-1]
+			}
+			args[key] = value
+		}
+	}
+
+	// If no key=value pairs found, treat as single positional argument "path"
+	if len(args) == 0 && argsStr != "" {
+		value := strings.TrimSpace(argsStr)
+		if (strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)) ||
+			(strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`)) {
+			value = value[1 : len(value)-1]
+		}
+		args["path"] = value
+	}
+
+	return args
 }
 
 func providerEndpoint(cfg config.Config, provider string) (config.ProviderEndpointConfig, error) {

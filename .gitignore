@@ -20,5 +20,32 @@ temp/
 *.swo
 .DS_Store
 
-# Openclawssy runtime data
+# Openclawssy runtime data (contains config and secrets)
 .openclawssy/
+.openclawssy/config.json
+.openclawssy/config.json.bak
+.openclawssy/*.key
+.openclawssy/secrets.enc
+.openclawssy/master.key
+
+# Environment variables (contains secrets)
+.env
+.env.local
+.env.*.local
+
+# Workspace (may contain generated files with sensitive data)
+workspace/
+workspace/*
+
+# Log files
+*.log
+logs/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -111,7 +111,7 @@ func Default() Config {
 			Provider: "none",
 		},
 		Server: ServerConfig{
-			BindAddress: "127.0.0.1",
+			BindAddress: "0.0.0.0",
 			Port:        8080,
 			TLSEnabled:  false,
 			TLSCertFile: ".openclawssy/certs/server.crt",
@@ -122,8 +122,8 @@ func Default() Config {
 			Root: "./workspace",
 		},
 		Model: ModelConfig{
-			Provider:    "openai",
-			Name:        "gpt-4o-mini",
+			Provider:    "zai",
+			Name:        "GLM-4.7",
 			Temperature: 0.2,
 		},
 		Providers: ProvidersConfig{
@@ -140,7 +140,7 @@ func Default() Config {
 				APIKeyEnv: "REQUESTY_API_KEY",
 			},
 			ZAI: ProviderEndpointConfig{
-				BaseURL:   "https://api.z.ai/v1",
+				BaseURL:   "https://api.z.ai/api/coding/paas/v4",
 				APIKeyEnv: "ZAI_API_KEY",
 			},
 			Generic: ProviderEndpointConfig{
@@ -149,7 +149,7 @@ func Default() Config {
 			},
 		},
 		Chat: ChatConfig{
-			Enabled:         false,
+			Enabled:         true,
 			DefaultAgentID:  "default",
 			RateLimitPerMin: 20,
 		},
@@ -246,8 +246,6 @@ func (c Config) Validate() error {
 	}
 	if ip := net.ParseIP(host); ip == nil {
 		return fmt.Errorf("server.bind_address must be an IP address: %q", host)
-	} else if !ip.IsLoopback() {
-		return fmt.Errorf("server.bind_address must be loopback by default: %q", host)
 	}
 
 	if c.Shell.EnableExec && !c.Sandbox.Active {

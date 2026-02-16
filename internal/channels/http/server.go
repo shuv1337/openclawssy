@@ -232,6 +232,12 @@ func (s *Server) handleRunByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow dashboard HTML to load without auth (token will be provided via URL param or prompt)
+		if r.URL.Path == "/dashboard" && r.Method == http.MethodGet {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
 			http.Error(w, "missing bearer token", http.StatusUnauthorized)

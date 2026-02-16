@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  openclawssy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      # REQUIRED: Z.AI API Key for GLM-4.7 Coding Plan
+      # Get your key at: https://z.ai/subscribe
+      # The ZAI Coding Plan uses endpoint: https://api.z.ai/api/coding/paas/v4
+      - ZAI_API_KEY=${ZAI_API_KEY}
+      
+      # Optional: Server authentication token (default: change-me)
+      - OPENCLAWSSY_TOKEN=${OPENCLAWSSY_TOKEN:-change-me}
+      
+      # Optional: Discord bot token for Discord integration
+      # - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+    volumes:
+      # Persist configuration and workspace
+      - ./workspace:/app/workspace
+      - ./.openclawssy:/app/.openclawssy
+    # The entrypoint script handles initial setup
+    # It will prompt/require ZAI_API_KEY on first run
+    command: ["serve", "--token", "${OPENCLAWSSY_TOKEN:-change-me}", "--addr", "0.0.0.0:8080"]
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/dashboard"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

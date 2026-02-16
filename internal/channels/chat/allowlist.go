@@ -29,7 +29,7 @@ func NewAllowlist(userIDs, roomIDs []string) *Allowlist {
 
 func (a *Allowlist) UserAllowed(userID string) bool {
 	if len(a.users) == 0 {
-		return false
+		return true // Allow by default when no users specified
 	}
 	_, ok := a.users[userID]
 	return ok
