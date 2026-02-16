@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +57,41 @@ func TestEngineExecuteWritesRunBundle(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(res.ArtifactPath, "output.json")); err != nil {
 		t.Fatalf("expected output bundle file: %v", err)
+	}
+}
+
+func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	docs, err := e.loadPromptDocs("default")
+	if err != nil {
+		t.Fatalf("load prompt docs: %v", err)
+	}
+
+	found := false
+	for _, doc := range docs {
+		if doc.Name != "RUNTIME_CONTEXT.md" {
+			continue
+		}
+		found = true
+		if !strings.Contains(doc.Content, "Workspace root:") {
+			t.Fatalf("runtime context missing workspace root: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "home directory") {
+			t.Fatalf("runtime context missing home directory guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "do not mention HANDOFF") {
+			t.Fatalf("runtime context missing prompt hygiene guidance: %q", doc.Content)
+		}
+	}
+	if !found {
+		t.Fatal("expected RUNTIME_CONTEXT.md prompt doc")
 	}
 }

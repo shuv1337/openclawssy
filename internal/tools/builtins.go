@@ -21,6 +21,15 @@ const (
 	defaultSearchMaxFileBty = 512 * 1024
 )
 
+var workspaceControlPlaneFilenames = map[string]bool{
+	"SOUL.MD":     true,
+	"RULES.MD":    true,
+	"TOOLS.MD":    true,
+	"HANDOFF.MD":  true,
+	"DEVPLAN.MD":  true,
+	"SPECPLAN.MD": true,
+}
+
 type CoreOptions struct {
 	EnableShellExec bool
 }
@@ -126,6 +135,9 @@ func fsWrite(_ context.Context, req Request) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := guardWorkspaceControlPlaneFilename(req.Workspace, resolved, req.AgentID); err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(resolved, []byte(content), 0o600); err != nil {
 		return nil, err
 	}
@@ -148,6 +160,9 @@ func fsEdit(_ context.Context, req Request) (map[string]any, error) {
 	}
 	resolved, err := req.Policy.ResolveWritePath(req.Workspace, path)
 	if err != nil {
+		return nil, err
+	}
+	if err := guardWorkspaceControlPlaneFilename(req.Workspace, resolved, req.AgentID); err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(resolved)
@@ -424,4 +439,42 @@ func getIntArg(args map[string]any, key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func guardWorkspaceControlPlaneFilename(workspace, targetAbs, agentID string) error {
+	base := strings.ToUpper(filepath.Base(targetAbs))
+	if !workspaceControlPlaneFilenames[base] {
+		return nil
+	}
+	within, err := isWithinWorkspace(workspace, targetAbs)
+	if err != nil || !within {
+		return err
+	}
+	if agentID == "" {
+		agentID = "<agent_id>"
+	}
+	file := filepath.Base(targetAbs)
+	return fmt.Errorf("%s in workspace does not control agent behavior. Control-plane files live at .openclawssy/agents/<agent_id>/%s (for this run: .openclawssy/agents/%s/%s). Edit it via dashboard Agent Files", file, file, agentID, file)
+}
+
+func isWithinWorkspace(workspace, target string) (bool, error) {
+	wsAbs, err := filepath.Abs(workspace)
+	if err != nil {
+		return false, err
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(wsAbs, targetAbs)
+	if err != nil {
+		return false, err
+	}
+	if rel == "." {
+		return true, nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, nil
+	}
+	return !filepath.IsAbs(rel), nil
 }

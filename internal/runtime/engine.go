@@ -244,7 +244,7 @@ func (e *Engine) Execute(ctx context.Context, agentID, message string) (RunResul
 
 func (e *Engine) loadPromptDocs(agentID string) ([]agent.ArtifactDoc, error) {
 	agentRoot := filepath.Join(e.agentsDir, agentID)
-	docs := make([]agent.ArtifactDoc, 0, len(promptDocOrder))
+	docs := make([]agent.ArtifactDoc, 0, len(promptDocOrder)+1)
 	for _, name := range promptDocOrder {
 		path := filepath.Join(agentRoot, name)
 		data, err := os.ReadFile(path)
@@ -256,7 +256,15 @@ func (e *Engine) loadPromptDocs(agentID string) ([]agent.ArtifactDoc, error) {
 		}
 		docs = append(docs, agent.ArtifactDoc{Name: name, Content: string(data)})
 	}
+	docs = append(docs, agent.ArtifactDoc{Name: "RUNTIME_CONTEXT.md", Content: runtimeContextDoc(e.workspaceDir)})
 	return docs, nil
+}
+
+func runtimeContextDoc(workspaceDir string) string {
+	return fmt.Sprintf(
+		"# RUNTIME_CONTEXT\n\n- Workspace root: %s\n- File tools (fs.read/fs.list/fs.write/fs.edit/code.search) can only access paths inside workspace root.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy.\n- If the user asks about files in home directory, explain this limitation and offer to list the workspace instead.\n- Keep responses task-focused; do not mention HANDOFF/SPECPLAN/DEVPLAN unless the user explicitly asks about them.\n",
+		workspaceDir,
+	)
 }
 
 type RegistryExecutor struct {

@@ -11,15 +11,20 @@ import (
 )
 
 type testChatConnector struct {
-	err error
+	err      error
+	response ChatResponse
 }
 
-func (c testChatConnector) HandleMessage(ctx context.Context, msg ChatMessage) (Run, error) {
+func (c testChatConnector) HandleMessage(ctx context.Context, msg ChatMessage) (ChatResponse, error) {
 	_ = ctx
+	_ = msg
 	if c.err != nil {
-		return Run{}, c.err
+		return ChatResponse{}, c.err
 	}
-	return Run{ID: "run-chat", Status: "queued"}, nil
+	if c.response.ID != "" || c.response.Response != "" || c.response.Status != "" {
+		return c.response, nil
+	}
+	return ChatResponse{ID: "run-chat", Status: "queued"}, nil
 }
 
 func TestServer_DefaultAddrIsLoopback(t *testing.T) {
@@ -112,6 +117,14 @@ func TestServer_ChatMessageEndpoint(t *testing.T) {
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("expected %d, got %d", http.StatusAccepted, rr.Code)
 	}
+
+	var resp ChatResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode chat response: %v", err)
+	}
+	if resp.ID != "run-chat" || resp.Status != "queued" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
 }
 
 func TestServer_ChatMessageDenied(t *testing.T) {
@@ -124,5 +137,26 @@ func TestServer_ChatMessageDenied(t *testing.T) {
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected %d, got %d", http.StatusForbidden, rr.Code)
+	}
+}
+
+func TestServer_ChatMessageImmediateResponse(t *testing.T) {
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}, Chat: testChatConnector{response: ChatResponse{Response: "Started new chat: s1"}}})
+	body := bytes.NewBufferString(`{"user_id":"u1","message":"/new"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/messages", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	var resp ChatResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode chat response: %v", err)
+	}
+	if resp.Response == "" || resp.ID != "" {
+		t.Fatalf("unexpected immediate response: %+v", resp)
 	}
 }

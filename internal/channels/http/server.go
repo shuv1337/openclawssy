@@ -38,7 +38,13 @@ type ChatMessage struct {
 }
 
 type ChatConnector interface {
-	HandleMessage(ctx context.Context, msg ChatMessage) (Run, error)
+	HandleMessage(ctx context.Context, msg ChatMessage) (ChatResponse, error)
+}
+
+type ChatResponse struct {
+	ID       string `json:"id,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Response string `json:"response,omitempty"`
 }
 
 type RunExecutor interface {
@@ -119,15 +125,28 @@ func (s *Server) handleChatMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := s.chat.HandleMessage(r.Context(), req)
+	req.RoomID = strings.TrimSpace(req.RoomID)
+	if req.RoomID == "" {
+		req.RoomID = "dashboard"
+	}
+	req.AgentID = strings.TrimSpace(req.AgentID)
+	if req.AgentID == "" {
+		req.AgentID = "default"
+	}
+
+	result, err := s.chat.HandleMessage(r.Context(), req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(postRunResponse{ID: run.ID, Status: run.Status})
+	statusCode := http.StatusAccepted
+	if result.ID == "" {
+		statusCode = http.StatusOK
+	}
+	w.WriteHeader(statusCode)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (s *Server) ListenAndServe(ctx context.Context) error {

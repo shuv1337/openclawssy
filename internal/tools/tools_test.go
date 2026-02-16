@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -179,5 +180,61 @@ func TestFsEditLinePatch(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(ws, "a.txt"))
 	if string(b) != "one\nTWO\nthree\n" {
 		t.Fatalf("unexpected patched content: %q", string(b))
+	}
+}
+
+func TestFsWriteRejectsWorkspaceControlPlaneFilename(t *testing.T) {
+	ws := t.TempDir()
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent-123", "fs.write", ws, map[string]any{
+		"path":    filepath.Join("notes", "SOUL.md"),
+		"content": "new content",
+	})
+	if err == nil {
+		t.Fatalf("expected control-plane filename guard error")
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"does not control agent behavior",
+		".openclawssy/agents/<agent_id>/SOUL.md",
+		"dashboard Agent Files",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("expected error to contain %q, got %q", needle, msg)
+		}
+	}
+}
+
+func TestFsEditRejectsWorkspaceControlPlaneFilename(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "DEVPLAN.md"), []byte("draft"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent-123", "fs.edit", ws, map[string]any{
+		"path": "DEVPLAN.md",
+		"old":  "draft",
+		"new":  "updated",
+	})
+	if err == nil {
+		t.Fatalf("expected control-plane filename guard error")
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"does not control agent behavior",
+		".openclawssy/agents/<agent_id>/DEVPLAN.md",
+		"dashboard Agent Files",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("expected error to contain %q, got %q", needle, msg)
+		}
 	}
 }
