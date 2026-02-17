@@ -84,6 +84,7 @@ Required event order:
 Failure-loop handling contract:
 - After 2 consecutive failing tool results, the next model turn is run in explicit error-recovery mode.
 - If 3 additional failing tool results occur while recovery mode is active, runner returns a terminal assistant response asking user guidance.
+- Recovery mode clears only after sustained success (multiple successful tool outcomes), not a single transient success.
 - That escalation response must include recent attempts, errors, and output snippets.
 
 Event minimum fields:

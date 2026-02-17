@@ -37,7 +37,7 @@ Recent runtime hardening and UX upgrades:
 - Chat sessions with `/new`, `/resume <session>`, `/chats`, persisted message history, and session listing.
 - Multi-tool runs with normalized unique tool call IDs and repeated-call result reuse (no hard stop on benign duplicates).
 - Long-running run defaults raised to support real workloads (`120` tool iterations, `900s` per-tool timeout) with no-progress loop guarding.
-- Staged failure handling: after 2 consecutive tool failures, the model is forced into recovery mode; after 3 more failures, the run asks the user for guidance with attempted commands, errors, and outputs.
+- Staged failure handling: after 2 consecutive tool failures, the model is forced into recovery mode; after 3 more failures (including intermittent failure patterns), the run asks the user for guidance with attempted commands, errors, and outputs.
 - Structured tool-output errors (for example shell JSON output with `error`/`exit_code`) are treated as failures for recovery/escalation decisions.
 - Context safety improvements: historical tool-role messages are excluded from model history, current message drives directive detection, and context compacts at ~80 percent usage.
 - Model response cap is enforced via `model.max_tokens` (1..20000, default 20000).

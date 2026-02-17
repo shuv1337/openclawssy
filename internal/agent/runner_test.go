@@ -543,3 +543,39 @@ func TestRunnerEscalatesGuidanceForStructuredToolOutputErrors(t *testing.T) {
 		t.Fatalf("expected 5 tool calls before escalation, got %d", len(out.ToolCalls))
 	}
 }
+
+func TestRunnerEscalatesGuidanceAfterIntermittentFailuresInRecoveryMode(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd1"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd2"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "3", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd3"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "4", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd4"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "5", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd5"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "6", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd6"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "7", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd7"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "8", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","cmd8"]}`)}}},
+	}}
+
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Error: "exit status 1", Output: "first failure"},
+		"2": {ID: "2", Error: "exit status 1", Output: "second failure"},
+		"3": {ID: "3", Output: "success"},
+		"4": {ID: "4", Error: "exit status 1", Output: "third failure after recovery"},
+		"5": {ID: "5", Output: "success"},
+		"6": {ID: "6", Error: "exit status 1", Output: "fourth failure after recovery"},
+		"7": {ID: "7", Output: "success"},
+		"8": {ID: "8", Error: "exit status 1", Output: "fifth failure after recovery"},
+	}}
+
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+	out, err := runner.Run(context.Background(), RunInput{Message: "install tooling"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !strings.Contains(out.FinalText, "need your guidance before I continue") {
+		t.Fatalf("expected guidance escalation after intermittent failures, got %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 8 {
+		t.Fatalf("expected escalation after 8 tool calls, got %d", len(out.ToolCalls))
+	}
+}

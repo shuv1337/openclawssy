@@ -136,6 +136,7 @@ Openclawssy is configured to be accessible over Tailscale for secure remote acce
 
 **Tool calls keep failing in loops:**
 - The runner now auto-enters recovery mode after repeated failures and escalates with a guidance request after additional failures.
+- Intermittent success does not immediately clear recovery mode; escalation still occurs if failure patterns continue.
 - Review the returned attempted steps/errors/output, then provide a corrective instruction (for example capabilities, auth, or alternate approach).
 
 **Curl installer script fails with `rc-update: not found`:**

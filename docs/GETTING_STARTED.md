@@ -71,7 +71,7 @@ Queued chat responses include `session_id` when available so clients can poll th
 ## Failure recovery behavior
 
 - After 2 consecutive tool failures, the runner switches the model into recovery mode and expects a changed approach.
-- If 3 additional failures occur after recovery mode starts, the run stops and asks for user guidance.
+- If 3 additional failures occur after recovery mode starts (even if successes are mixed in), the run stops and asks for user guidance.
 - The guidance prompt includes attempted commands, error text, and output snippets to make next-step steering explicit.
 
 ## Important warning

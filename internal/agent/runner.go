@@ -69,6 +69,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	consecutiveToolFailures := 0
 	failureRecoveryActive := false
 	failuresSinceRecovery := 0
+	successesSinceRecovery := 0
 	toolTimeout := time.Duration(input.ToolTimeoutMS) * time.Millisecond
 	if toolTimeout <= 0 {
 		toolTimeout = DefaultToolTimeout
@@ -78,10 +79,17 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	registerToolOutcome := func(errText string) {
 		if strings.TrimSpace(errText) == "" {
 			consecutiveToolFailures = 0
-			failureRecoveryActive = false
-			failuresSinceRecovery = 0
+			if failureRecoveryActive {
+				successesSinceRecovery++
+				if successesSinceRecovery >= 3 {
+					failureRecoveryActive = false
+					failuresSinceRecovery = 0
+					successesSinceRecovery = 0
+				}
+			}
 			return
 		}
+		successesSinceRecovery = 0
 		consecutiveToolFailures++
 		if !failureRecoveryActive && consecutiveToolFailures >= failureRecoveryTrigger {
 			failureRecoveryActive = true
