@@ -24,6 +24,7 @@ WORKDIR /app
 # Install runtime dependencies for shell-heavy agent workflows.
 RUN apk add --no-cache \
     bash \
+    bind-tools \
     ca-certificates \
     coreutils \
     curl \
@@ -32,16 +33,30 @@ RUN apk add --no-cache \
     gawk \
     git \
     grep \
+    iproute2 \
+    iputils \
     jq \
+    lsof \
     make \
+    mtr \
+    net-tools \
+    netcat-openbsd \
+    nmap \
     nodejs \
     npm \
     openssh-client \
     openssl \
+    procps \
     py3-pip \
     py3-virtualenv \
     python3 \
     sed \
+    socat \
+    tcpdump \
+    traceroute \
+    tzdata \
+    unzip \
+    zip \
     wget \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
     && ln -sf /usr/bin/pip3 /usr/local/bin/pip

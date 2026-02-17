@@ -322,13 +322,17 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 	if fallbackUsed != "" {
 		res["shell_fallback"] = fallbackUsed
 	}
+	returnErr := execErr
+	if isProcessExitStatusError(execErr) {
+		returnErr = nil
+	}
 	if execErr != nil {
 		res["error"] = execErr.Error()
 	}
 	if timeoutRaw, ok := req.Args["timeout_ms"]; ok {
 		res["timeout_ms"] = normalizeInt(timeoutRaw)
 	}
-	return res, execErr
+	return res, returnErr
 }
 
 func isExecutableNotFound(err error) bool {
@@ -340,6 +344,17 @@ func isExecutableNotFound(err error) bool {
 		return false
 	}
 	return strings.Contains(text, "executable file not found") || strings.Contains(text, "not found in $path") || strings.Contains(text, "no such file or directory")
+}
+
+func isProcessExitStatusError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if text == "" {
+		return false
+	}
+	return strings.HasPrefix(text, "exit status ")
 }
 
 func normalizeInt(v any) int {

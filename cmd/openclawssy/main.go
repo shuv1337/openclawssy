@@ -445,7 +445,7 @@ func (a scopedChatAdapter) HandleMessage(ctx context.Context, msg httpchannel.Ch
 	if err != nil {
 		return httpchannel.ChatResponse{}, err
 	}
-	return httpchannel.ChatResponse{ID: queued.ID, Status: queued.Status, Response: queued.Response}, nil
+	return httpchannel.ChatResponse{ID: queued.ID, Status: queued.Status, Response: queued.Response, SessionID: queued.SessionID}, nil
 }
 
 func providerForDoctor(cfg config.Config) (config.ProviderEndpointConfig, error) {

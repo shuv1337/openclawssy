@@ -198,6 +198,65 @@ func TestRunnerAllowsRepeatedCallAfterPreviousToolError(t *testing.T) {
 	}
 }
 
+func TestRunnerCachesRepeatedFailureAfterSecondIdenticalError(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","nmap -sS 127.0.0.1"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","nmap -sS 127.0.0.1"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "3", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","nmap -sS 127.0.0.1"]}`)}}},
+		{FinalText: "done"},
+	}}
+
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Error: "tool_execution_failed (shell.exec): exit status 1"},
+		"2": {ID: "2", Error: "tool_execution_failed (shell.exec): exit status 1"},
+	}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 8}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "scan localhost"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 3 {
+		t.Fatalf("expected three tool call records, got %d", len(out.ToolCalls))
+	}
+	if len(tools.calls) != 2 {
+		t.Fatalf("expected third identical failing call to be served from cache, got %d executions", len(tools.calls))
+	}
+	if out.ToolCalls[2].Result.Error == "" {
+		t.Fatalf("expected cached failure on third call, got %+v", out.ToolCalls[2].Result)
+	}
+}
+
+func TestRunnerFinalizesWithModelWhenToolCapReached(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","nmap -sT 127.0.0.1"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","nmap -sT localhost"]}`)}}},
+		{FinalText: "Nmap completed. localhost is up and tcp/8080 is open."},
+	}}
+
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Output: `{"exit_code":0,"stdout":"PORT\n8080/tcp open http-proxy\n","stderr":""}`},
+	}}
+
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 1}
+	out, err := runner.Run(context.Background(), RunInput{Message: "run nmap on localhost"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "Nmap completed. localhost is up and tcp/8080 is open." {
+		t.Fatalf("unexpected finalized text: %q", out.FinalText)
+	}
+	if len(model.reqs) != 3 {
+		t.Fatalf("expected third model request for finalization, got %d requests", len(model.reqs))
+	}
+	if len(model.reqs[2].AllowedTools) != 0 {
+		t.Fatalf("expected finalize request to disable tools, got %#v", model.reqs[2].AllowedTools)
+	}
+}
+
 func TestRunnerAppliesPerToolTimeout(t *testing.T) {
 	model := &mockModel{responses: []ModelResponse{{ToolCalls: []ToolCallRequest{{ID: "1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}}, {FinalText: "done"}}}
 	runner := Runner{Model: model, ToolExecutor: slowToolExecutor{}, MaxToolIterations: 4}
@@ -293,5 +352,46 @@ func TestRunnerInvokesOnToolCallForEachRecord(t *testing.T) {
 	}
 	if notifications[0].Request.Name != "fs.list" || notifications[1].Request.Name != "fs.read" {
 		t.Fatalf("unexpected notification order: %+v", notifications)
+	}
+}
+
+func TestRunnerBreaksNoProgressToolLoopBeforeCap(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "3", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "4", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "5", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "6", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "7", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","pip install flask requests"]}`)}}},
+		{FinalText: "The venv is ready and flask/requests are already installed."},
+	}}
+
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Output: "Requirement already satisfied: flask\nRequirement already satisfied: requests"},
+	}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 24}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "please install useful tools into your .venv"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "The venv is ready and flask/requests are already installed." {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(tools.calls) != 1 {
+		t.Fatalf("expected only one real tool execution, got %d", len(tools.calls))
+	}
+	if len(model.reqs) != 8 {
+		t.Fatalf("expected finalize call after no-progress loop, got %d model requests", len(model.reqs))
+	}
+}
+
+func TestRunnerDefaultToolSettingsAreRaisedForLongTasks(t *testing.T) {
+	if DefaultToolIterationCap < 16 {
+		t.Fatalf("expected higher default tool iteration cap, got %d", DefaultToolIterationCap)
+	}
+	if DefaultToolTimeout < 120*time.Second {
+		t.Fatalf("expected higher default tool timeout, got %s", DefaultToolTimeout)
 	}
 }

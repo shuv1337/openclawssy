@@ -22,6 +22,10 @@ services:
       - ./.openclawssy:/app/.openclawssy
       # Optional: allow in-container Docker CLI to control host Docker daemon
       # - /var/run/docker.sock:/var/run/docker.sock
+    # Optional: enable advanced network diagnostics (tcpdump, some nmap modes)
+    # cap_add:
+    #   - NET_ADMIN
+    #   - NET_RAW
     # The entrypoint script handles initial setup
     # It will prompt/require ZAI_API_KEY on first run
     command: ["serve", "--token", "${OPENCLAWSSY_TOKEN:-change-me}", "--addr", "0.0.0.0:8080"]

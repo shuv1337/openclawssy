@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -36,6 +37,9 @@ const (
 	providerRetryBackoff   = 700 * time.Millisecond
 	toolNamePattern        = `[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*`
 	maxToolCallsPerReply   = 6
+	maxPromptToolResults   = 12
+	maxPromptToolOutput    = 6000
+	maxPromptToolError     = 1200
 	maxResponseTokens      = 20000
 	defaultContextWindow   = 120000
 	contextCompactionRatio = 0.80
@@ -279,6 +283,9 @@ func shouldRetryProviderError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
 	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
@@ -286,9 +293,11 @@ func shouldRetryProviderError(err error) bool {
 	if errors.As(err, &netErr) {
 		return netErr.Timeout() || netErr.Temporary()
 	}
-	return strings.Contains(strings.ToLower(err.Error()), "retryable provider status") ||
-		strings.Contains(strings.ToLower(err.Error()), "timeout") ||
-		strings.Contains(strings.ToLower(err.Error()), "too many requests")
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "retryable provider status") ||
+		strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "unexpected eof")
 }
 
 func ensureProviderRequestTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
@@ -306,32 +315,73 @@ func appendToolResultsPrompt(prompt string, results []agent.ToolCallResult) stri
 		return prompt
 	}
 
+	start := 0
+	if len(results) > maxPromptToolResults {
+		start = len(results) - maxPromptToolResults
+	}
+
 	var b strings.Builder
 	b.WriteString(prompt)
 	if prompt != "" && !strings.HasSuffix(prompt, "\n") {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n## Tool Results\n")
-	for _, tr := range results {
+	if start > 0 {
+		b.WriteString("- older_results_omitted: ")
+		b.WriteString(strconv.Itoa(start))
+		b.WriteString("\n")
+	}
+	if toolResultsContainErrors(results[start:]) {
+		b.WriteString("\n## Tool Failure Recovery\n")
+		b.WriteString("- One or more tool calls failed. Diagnose the cause from error/output, then continue with a revised plan.\n")
+		b.WriteString("- Do not repeat the exact same failing call without changing inputs/approach.\n")
+		b.WriteString("- Ask the user only if blocked by missing credentials, permissions, or an irreversible decision.\n")
+	}
+	for _, tr := range results[start:] {
 		b.WriteString("- id: ")
 		b.WriteString(tr.ID)
 		b.WriteString("\n")
 		if tr.Error != "" {
 			b.WriteString("  error: ")
-			b.WriteString(tr.Error)
-			b.WriteString("\n")
-			continue
-		}
-		b.WriteString("  output:\n")
-		b.WriteString("  ```\n")
-		b.WriteString(tr.Output)
-		if tr.Output != "" && !strings.HasSuffix(tr.Output, "\n") {
+			b.WriteString(truncateForPrompt(tr.Error, maxPromptToolError))
 			b.WriteString("\n")
 		}
-		b.WriteString("  ```\n")
+		if strings.TrimSpace(tr.Output) != "" {
+			output := truncateForPrompt(tr.Output, maxPromptToolOutput)
+			b.WriteString("  output:\n")
+			b.WriteString("  ```\n")
+			b.WriteString(output)
+			if output != "" && !strings.HasSuffix(output, "\n") {
+				b.WriteString("\n")
+			}
+			b.WriteString("  ```\n")
+		}
 	}
 
 	return b.String()
+}
+
+func toolResultsContainErrors(results []agent.ToolCallResult) bool {
+	for _, tr := range results {
+		if strings.TrimSpace(tr.Error) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateForPrompt(value string, maxChars int) string {
+	if maxChars <= 0 {
+		return strings.TrimSpace(value)
+	}
+	text := strings.TrimSpace(value)
+	if len(text) <= maxChars {
+		return text
+	}
+	if maxChars <= 3 {
+		return text[:maxChars]
+	}
+	return strings.TrimSpace(text[:maxChars-3]) + "..."
 }
 
 func compactMessagesForContext(systemPrompt string, messages []agent.ChatMessage, contextWindow int) []agent.ChatMessage {

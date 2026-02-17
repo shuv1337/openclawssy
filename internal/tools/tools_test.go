@@ -90,6 +90,15 @@ func (s *shOnlyFallbackShell) Exec(ctx context.Context, command string, args []s
 	return "", "", 127, errors.New("unexpected command")
 }
 
+type exitStatusShell struct{}
+
+func (exitStatusShell) Exec(ctx context.Context, command string, args []string) (string, string, int, error) {
+	_ = ctx
+	_ = command
+	_ = args
+	return "scan partial output", "permission denied", 1, errors.New("exit status 1")
+}
+
 func (m *memAudit) LogEvent(ctx context.Context, eventType string, fields map[string]any) error {
 	_ = ctx
 	_ = fields
@@ -259,6 +268,28 @@ func TestShellExecFallsBackToShWhenBashBinaryMissing(t *testing.T) {
 	}
 	if res["shell_fallback"] != "sh" {
 		t.Fatalf("expected shell_fallback=sh, got %#v", res["shell_fallback"])
+	}
+}
+
+func TestShellExecTreatsExitStatusAsResultNotToolFailure(t *testing.T) {
+	reg := NewRegistry(fakePolicy{}, nil)
+	reg.SetShellExecutor(exitStatusShell{})
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	res, err := reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
+		"command": "bash",
+		"args":    []any{"-lc", "nmap -sS 127.0.0.1"},
+	})
+	if err != nil {
+		t.Fatalf("expected non-zero exit status to return structured result without tool failure, got: %v", err)
+	}
+	if res["exit_code"] != 1 {
+		t.Fatalf("expected exit_code=1, got %#v", res["exit_code"])
+	}
+	if strings.TrimSpace(res["error"].(string)) != "exit status 1" {
+		t.Fatalf("expected structured error field with exit status, got %#v", res["error"])
 	}
 }
 

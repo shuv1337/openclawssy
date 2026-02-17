@@ -199,7 +199,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	runner := agent.Runner{
 		Model:             model,
 		ToolExecutor:      &RegistryExecutor{Registry: registry, AgentID: agentID, Workspace: e.workspaceDir},
-		MaxToolIterations: 8,
+		MaxToolIterations: agent.DefaultToolIterationCap,
 	}
 
 	modelMessages := []agent.ChatMessage{{Role: "user", Content: message}}
@@ -238,8 +238,8 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		Messages:          modelMessages,
 		ArtifactDocs:      docs,
 		PerFileByteLimit:  16 * 1024,
-		MaxToolIterations: 8,
-		ToolTimeoutMS:     int((45 * time.Second) / time.Millisecond),
+		MaxToolIterations: agent.DefaultToolIterationCap,
+		ToolTimeoutMS:     int(agent.DefaultToolTimeout / time.Millisecond),
 		AllowedTools:      allowedTools,
 		OnToolCall:        onToolCall,
 	})
@@ -447,13 +447,13 @@ func (e *Engine) loadPromptDocs(agentID string) ([]agent.ArtifactDoc, error) {
 
 func runtimeContextDoc(workspaceDir string) string {
 	return fmt.Sprintf(
-		"# RUNTIME_CONTEXT\n\n- Workspace root: %s\n- File tools (fs.read/fs.list/fs.write/fs.edit/code.search) can only access paths inside workspace root.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy.\n- If shell.exec is enabled by policy, run shell commands through `bash -lc` in shell.exec args.\n- If `bash` is unavailable in PATH, runtime retries `/bin/bash`, then `/usr/bin/bash`, then `sh`.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy even when using shell.exec.\n- If the user asks about files in home directory, explain this limitation and offer to list the workspace instead.\n- Keep responses task-focused; do not mention HANDOFF/SPECPLAN/DEVPLAN unless the user explicitly asks about them.\n",
+		"# RUNTIME_CONTEXT\n\n- Workspace root: %s\n- File tools (fs.read/fs.list/fs.write/fs.edit/code.search) can only access paths inside workspace root.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy.\n- If shell.exec is enabled by policy, run shell commands through `bash -lc` in shell.exec args.\n- If `bash` is unavailable in PATH, runtime retries `/bin/bash`, then `/usr/bin/bash`, then `sh`.\n- Shell commands can use environment tools available in the runtime image (for example: python3/pip, node/npm, git, curl/wget, jq, nmap, dig/nslookup, ip/ss/netstat, traceroute, tcpdump).\n- Some network commands may require container capabilities or host mounts (for example docker socket, NET_RAW, NET_ADMIN). If unavailable, report the exact error and continue with the best available diagnostic command.\n- Paths outside workspace (for example /home, ~, ..) are blocked by policy even when using shell.exec.\n- If the user asks about files in home directory, explain this limitation and offer to list the workspace instead.\n- Keep responses task-focused; do not mention HANDOFF/SPECPLAN/DEVPLAN unless the user explicitly asks about them.\n",
 		workspaceDir,
 	)
 }
 
 func toolCallingBestPracticesDoc() string {
-	return "# TOOL_CALLING_BEST_PRACTICES\n\n- Use only registered tool names: fs.read, fs.list, fs.write, fs.edit, code.search, time.now, shell.exec.\n- Preferred format for tool calls is a fenced JSON object with tool_name and arguments.\n- Example:\n```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```\n- For bash commands use shell.exec with command=`bash` and args=[\"-lc\", \"<script>\"].\n- Runtime retries `/bin/bash` and `/usr/bin/bash` before fallback to `sh`; keep scripts POSIX-compatible when possible.\n- Do not invent tool names (for example time.sleep is invalid).\n- Do not claim file edits or command results until a matching tool.result is observed.\n- For multi-step requests, chain tool calls until the task is complete instead of stopping after the first step.\n- After each tool result, send a short progress update before issuing the next tool call when possible.\n"
+	return "# TOOL_CALLING_BEST_PRACTICES\n\n- Use only registered tool names: fs.read, fs.list, fs.write, fs.edit, code.search, time.now, shell.exec.\n- Preferred format for tool calls is a fenced JSON object with tool_name and arguments.\n- Example:\n```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```\n- For shell commands use shell.exec with command=`bash` and args=[\"-lc\", \"<script>\"].\n- Runtime retries `/bin/bash` and `/usr/bin/bash` before fallback to `sh`; keep scripts POSIX-compatible when possible.\n- Common runtime shell tools include: python3/pip, node/npm, git, curl, wget, jq, nmap, dig/nslookup, ip, ss, netstat, traceroute, tcpdump.\n- For connectivity checks, prefer read-only diagnostics first (for example `ip addr`, `ss -tulpen`, `dig`, `curl -I`, `nmap -sT`).\n- For multi-step shell tasks, prefer one well-structured script in a single `shell.exec` call over many tiny probe commands.\n- If the user asks you to do work, continue executing the plan directly; do not ask permission-style follow-up questions.\n- If a command fails due to permissions/capabilities, surface the exact stderr and try a safer fallback command when possible.\n- If you already have enough evidence from tool results, stop calling tools and provide the final answer.\n- Avoid running the exact same failing command repeatedly; adjust flags or explain the failure instead.\n- Do not invent tool names (for example time.sleep is invalid).\n- Do not claim file edits or command results until a matching tool.result is observed.\n- For multi-step requests, chain tool calls until the task is complete instead of stopping after the first step.\n- After each tool result, send a short progress update before issuing the next tool call when possible.\n"
 }
 
 type RegistryExecutor struct {

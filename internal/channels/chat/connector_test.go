@@ -45,6 +45,9 @@ func TestConnectorQueuesAllowedMessage(t *testing.T) {
 	if run.ID != "run-1" {
 		t.Fatalf("unexpected run id: %s", run.ID)
 	}
+	if strings.TrimSpace(run.SessionID) == "" {
+		t.Fatal("expected session id in connector result")
+	}
 }
 
 func TestConnectorRejectsUnallowlisted(t *testing.T) {
@@ -94,6 +97,9 @@ func TestConnectorNewResumeAndChatsCommands(t *testing.T) {
 	if !strings.HasPrefix(res.Response, "Started new chat: ") {
 		t.Fatalf("unexpected /new response: %q", res.Response)
 	}
+	if strings.TrimSpace(res.SessionID) == "" {
+		t.Fatal("expected /new to return session id")
+	}
 	if queued != 0 {
 		t.Fatalf("expected no queued runs, got %d", queued)
 	}
@@ -113,6 +119,9 @@ func TestConnectorNewResumeAndChatsCommands(t *testing.T) {
 	}
 	if res.Response != "Resumed chat: "+sessionID {
 		t.Fatalf("unexpected /resume response: %q", res.Response)
+	}
+	if res.SessionID != sessionID {
+		t.Fatalf("expected /resume session id %q, got %q", sessionID, res.SessionID)
 	}
 	if queued != 0 {
 		t.Fatalf("expected no queued runs after commands, got %d", queued)

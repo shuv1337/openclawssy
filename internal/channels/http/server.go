@@ -42,9 +42,10 @@ type ChatConnector interface {
 }
 
 type ChatResponse struct {
-	ID       string `json:"id,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Response string `json:"response,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Response  string `json:"response,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type ExecutionInput struct {

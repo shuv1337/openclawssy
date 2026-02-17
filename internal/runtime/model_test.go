@@ -118,6 +118,50 @@ func TestProviderModelRoutesToolResultsBackThroughModel(t *testing.T) {
 	}
 }
 
+func TestAppendToolResultsPromptLimitsToolResultCountAndSize(t *testing.T) {
+	results := make([]agent.ToolCallResult, 0, maxPromptToolResults+3)
+	for i := 1; i <= maxPromptToolResults+3; i++ {
+		results = append(results, agent.ToolCallResult{
+			ID:     "tool-" + strconv.Itoa(i),
+			Output: strings.Repeat("x", maxPromptToolOutput+200),
+		})
+	}
+
+	prompt := appendToolResultsPrompt("system", results)
+	if !strings.Contains(prompt, "older_results_omitted: 3") {
+		t.Fatalf("expected omitted-result marker, got %q", prompt)
+	}
+	if strings.Contains(prompt, "- id: tool-1\n") || strings.Contains(prompt, "- id: tool-2\n") || strings.Contains(prompt, "- id: tool-3\n") {
+		t.Fatalf("expected oldest tool IDs to be omitted from prompt")
+	}
+	if !strings.Contains(prompt, "- id: tool-4\n") || !strings.Contains(prompt, "- id: tool-15\n") {
+		t.Fatalf("expected newest tool IDs to remain in prompt")
+	}
+	if strings.Count(prompt, strings.Repeat("x", maxPromptToolOutput+50)) > 0 {
+		t.Fatalf("expected oversized tool outputs to be truncated")
+	}
+}
+
+func TestAppendToolResultsPromptIncludesErrorOutputAndRecoveryGuidance(t *testing.T) {
+	prompt := appendToolResultsPrompt("system", []agent.ToolCallResult{
+		{
+			ID:     "tool-1",
+			Output: "partial stdout from failed command",
+			Error:  "tool_execution_failed (shell.exec): permission denied",
+		},
+	})
+
+	if !strings.Contains(prompt, "## Tool Failure Recovery") {
+		t.Fatalf("expected failure recovery guidance in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "error: tool_execution_failed") {
+		t.Fatalf("expected tool error in prompt, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "partial stdout from failed command") {
+		t.Fatalf("expected failed call output in prompt for diagnosis, got %q", prompt)
+	}
+}
+
 func TestProviderModelSendsStructuredHistoryMessages(t *testing.T) {
 	var captured requestCapture
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -442,6 +486,38 @@ func TestProviderModelRetriesOnTimeout(t *testing.T) {
 		t.Fatalf("generate failed: %v", err)
 	}
 	if resp.FinalText != "retry succeeded" {
+		t.Fatalf("unexpected final text: %q", resp.FinalText)
+	}
+	if calls < 2 {
+		t.Fatalf("expected retry attempt, got %d call(s)", calls)
+	}
+}
+
+func TestProviderModelRetriesOnUnexpectedEOF(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"partial`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "retry after eof",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "hi"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if resp.FinalText != "retry after eof" {
 		t.Fatalf("unexpected final text: %q", resp.FinalText)
 	}
 	if calls < 2 {

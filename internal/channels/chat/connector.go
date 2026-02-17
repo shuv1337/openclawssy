@@ -24,9 +24,10 @@ type Message struct {
 }
 
 type Result struct {
-	ID       string
-	Status   string
-	Response string
+	ID        string
+	Status    string
+	Response  string
+	SessionID string
 }
 
 type QueuedRun struct {
@@ -88,7 +89,7 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		if err != nil {
 			return Result{}, err
 		}
-		return Result{Response: "Started new chat: " + session.SessionID}, nil
+		return Result{Response: "Started new chat: " + session.SessionID, SessionID: session.SessionID}, nil
 	}
 	if strings.HasPrefix(text, "/resume") {
 		parts := strings.Fields(text)
@@ -108,7 +109,7 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		if err := c.Store.SetActiveSessionPointer(agentID, source, msg.UserID, roomID, parts[1]); err != nil {
 			return Result{}, err
 		}
-		return Result{Response: "Resumed chat: " + parts[1]}, nil
+		return Result{Response: "Resumed chat: " + parts[1], SessionID: parts[1]}, nil
 	}
 	if text == "/chats" {
 		sessions, err := c.Store.ListSessions(agentID, msg.UserID, roomID, source)
@@ -143,7 +144,7 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		return Result{}, err
 	}
 
-	return Result{ID: queued.ID, Status: queued.Status}, nil
+	return Result{ID: queued.ID, Status: queued.Status, SessionID: session.SessionID}, nil
 }
 
 func (c *Connector) createAndSetActiveSession(agentID, source, userID, roomID string) (chatstore.Session, error) {

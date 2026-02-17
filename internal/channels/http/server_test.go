@@ -127,6 +127,27 @@ func TestServer_ChatMessageEndpoint(t *testing.T) {
 	}
 }
 
+func TestServer_ChatMessageIncludesSessionIDWhenProvided(t *testing.T) {
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}, Chat: testChatConnector{response: ChatResponse{ID: "run-chat", Status: "queued", SessionID: "session-1"}}})
+	body := bytes.NewBufferString(`{"user_id":"u1","room_id":"r1","message":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/messages", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected %d, got %d", http.StatusAccepted, rr.Code)
+	}
+
+	var resp ChatResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode chat response: %v", err)
+	}
+	if resp.SessionID != "session-1" {
+		t.Fatalf("expected session id in response, got %+v", resp)
+	}
+}
+
 func TestServer_ChatMessageDenied(t *testing.T) {
 	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}, Chat: testChatConnector{err: errors.New("denied")}})
 	body := bytes.NewBufferString(`{"user_id":"u1","message":"hello"}`)

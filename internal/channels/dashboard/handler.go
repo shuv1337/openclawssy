@@ -1088,6 +1088,34 @@ renderToolActivity();
 renderChat();
 }
 
+async function loadSessionToolActivity(sessionID){
+if(!sessionID)return{count:0,lastSummary:''};
+const data=await j('/api/admin/chat/sessions/'+encodeURIComponent(sessionID)+'/messages?limit=200');
+if(!data||data.error||!Array.isArray(data.messages)){
+return{count:0,lastSummary:''};
+}
+const nextToolActivity=[];
+data.messages.forEach(function(msg){
+if(!msg||typeof msg!=='object'||msg.role!=='tool')return;
+let parsed={};
+try{parsed=JSON.parse(msg.content||'{}');}catch(e){parsed={};}
+const toolName=msg.tool_name||parsed.tool||'unknown.tool';
+const output=compactToolText(parsed.output||msg.content||'',5000);
+const error=compactToolText(parsed.error||'',5000);
+nextToolActivity.push({
+tool:toolName,
+callID:msg.tool_call_id||parsed.id||'',
+summary:deriveToolSummary(toolName,output,error,parsed.summary||''),
+output:output,
+error:error
+});
+});
+toolActivity=nextToolActivity;
+renderToolActivity();
+const last=toolActivity.length>0?toolActivity[toolActivity.length-1]:null;
+return{count:toolActivity.length,lastSummary:last&&(last.summary||last.error||last.tool)?(last.summary||last.error||last.tool):''};
+}
+
 async function openSession(sessionID){
 if(!sessionID)return;
 currentActiveSessionID=sessionID;
@@ -1107,19 +1135,50 @@ if(run.status==='failed')return run;
 return{status:'running',id:runId,error:'Still running after '+timeoutSeconds+'s'};
 }
 
-async function continuePollingRun(runId,thinkingIdx){
-const run=await pollRun(runId,240);
+async function continuePollingRun(runId,thinkingIdx,startedAtMs){
+const started=(typeof startedAtMs==='number'&&startedAtMs>0)?startedAtMs:Date.now();
+for(;;){
+let run;
+let progress={count:0,lastSummary:''};
+try{
+if(currentActiveSessionID){
+progress=await loadSessionToolActivity(currentActiveSessionID);
+}
+run=await pollRun(runId,60);
+}catch(e){
+chatMessages[thinkingIdx]={role:'assistant',content:'Run '+runId+' is still processing (temporary status check error: '+e.message+'). I will keep checking automatically.'};
+renderChat();
+await new Promise(function(resolve){setTimeout(resolve,3000);});
+continue;
+}
 if(run.status==='failed'){
 chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+(run.error||'Run failed')};
-}else if(run.status==='completed'){
+renderChat();
+loadStatus();
+return;
+}
+if(run.status==='completed'){
 const output=(run.output&&run.output.trim())?run.output:'(completed with no output)';
 chatMessages[thinkingIdx]={role:'assistant',content:output};
 appendToolActivityFromRun(run);
-}else{
-chatMessages[thinkingIdx]={role:'assistant',content:'Run '+runId+' is still running. Use Status > Refresh to check progress.'};
-}
 renderChat();
 loadStatus();
+return;
+}
+const elapsedSeconds=Math.max(1,Math.floor((Date.now()-started)/1000));
+let progressText='Run '+runId+' is still running ('+elapsedSeconds+'s elapsed).';
+if(progress.count>0){
+progressText+=' Completed '+progress.count+' tool call'+(progress.count===1?'':'s')+'.';
+if(progress.lastSummary){
+progressText+=' Latest: '+progress.lastSummary;
+}
+}
+progressText+=' I am continuing to poll automatically and will post the final result here.';
+chatMessages[thinkingIdx]={role:'assistant',content:progressText};
+renderChat();
+loadStatus();
+await new Promise(function(resolve){setTimeout(resolve,3000);});
+}
 }
 
 async function sendChat(){
@@ -1158,12 +1217,16 @@ const result=await j('/v1/chat/messages',{method:'POST',body:JSON.stringify({use
 if(result.error){
 chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+result.error};
 }else if(result.id){
+if(result.session_id&&String(result.session_id).trim()){
+currentActiveSessionID=String(result.session_id).trim();
+if(byId('resumeSessionID'))byId('resumeSessionID').value=currentActiveSessionID;
+}
 const run=await pollRun(result.id,120);
 if(run.status==='failed'){
 chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+(run.error||'Run failed')};
 }else if(run.status==='running'){
-chatMessages[thinkingIdx]={role:'assistant',content:'Run '+result.id+' is still processing. I will keep polling and update this message.'};
-continuePollingRun(result.id,thinkingIdx);
+chatMessages[thinkingIdx]={role:'assistant',content:'Run '+result.id+' is still processing. I will keep polling automatically and post the final output here.'};
+continuePollingRun(result.id,thinkingIdx,Date.now());
 }else{
 const output=(run.output&&run.output.trim())?run.output:'(completed with no output)';
 chatMessages[thinkingIdx]={role:'assistant',content:output};

@@ -40,6 +40,7 @@ Openclawssy is now pre-configured to use **ZAI's GLM-4.7 Coding Plan** as the de
 - **Secure Setup**: API key validation on startup
 - **Persistent Storage**: Configuration and workspace are saved locally
 - **Shell-ready runtime image**: Includes `bash`, `python3`/`pip`, `node`/`npm`, `git`, `curl`, `wget`, `jq`, and common GNU utilities
+- **Network diagnostics included**: `nmap`, `dig`/`nslookup`, `ip`, `ss`, `netstat`, `traceroute`, `tcpdump`, `mtr`, `nc`, `socat`, and related tools
 
 ### Environment Variables
 
@@ -65,6 +66,14 @@ If you want the bot to run Docker commands against your host daemon, add the Doc
 
 ```bash
 -v /var/run/docker.sock:/var/run/docker.sock
+```
+
+For deeper network diagnostics in the container (for example `tcpdump`/advanced `nmap` modes), you may also need extra capabilities:
+
+```yaml
+cap_add:
+  - NET_ADMIN
+  - NET_RAW
 ```
 
 **Note**: The container exposes port 8080 internally. Map it to any available port on your host (e.g., 8081 to avoid conflicts).
@@ -121,3 +130,6 @@ Openclawssy is configured to be accessible over Tailscale for secure remote acce
 - Rebuild with the updated image: `docker-compose build --no-cache openclawssy`
 - Restart the service: `docker-compose up -d`
 - Verify tools are present: `docker-compose exec openclawssy sh -lc 'bash --version && python3 --version && node --version'`
+
+**Verify network diagnostic tools are present:**
+- `docker-compose exec openclawssy sh -lc 'nmap --version && dig +short example.com && ip -br a && ss -tulpen | head -n 5'`

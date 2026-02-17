@@ -15,8 +15,9 @@ var (
 )
 
 const (
-	DefaultToolIterationCap = 8
-	DefaultToolTimeout      = 45 * time.Second
+	DefaultToolIterationCap          = 120
+	DefaultToolTimeout               = 900 * time.Second
+	repeatedNoProgressLoopCapTrigger = 6
 )
 
 // Runner executes the model/tool loop for a single run.
@@ -59,10 +60,14 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	toolCallOrdinal := 0
 	usedToolCallIDs := make(map[string]struct{})
 	cachedToolResults := make(map[string]ToolCallResult)
+	cachedFailedToolResults := make(map[string]ToolCallResult)
+	failedToolCallCounts := make(map[string]int)
+	failedToolCallErrors := make(map[string]string)
 	toolTimeout := time.Duration(input.ToolTimeoutMS) * time.Millisecond
 	if toolTimeout <= 0 {
 		toolTimeout = DefaultToolTimeout
 	}
+	noProgressIterations := 0
 
 	for {
 		resp, err := r.Model.Generate(ctx, ModelRequest{
@@ -91,6 +96,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 		if toolIterations >= toolCap {
 			if len(toolResults) > 0 {
+				if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults); finalized != "" {
+					out.FinalText = finalized
+					out.CompletedAt = time.Now().UTC()
+					return out, nil
+				}
 				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
 				out.CompletedAt = time.Now().UTC()
 				return out, nil
@@ -99,6 +109,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			return out, ErrToolIterationCapExceeded
 		}
 
+		hadFreshExecution := false
 		for _, incoming := range resp.ToolCalls {
 			toolCallOrdinal++
 			call := incoming
@@ -107,6 +118,20 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			callKey := call.Name + "|" + string(call.Arguments)
 			if callKey != "|" {
 				if cached, ok := cachedToolResults[callKey]; ok {
+					now := time.Now().UTC()
+					cached.ID = call.ID
+					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
+					out.ToolCalls = append(out.ToolCalls, record)
+					toolResults = append(toolResults, record.Result)
+					if input.OnToolCall != nil {
+						if err := input.OnToolCall(record); err != nil {
+							out.CompletedAt = time.Now().UTC()
+							return out, err
+						}
+					}
+					continue
+				}
+				if cached, ok := cachedFailedToolResults[callKey]; ok {
 					now := time.Now().UTC()
 					cached.ID = call.ID
 					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
@@ -139,9 +164,26 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 			record.Result = result
 			record.CompletedAt = time.Now().UTC()
+			hadFreshExecution = true
 
-			if callKey != "|" && strings.TrimSpace(result.Error) == "" {
-				cachedToolResults[callKey] = ToolCallResult{Output: result.Output}
+			if callKey != "|" {
+				if strings.TrimSpace(result.Error) == "" {
+					cachedToolResults[callKey] = ToolCallResult{Output: result.Output}
+					delete(cachedFailedToolResults, callKey)
+					delete(failedToolCallCounts, callKey)
+					delete(failedToolCallErrors, callKey)
+				} else {
+					errText := strings.TrimSpace(result.Error)
+					if failedToolCallErrors[callKey] == errText {
+						failedToolCallCounts[callKey]++
+					} else {
+						failedToolCallErrors[callKey] = errText
+						failedToolCallCounts[callKey] = 1
+					}
+					if failedToolCallCounts[callKey] >= 2 {
+						cachedFailedToolResults[callKey] = ToolCallResult{Output: result.Output, Error: result.Error}
+					}
+				}
 			}
 
 			out.ToolCalls = append(out.ToolCalls, record)
@@ -154,8 +196,52 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			}
 		}
 
+		if hadFreshExecution {
+			noProgressIterations = 0
+		} else {
+			noProgressIterations++
+		}
+
+		if noProgressIterations >= repeatedNoProgressLoopCapTrigger && len(toolResults) > 0 {
+			if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults); finalized != "" {
+				out.FinalText = finalized
+			} else {
+				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
+			}
+			out.CompletedAt = time.Now().UTC()
+			return out, nil
+		}
+
 		toolIterations++
 	}
+}
+
+func finalizeFromToolResults(ctx context.Context, model Model, prompt string, messages []ChatMessage, message string, toolResults []ToolCallResult) string {
+	if model == nil || len(toolResults) == 0 {
+		return ""
+	}
+
+	finalPrompt := strings.TrimSpace(prompt)
+	if finalPrompt != "" {
+		finalPrompt += "\n\n"
+	}
+	finalPrompt += "# FINAL_RESPONSE_MODE\n- Do not call tools in this turn.\n- Use the latest tool results to answer the user directly.\n- If some commands failed, explain the failure and give the best next step."
+
+	resp, err := model.Generate(ctx, ModelRequest{
+		SystemPrompt: finalPrompt,
+		Messages:     append([]ChatMessage(nil), messages...),
+		AllowedTools: nil,
+		Prompt:       finalPrompt,
+		Message:      message,
+		ToolResults:  append([]ToolCallResult(nil), toolResults...),
+	})
+	if err != nil {
+		return ""
+	}
+	if len(resp.ToolCalls) > 0 {
+		return ""
+	}
+	return strings.TrimSpace(resp.FinalText)
 }
 
 func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
@@ -178,8 +264,8 @@ func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
 			continue
 		}
 		out := strings.TrimSpace(item.Output)
-		if len(out) > 320 {
-			out = out[:320] + "..."
+		if len(out) > 1200 {
+			out = out[:1200] + "..."
 		}
 		if out == "" {
 			out = "(empty output)"
