@@ -40,6 +40,20 @@ Progress Log
 
 2026-02-17 — PR###: Completed M4.2 by adding cross-process chatstore file locking for session/message writes and active-pointer updates, plus a contention test that writes from multiple store instances and validates `messages.jsonl` remains fully valid JSONL.
 
+2026-02-17 — PR###: Completed M5.1 by ensuring per-tool timeouts produce structured `timeout` tool errors (including runner fallback formatting), mapping deadline-exceeded failures to timeout-coded tool errors in the registry, auditing timeout failures via `tool.result`, and adding unit tests for runner timeout behavior and audited timeout error codes.
+
+2026-02-17 — PR###: Completed M5.2 by aligning tool error codes to canonical dotted forms (`tool.not_found`, `tool.input_invalid`, `policy.denied`, `timeout`, `internal.error`), adding tests for canonical input-invalid/not-found and timeout mapping, and extending persisted tool message payloads with machine-readable `error_code` and `error_message` fields.
+
+2026-02-17 — PR###: Completed M5.3 by hardening `intValue()` numeric parsing across native numeric/json/string inputs, preserving shell fallback summarization behavior, and adding explicit unit coverage that numeric parsing is correct.
+
+2026-02-17 — PR###: Completed M6.1 by resolving the docker sandbox stub as unavailable in this build (fail-fast `sandbox.unavailable`), preventing silent unsafe fallback, and adding sandbox/runtime tests for clear docker-unavailable errors.
+
+2026-02-17 — PR###: Completed M6.2 by aligning default server bind posture to loopback (`127.0.0.1`) in runtime defaults, adding config test coverage for loopback binding, and keeping docs consistent with secure default behavior.
+
+2026-02-17 — PR###: Completed M7.1 (spec-alignment path) by updating scheduler contracts to explicitly support only `@every <duration>` and one-shot RFC3339 schedules, and documenting that cron expressions are currently rejected.
+
+2026-02-17 — PR###: Completed M8.1 by refactoring audit logging to keep an open buffered file handle (removing per-event open/close), syncing durably on run-end/close, and wiring runtime cleanup via logger close while preserving existing audit test behavior.
+
 YYYY-MM-DD — PR###: …
 
 YYYY-MM-DD — PR###: …
@@ -342,7 +356,7 @@ Milestone 5 — Tool execution reliability & UX (important, after chat correctne
 
 Goal: When tools fail, users get actionable output, and the system avoids runaway resource usage.
 
-M5.1 Respect ToolTimeoutMS
+- [x] M5.1 Respect ToolTimeoutMS
 
 Implementation tasks
 
@@ -354,7 +368,7 @@ Acceptance
 
  Test: a tool that sleeps past timeout is cancelled and returns a timeout error.
 
-M5.2 Improve tool error reporting + schema consistency
+- [x] M5.2 Improve tool error reporting + schema consistency
 
 Implementation tasks
 
@@ -368,7 +382,7 @@ Acceptance
 
  Manual: tool error shows a short summary + details in debug mode.
 
-M5.3 Fix small correctness bugs in trace summarization
+- [x] M5.3 Fix small correctness bugs in trace summarization
 
 Implementation tasks
 
@@ -386,7 +400,7 @@ Milestone 6 — Security & sandboxing (important, but after chat/tool stability)
 
 Goal: Don’t claim sandboxing that isn’t real; make “safe defaults” actually safe.
 
-M6.1 Resolve Docker sandbox stub (implement or remove)
+- [x] M6.1 Resolve Docker sandbox stub (implement or remove)
 
 Implementation tasks
 
@@ -406,7 +420,7 @@ Acceptance
 
  Manual: sandbox=docker with docker missing yields a clear error and shell.exec remains disabled.
 
-M6.2 Align server bind defaults with secure posture
+- [x] M6.2 Align server bind defaults with secure posture
 
 Implementation tasks
 
@@ -422,7 +436,7 @@ Milestone 7 — Scheduler correctness vs. spec (later)
 
 Goal: Match spec expectations (cron-like scheduling, persistence, restart behavior).
 
-M7.1 Add cron expression support (or update spec to match reality)
+- [x] M7.1 Add cron expression support (or update spec to match reality)
 
 Implementation tasks
 
@@ -438,7 +452,7 @@ Milestone 8 — Performance & observability (later)
 
 Goal: Make it easier to debug and cheaper to run.
 
-M8.1 Improve audit logger performance safely
+- [x] M8.1 Improve audit logger performance safely
 
 Implementation tasks
 

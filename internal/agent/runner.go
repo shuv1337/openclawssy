@@ -237,7 +237,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 				result.ID = call.ID
 			}
 			if execErr != nil {
-				result.Error = execErr.Error()
+				if isToolTimeoutError(execErr) && !strings.Contains(strings.ToLower(execErr.Error()), "timeout") {
+					result.Error = fmt.Sprintf("timeout: tool execution exceeded %dms", int(toolTimeout/time.Millisecond))
+				} else {
+					result.Error = execErr.Error()
+				}
 			}
 			if strings.TrimSpace(result.Error) == "" {
 				if inferred := toolResultErrorText(result); inferred != "" {
@@ -396,6 +400,16 @@ func formatLatestToolResults(results []ToolCallResult) string {
 		b.WriteString(fmt.Sprintf("- %d) output: %s\n", idx, out))
 	}
 	return b.String()
+}
+
+func isToolTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(err.Error())), "deadline exceeded")
 }
 
 func appendPromptDirective(prompt, directive string) string {

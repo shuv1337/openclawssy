@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakePolicy struct {
@@ -37,6 +38,12 @@ func (p fakePolicy) ResolveWritePath(workspace, target string) (string, error) {
 
 type memAudit struct {
 	events []string
+	recs   []auditRecord
+}
+
+type auditRecord struct {
+	eventType string
+	fields    map[string]any
 }
 
 type fakeShell struct{}
@@ -101,8 +108,12 @@ func (exitStatusShell) Exec(ctx context.Context, command string, args []string) 
 
 func (m *memAudit) LogEvent(ctx context.Context, eventType string, fields map[string]any) error {
 	_ = ctx
-	_ = fields
+	copyFields := map[string]any{}
+	for k, v := range fields {
+		copyFields[k] = v
+	}
 	m.events = append(m.events, eventType)
+	m.recs = append(m.recs, auditRecord{eventType: eventType, fields: copyFields})
 	return nil
 }
 
@@ -114,8 +125,37 @@ func TestRegistryRegisterAndNotFound(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 
-	if _, err := reg.Execute(context.Background(), "agent", "missing", ".", nil); err == nil {
+	_, err := reg.Execute(context.Background(), "agent", "missing", ".", nil)
+	if err == nil {
 		t.Fatalf("expected not found error")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodeNotFound {
+		t.Fatalf("expected %s, got %s", ErrCodeNotFound, toolErr.Code)
+	}
+}
+
+func TestRegistryMissingRequiredFieldUsesCanonicalInputInvalidCode(t *testing.T) {
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := reg.Register(ToolSpec{Name: "needs_path", Required: []string{"path"}}, func(ctx context.Context, req Request) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "needs_path", ".", map[string]any{})
+	if err == nil {
+		t.Fatalf("expected input invalid error")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodeInvalidInput {
+		t.Fatalf("expected %s, got %s", ErrCodeInvalidInput, toolErr.Code)
 	}
 }
 
@@ -140,6 +180,51 @@ func TestRegistryPolicyDenied(t *testing.T) {
 	}
 	if !foundDenied {
 		t.Fatalf("expected policy.denied audit event")
+	}
+}
+
+func TestRegistryTimeoutIsStructuredAndAudited(t *testing.T) {
+	a := &memAudit{}
+	reg := NewRegistry(fakePolicy{}, a)
+	if err := reg.Register(ToolSpec{Name: "slow"}, func(ctx context.Context, req Request) (map[string]any, error) {
+		_ = req
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := reg.Execute(ctx, "agent", "slow", ".", nil)
+	if err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected tool error, got %T", err)
+	}
+	if toolErr.Code != ErrCodeTimeout {
+		t.Fatalf("expected timeout code, got %s", toolErr.Code)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		t.Fatalf("expected structured timeout error text, got %q", err.Error())
+	}
+
+	foundAuditedTimeout := false
+	for _, rec := range a.recs {
+		if rec.eventType != "tool.result" {
+			continue
+		}
+		errText, _ := rec.fields["error"].(string)
+		if strings.Contains(strings.ToLower(errText), "timeout") {
+			foundAuditedTimeout = true
+			break
+		}
+	}
+	if !foundAuditedTimeout {
+		t.Fatalf("expected timeout to be present in tool.result audit event, records=%#v", a.recs)
 	}
 }
 

@@ -113,6 +113,7 @@ Provider API key env defaults:
 - Config is human-managed; agent tools do not get write access to `.openclawssy/`.
 - Workspace write policy stays enforced after path and symlink resolution.
 - `shell.exec` is enabled only when sandbox is active and provider is not `none`.
+- If a configured sandbox provider is unavailable in the current build/runtime (for example `docker` when not implemented), runs fail fast with `sandbox.unavailable` and never silently fall back to unsafe execution.
 - HTTP APIs require bearer token.
 - Chat queue accepts allowlisted senders only and enforces rate limits.
 - Discord queue accepts allowlisted senders/channels/guilds and enforces rate limits.

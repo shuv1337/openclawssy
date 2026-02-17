@@ -139,7 +139,7 @@ func Default() Config {
 			Provider: "none",
 		},
 		Server: ServerConfig{
-			BindAddress: "0.0.0.0",
+			BindAddress: "127.0.0.1",
 			Port:        8080,
 			TLSEnabled:  false,
 			TLSCertFile: ".openclawssy/certs/server.crt",

@@ -14,7 +14,7 @@ import (
 var (
 	ErrExecDenied      = errors.New("sandbox: exec denied")
 	ErrNotStarted      = errors.New("sandbox: provider not started")
-	ErrNotImplemented  = errors.New("sandbox: not implemented")
+	ErrUnavailable     = errors.New("sandbox.unavailable")
 	ErrUnknownProvider = errors.New("sandbox: unknown provider")
 )
 
@@ -47,7 +47,7 @@ func NewProvider(name string, workspace string) (Provider, error) {
 	case "local":
 		return NewLocalProvider(workspace)
 	case "docker":
-		return &DockerProvider{}, nil
+		return nil, fmt.Errorf("%w: docker provider is not implemented in this build", ErrUnavailable)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, name)
 	}
@@ -186,37 +186,6 @@ func (p *LocalProvider) Stop() error {
 func (p *LocalProvider) providerName() string { return "local" }
 
 func (p *LocalProvider) isStarted() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.started
-}
-
-type DockerProvider struct {
-	mu      sync.RWMutex
-	started bool
-}
-
-func (p *DockerProvider) Start(context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.started = true
-	return nil
-}
-
-func (p *DockerProvider) Exec(Command) (Result, error) {
-	return Result{}, ErrNotImplemented
-}
-
-func (p *DockerProvider) Stop() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.started = false
-	return nil
-}
-
-func (p *DockerProvider) providerName() string { return "docker" }
-
-func (p *DockerProvider) isStarted() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.started

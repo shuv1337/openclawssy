@@ -165,6 +165,9 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runtime: init audit logger: %w", err)
 	}
+	defer func() {
+		_ = aud.Close()
+	}()
 
 	startEvent := map[string]any{"run_id": runID, "agent_id": agentID, "message": message}
 	if source != "" {
@@ -561,6 +564,36 @@ func totalSessionContextChars(messages []agent.ChatMessage) int {
 	return total
 }
 
+func splitToolError(errText string) (code string, message string) {
+	raw := strings.TrimSpace(errText)
+	if raw == "" {
+		return "", ""
+	}
+	message = raw
+	head, tail, ok := strings.Cut(raw, ":")
+	if !ok {
+		return "", message
+	}
+	candidate := strings.TrimSpace(head)
+	if idx := strings.Index(candidate, " "); idx >= 0 {
+		candidate = strings.TrimSpace(candidate[:idx])
+	}
+	if candidate == "" {
+		return "", message
+	}
+	for _, r := range candidate {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return "", message
+	}
+	trimmedTail := strings.TrimSpace(tail)
+	if trimmedTail != "" {
+		message = trimmedTail
+	}
+	return candidate, message
+}
+
 func hasTrailingUserMessage(messages []agent.ChatMessage, currentMessage string) bool {
 	if len(messages) == 0 {
 		return false
@@ -602,12 +635,15 @@ func appendToolCallMessage(store *chatstore.Store, sessionID, runID string, rec 
 		return fmt.Errorf("runtime: chat store is not configured")
 	}
 	summary := summarizeToolExecution(rec.Request.Name, rec.Result.Output, rec.Result.Error)
+	errCode, errMessage := splitToolError(rec.Result.Error)
 	payload, marshalErr := json.Marshal(map[string]any{
-		"tool":    rec.Request.Name,
-		"id":      rec.Request.ID,
-		"summary": summary,
-		"output":  rec.Result.Output,
-		"error":   rec.Result.Error,
+		"tool":          rec.Request.Name,
+		"id":            rec.Request.ID,
+		"summary":       summary,
+		"output":        rec.Result.Output,
+		"error":         rec.Result.Error,
+		"error_code":    errCode,
+		"error_message": errMessage,
 	})
 	if marshalErr != nil {
 		return fmt.Errorf("runtime: marshal tool result: %w", marshalErr)

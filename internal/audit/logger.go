@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"os"
@@ -34,6 +35,8 @@ type Logger struct {
 	path   string
 	redact func(any) any
 	mu     sync.Mutex
+	file   *os.File
+	writer *bufio.Writer
 }
 
 func NewLogger(path string, redact func(any) any) (*Logger, error) {
@@ -43,7 +46,11 @@ func NewLogger(path string, redact func(any) any) (*Logger, error) {
 	if redact == nil {
 		redact = func(v any) any { return v }
 	}
-	return &Logger{path: path, redact: redact}, nil
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, defaultFileMode)
+	if err != nil {
+		return nil, err
+	}
+	return &Logger{path: path, redact: redact, file: f, writer: bufio.NewWriterSize(f, 32*1024)}, nil
 }
 
 func (l *Logger) LogEvent(ctx context.Context, eventType string, fields map[string]any) error {
@@ -85,15 +92,52 @@ func (l *Logger) LogEvent(ctx context.Context, eventType string, fields map[stri
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, defaultFileMode)
-	if err != nil {
+	if l.file == nil || l.writer == nil {
+		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, defaultFileMode)
+		if err != nil {
+			return err
+		}
+		l.file = f
+		l.writer = bufio.NewWriterSize(f, 32*1024)
+	}
+
+	if _, err := l.writer.Write(line); err != nil {
 		return err
 	}
-	defer f.Close()
-
-	if _, err := f.Write(line); err != nil {
+	if err := l.writer.Flush(); err != nil {
 		return err
 	}
+	if eventType == EventRunEnd {
+		return l.file.Sync()
+	}
+	return nil
+}
 
-	return f.Sync()
+func (l *Logger) Close() error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return nil
+	}
+	if l.writer != nil {
+		if err := l.writer.Flush(); err != nil {
+			_ = l.file.Close()
+			l.file = nil
+			l.writer = nil
+			return err
+		}
+	}
+	if err := l.file.Sync(); err != nil {
+		_ = l.file.Close()
+		l.file = nil
+		l.writer = nil
+		return err
+	}
+	err := l.file.Close()
+	l.file = nil
+	l.writer = nil
+	return err
 }

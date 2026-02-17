@@ -147,14 +147,14 @@ func TestAppendToolResultsPromptIncludesErrorOutputAndRecoveryGuidance(t *testin
 		{
 			ID:     "tool-1",
 			Output: "partial stdout from failed command",
-			Error:  "tool_execution_failed (shell.exec): permission denied",
+			Error:  "internal.error (shell.exec): permission denied",
 		},
 	})
 
 	if !strings.Contains(prompt, "## Tool Failure Recovery") {
 		t.Fatalf("expected failure recovery guidance in prompt, got %q", prompt)
 	}
-	if !strings.Contains(prompt, "error: tool_execution_failed") {
+	if !strings.Contains(prompt, "error: internal.error") {
 		t.Fatalf("expected tool error in prompt, got %q", prompt)
 	}
 	if !strings.Contains(prompt, "partial stdout from failed command") {

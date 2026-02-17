@@ -63,6 +63,13 @@ func TestDefaultConfigSetsMaxTokens(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigBindsServerToLoopback(t *testing.T) {
+	cfg := Default()
+	if cfg.Server.BindAddress != "127.0.0.1" {
+		t.Fatalf("expected default server.bind_address=127.0.0.1, got %q", cfg.Server.BindAddress)
+	}
+}
+
 func TestValidateRejectsOutOfRangeMaxTokens(t *testing.T) {
 	cfg := Default()
 	cfg.Model.MaxTokens = 25000

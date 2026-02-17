@@ -126,7 +126,7 @@ Scheduler jobs are persisted as JSON records.
 {
   "job_id": "job_daily_report",
   "agent_id": "agent_default",
-  "schedule": "0 * * * *",
+  "schedule": "@every 1h",
   "message": "Generate status report",
   "mode": "isolated",
   "notify": {
@@ -143,7 +143,10 @@ Scheduler jobs are persisted as JSON records.
 Rules:
 - `job_id`, `agent_id`, `schedule`, `message`, `mode`, and `enabled` are required.
 - `mode` allowed values: `isolated`, `main_like`.
-- Invalid cron expressions are rejected on create/update.
+- `schedule` supports only:
+  - `@every <duration>` (Go duration format, for example `@every 30m`)
+  - one-shot RFC3339 timestamp (for example `2026-02-18T09:00:00Z`)
+- Cron expressions are not supported in v0.2 and are rejected on create/update.
 - Missed-job policy for v0.1: do not replay missed windows; next tick runs normally.
 
 ## 5) Minimal HTTP Endpoints

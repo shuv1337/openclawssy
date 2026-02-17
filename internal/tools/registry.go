@@ -144,7 +144,11 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 		Shell:     r.shell,
 	})
 	if err != nil {
-		execErr := wrapError(ErrCodeExecution, name, err)
+		errCode := ErrCodeExecution
+		if errors.Is(err, context.DeadlineExceeded) {
+			errCode = ErrCodeTimeout
+		}
+		execErr := wrapError(errCode, name, err)
 		_ = r.emit(ctx, "tool.result", map[string]any{"agent_id": agentID, "tool": name, "error": execErr.Error()})
 		return nil, execErr
 	}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"openclawssy/internal/agent"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
 )
@@ -78,6 +79,37 @@ func TestEngineExecuteWritesRunBundle(t *testing.T) {
 	}
 	if _, ok := res.Trace["input_message_hash"]; !ok {
 		t.Fatalf("expected input_message_hash in trace, got %#v", res.Trace)
+	}
+}
+
+func TestExecuteWithInputFailsClearlyWhenDockerSandboxUnavailable(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Sandbox.Active = true
+	cfg.Sandbox.Provider = "docker"
+	cfg.Shell.EnableExec = true
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "run diagnostic", Source: "dashboard"})
+	if err == nil {
+		t.Fatalf("expected sandbox.unavailable runtime error")
+	}
+	if !strings.Contains(err.Error(), "sandbox.unavailable") {
+		t.Fatalf("expected sandbox.unavailable error, got %v", err)
 	}
 }
 
@@ -174,6 +206,32 @@ func TestNormalizeToolArgsShellCommandFallbackToBashLC(t *testing.T) {
 	list, ok := args["args"].([]string)
 	if !ok || len(list) != 2 || list[0] != "-lc" || list[1] != "ls -la" {
 		t.Fatalf("unexpected shell args normalization: %#v", args["args"])
+	}
+}
+
+func TestSplitToolError(t *testing.T) {
+	code, message := splitToolError("timeout (shell.exec): tool execution exceeded 20ms")
+	if code != "timeout" {
+		t.Fatalf("expected timeout code, got %q", code)
+	}
+	if message != "tool execution exceeded 20ms" {
+		t.Fatalf("unexpected timeout message: %q", message)
+	}
+
+	code, message = splitToolError("internal.error (shell.exec): exit status 1")
+	if code != "internal.error" {
+		t.Fatalf("expected internal.error code, got %q", code)
+	}
+	if message != "exit status 1" {
+		t.Fatalf("unexpected execution message: %q", message)
+	}
+
+	code, message = splitToolError("plain failure without code")
+	if code != "" {
+		t.Fatalf("expected empty code for plain error, got %q", code)
+	}
+	if message != "plain failure without code" {
+		t.Fatalf("unexpected plain message: %q", message)
 	}
 }
 
@@ -414,6 +472,50 @@ func TestLoadSessionMessagesAppliesToolAndHistoryTruncation(t *testing.T) {
 	}
 	if !strings.Contains(joined, "marker-15") {
 		t.Fatalf("expected latest messages to remain after truncation")
+	}
+}
+
+func TestAppendToolCallMessageIncludesMachineReadableErrorFields(t *testing.T) {
+	root := t.TempDir()
+	chat, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := chat.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	rec := agent.ToolCallRecord{
+		Request: agent.ToolCallRequest{ID: "tool-json-1", Name: "shell.exec"},
+		Result: agent.ToolCallResult{
+			ID:     "tool-json-1",
+			Output: "{\"stderr\":\"permission denied\"}",
+			Error:  "internal.error (shell.exec): exit status 1",
+		},
+	}
+	if err := appendToolCallMessage(chat, session.SessionID, "run_1", rec); err != nil {
+		t.Fatalf("append tool message: %v", err)
+	}
+
+	msgs, err := chat.ReadRecentMessages(session.SessionID, 10)
+	if err != nil {
+		t.Fatalf("read messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected one persisted message, got %d", len(msgs))
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(msgs[0].Content), &payload); err != nil {
+		t.Fatalf("decode tool payload: %v", err)
+	}
+	if payload["error_code"] != "internal.error" {
+		t.Fatalf("expected canonical error_code, got %#v", payload["error_code"])
+	}
+	if payload["error_message"] != "exit status 1" {
+		t.Fatalf("expected parsed error_message, got %#v", payload["error_message"])
+	}
+	if payload["summary"] == "" {
+		t.Fatalf("expected summary to be present, got %#v", payload)
 	}
 }
 

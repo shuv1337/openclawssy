@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"encoding/json"
 	"testing"
 
 	"openclawssy/internal/agent"
@@ -80,5 +81,23 @@ func TestRecordThinkingPersistsThinkingFields(t *testing.T) {
 	}
 	if snapshot["thinking_present"] != true {
 		t.Fatalf("expected thinking_present=true, got %#v", snapshot["thinking_present"])
+	}
+}
+
+func TestIntValueParsesCommonNumericRepresentations(t *testing.T) {
+	if got := intValue(12); got != 12 {
+		t.Fatalf("expected int 12, got %d", got)
+	}
+	if got := intValue(12.9); got != 12 {
+		t.Fatalf("expected float truncation to 12, got %d", got)
+	}
+	if got := intValue("44"); got != 44 {
+		t.Fatalf("expected numeric string parse to 44, got %d", got)
+	}
+	if got := intValue(json.Number("91")); got != 91 {
+		t.Fatalf("expected json.Number parse to 91, got %d", got)
+	}
+	if got := intValue("not-a-number"); got != 0 {
+		t.Fatalf("expected invalid numeric string to parse as 0, got %d", got)
 	}
 }

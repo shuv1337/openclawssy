@@ -255,8 +255,8 @@ func TestRunnerCachesRepeatedFailureAfterSecondIdenticalError(t *testing.T) {
 	}}
 
 	tools := &mockTools{results: map[string]ToolCallResult{
-		"1": {ID: "1", Error: "tool_execution_failed (shell.exec): exit status 1"},
-		"2": {ID: "2", Error: "tool_execution_failed (shell.exec): exit status 1"},
+		"1": {ID: "1", Error: "internal.error (shell.exec): exit status 1"},
+		"2": {ID: "2", Error: "internal.error (shell.exec): exit status 1"},
 	}}
 	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 8}
 
@@ -335,6 +335,9 @@ func TestRunnerAppliesPerToolTimeout(t *testing.T) {
 	}
 	if out.ToolCalls[0].Result.Error == "" {
 		t.Fatal("expected timeout error in tool result")
+	}
+	if !strings.Contains(strings.ToLower(out.ToolCalls[0].Result.Error), "timeout") {
+		t.Fatalf("expected structured timeout error, got %q", out.ToolCalls[0].Result.Error)
 	}
 	if time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("expected run to finish quickly due to timeout")
@@ -504,8 +507,8 @@ func TestRunnerEntersRecoveryModeAfterTwoFailures(t *testing.T) {
 	}}
 
 	tools := &mockTools{results: map[string]ToolCallResult{
-		"1": {ID: "1", Error: "tool_execution_failed (shell.exec): socket missing"},
-		"2": {ID: "2", Error: "tool_execution_failed (shell.exec): socket missing"},
+		"1": {ID: "1", Error: "internal.error (shell.exec): socket missing"},
+		"2": {ID: "2", Error: "internal.error (shell.exec): socket missing"},
 		"3": {ID: "3", Output: "tailscaled running"},
 	}}
 	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
@@ -532,7 +535,7 @@ func TestRunnerAsksUserGuidanceAfterThreeMoreFailures(t *testing.T) {
 		id := "call-" + strconv.Itoa(i)
 		cmd := `{"command":"bash","args":["-lc","tailscale status # attempt ` + strconv.Itoa(i) + `"]}`
 		responses = append(responses, ModelResponse{ToolCalls: []ToolCallRequest{{ID: id, Name: "shell.exec", Arguments: []byte(cmd)}}})
-		toolResults[id] = ToolCallResult{ID: id, Output: "stderr: connect unix /var/run/tailscale/tailscaled.sock", Error: "tool_execution_failed (shell.exec): socket missing"}
+		toolResults[id] = ToolCallResult{ID: id, Output: "stderr: connect unix /var/run/tailscale/tailscaled.sock", Error: "internal.error (shell.exec): socket missing"}
 	}
 
 	model := &mockModel{responses: responses}

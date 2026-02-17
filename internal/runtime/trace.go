@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -210,9 +211,46 @@ func intValue(v any) int {
 	if s == "" || s == "<nil>" {
 		return 0
 	}
-	n := 0
-	_, _ = fmt.Sscanf(s, "%d", &n)
-	return n
+	switch value := v.(type) {
+	case int:
+		return value
+	case int8:
+		return int(value)
+	case int16:
+		return int(value)
+	case int32:
+		return int(value)
+	case int64:
+		return int(value)
+	case uint:
+		return int(value)
+	case uint8:
+		return int(value)
+	case uint16:
+		return int(value)
+	case uint32:
+		return int(value)
+	case uint64:
+		return int(value)
+	case float32:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		if i, err := value.Int64(); err == nil {
+			return int(i)
+		}
+		if f, err := value.Float64(); err == nil {
+			return int(f)
+		}
+	}
+	if i, err := strconv.Atoi(s); err == nil {
+		return i
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return int(f)
+	}
+	return 0
 }
 
 func (c *runTraceCollector) Snapshot() map[string]any {

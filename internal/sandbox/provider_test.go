@@ -43,3 +43,13 @@ func TestShellExecAllowedGating(t *testing.T) {
 		t.Fatal("local provider should allow exec after start")
 	}
 }
+
+func TestNewProviderDockerUnavailable(t *testing.T) {
+	_, err := NewProvider("docker", t.TempDir())
+	if err == nil {
+		t.Fatalf("expected docker provider to be unavailable")
+	}
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("expected ErrUnavailable, got %v", err)
+	}
+}
