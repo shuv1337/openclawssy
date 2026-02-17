@@ -39,7 +39,7 @@ func RegisterCore(reg *Registry) error {
 }
 
 func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
-	if err := reg.Register(ToolSpec{Name: "fs.read", Description: "Read text file", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, fsRead); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.read", Description: "Read text file", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "max_bytes": ArgTypeNumber}}, fsRead); err != nil {
 		return err
 	}
 	if err := reg.Register(ToolSpec{Name: "fs.list", Description: "List directory entries", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, fsList); err != nil {
@@ -48,17 +48,17 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := reg.Register(ToolSpec{Name: "fs.write", Description: "Write text file", Required: []string{"path", "content"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "content": ArgTypeString}}, fsWrite); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply line-based file edits", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, fsEdit); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply line-based file edits", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "old": ArgTypeString, "new": ArgTypeString, "edits": ArgTypeArray}}, fsEdit); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "code.search", Description: "Search code with regex", Required: []string{"pattern"}, ArgTypes: map[string]ArgType{"pattern": ArgTypeString}}, codeSearch); err != nil {
+	if err := reg.Register(ToolSpec{Name: "code.search", Description: "Search code with regex", Required: []string{"pattern"}, ArgTypes: map[string]ArgType{"pattern": ArgTypeString, "path": ArgTypeString, "max_files": ArgTypeNumber, "max_file_bytes": ArgTypeNumber}}, codeSearch); err != nil {
 		return err
 	}
 	if err := reg.Register(ToolSpec{Name: "time.now", Description: "Get current time"}, timeNow); err != nil {
 		return err
 	}
 	if opts.EnableShellExec {
-		if err := reg.Register(ToolSpec{Name: "shell.exec", Description: "Run command in sandbox", Required: []string{"command"}, ArgTypes: map[string]ArgType{"command": ArgTypeString}}, shellExec); err != nil {
+		if err := reg.Register(ToolSpec{Name: "shell.exec", Description: "Run command in sandbox", Required: []string{"command"}, ArgTypes: map[string]ArgType{"command": ArgTypeString, "args": ArgTypeArray, "timeout_ms": ArgTypeNumber}}, shellExec); err != nil {
 			return err
 		}
 	}
@@ -306,6 +306,19 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 			return nil, fmt.Errorf("args must be an array")
 		}
 	}
+	if len(req.ShellAllowedCommands) > 0 {
+		invocation := strings.TrimSpace(strings.Join(append([]string{command}, args...), " "))
+		allowed := false
+		for _, prefix := range req.ShellAllowedCommands {
+			if commandMatchesPrefix(invocation, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, &ToolError{Code: ErrCodePolicyDenied, Tool: req.Tool, Message: "command is not allowed"}
+		}
+	}
 	stdout, stderr, exitCode, execErr := req.Shell.Exec(ctx, command, args)
 	fallbackUsed := ""
 	if execErr != nil && command == "bash" && isExecutableNotFound(execErr) {
@@ -333,6 +346,21 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 		res["timeout_ms"] = normalizeInt(timeoutRaw)
 	}
 	return res, returnErr
+}
+
+func commandMatchesPrefix(invocation, prefix string) bool {
+	invocation = strings.TrimSpace(invocation)
+	prefix = strings.TrimSpace(prefix)
+	if invocation == "" || prefix == "" {
+		return false
+	}
+	if prefix == "*" {
+		return true
+	}
+	if invocation == prefix {
+		return true
+	}
+	return strings.HasPrefix(invocation, prefix+" ")
 }
 
 func isExecutableNotFound(err error) bool {

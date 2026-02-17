@@ -157,9 +157,14 @@ Request:
 ```json
 {
   "agent_id": "agent_default",
-  "message": "Summarize repository status"
+  "message": "Summarize repository status",
+  "thinking_mode": "always"
 }
 ```
+
+Request notes:
+- `thinking_mode` is optional and must be one of `never|on_error|always`.
+- When omitted, runtime uses `output.thinking_mode` from config.
 
 Response `202`:
 
@@ -167,6 +172,23 @@ Response `202`:
 {
   "id": "run_123",
   "status": "queued"
+}
+```
+
+### GET `/v1/runs`
+Query params:
+- `status` (optional exact status filter)
+- `limit` (optional, default `50`, max `500`)
+- `offset` (optional, default `0`)
+
+Response `200`:
+
+```json
+{
+  "runs": [],
+  "total": 0,
+  "limit": 50,
+  "offset": 0
 }
 ```
 
@@ -185,12 +207,13 @@ Response `200`:
   "tool_calls": 1,
   "provider": "openrouter",
   "model": "openai/gpt-4o-mini",
+  "thinking_mode": "always",
   "trace": {
     "tool_execution_results": [
       {
         "tool": "fs.write",
         "tool_call_id": "tool-json-1",
-        "summary": "wrote 24 line(s) to Dockerfile",
+        "summary": "wrote 24 line(s) to README.md",
         "output": "{...}",
         "error": ""
       }
@@ -203,6 +226,17 @@ Notes:
 - `trace` is optional but typically present for completed/failed runs.
 - `tool_execution_results[].summary` is a short display-friendly summary when available.
 
+Queue-overload response for `POST /v1/runs`:
+
+```json
+{
+  "error": {
+    "code": "queue.full",
+    "message": "run queue is full"
+  }
+}
+```
+
 ### POST `/v1/chat/messages`
 Request:
 
@@ -211,7 +245,8 @@ Request:
   "user_id": "123456",
   "room_id": "dev-room",
   "agent_id": "agent_default",
-  "message": "Summarize today updates"
+  "message": "Summarize today updates",
+  "thinking_mode": "on_error"
 }
 ```
 
@@ -228,6 +263,19 @@ Response `202`:
 Notes:
 - `session_id` is included when the request is associated with a persisted chat session.
 - Command-style chat requests (for example `/new`, `/resume`) may return `200` with an immediate `response` message and optional `session_id` instead of queueing a run.
+- `thinking_mode` is optional and validated with the same modes as run creation.
+
+Rate-limit response example for `POST /v1/chat/messages`:
+
+```json
+{
+  "error": {
+    "code": "chat.rate_limited",
+    "message": "chat sender is rate limited; retry in 3s",
+    "retry_after_seconds": 3
+  }
+}
+```
 
 ## 6) Chat Session Context Policy
 
@@ -255,7 +303,7 @@ Session truncation rules before model invocation:
 - `POST /api/admin/scheduler/jobs` -> create scheduler job `{id?,agent_id?,schedule,message,enabled?}`
 - `DELETE /api/admin/scheduler/jobs/{id}` -> delete scheduler job
 - `POST /api/admin/scheduler/control` -> pause/resume scheduler globally or per job `{action:"pause|resume",job_id?}`
-- `GET /api/admin/chat/sessions` -> list chat sessions for an agent/user/room/channel filter
+- `GET /api/admin/chat/sessions` -> list chat sessions for an agent/user/room/channel filter, optional `limit`/`offset`
 - `GET /api/admin/chat/sessions/{session_id}/messages` -> ordered session messages including tool metadata (`tool_name`, `tool_call_id`, `run_id`)
 
 ### GET `/healthz`

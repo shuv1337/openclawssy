@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"openclawssy/internal/channels/chat"
 )
 
 func TestNormalizeInboundMessage(t *testing.T) {
@@ -118,4 +120,60 @@ func TestFormatToolActivity(t *testing.T) {
 			t.Fatalf("expected empty summary, got %q", out)
 		}
 	})
+}
+
+func TestParseThinkingOverride(t *testing.T) {
+	tests := []struct {
+		name      string
+		in        string
+		wantText  string
+		wantMode  string
+		wantError bool
+	}{
+		{name: "slash ask with override", in: "/ask thinking=always summarize", wantText: "summarize", wantMode: "always"},
+		{name: "prefix text with override", in: "thinking=on_error summarize", wantText: "summarize", wantMode: "on_error"},
+		{name: "plain text", in: "hello", wantText: "hello"},
+		{name: "pass through slash command", in: "/resume chat_1", wantText: "/resume chat_1"},
+		{name: "invalid mode", in: "/ask thinking=maybe hi", wantError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			text, mode, err := parseThinkingOverride(tc.in)
+			if tc.wantError {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if text != tc.wantText || mode != tc.wantMode {
+				t.Fatalf("got text=%q mode=%q want text=%q mode=%q", text, mode, tc.wantText, tc.wantMode)
+			}
+		})
+	}
+}
+
+func TestFormatDiscordErrorRateLimited(t *testing.T) {
+	msg := formatDiscordError(chat.NewRateLimitError("sender", 2300*time.Millisecond))
+	if msg != "rate limited, retry in 3s" {
+		t.Fatalf("unexpected rate limit format: %q", msg)
+	}
+
+	msg = formatDiscordError(errors.New("sender is rate limited"))
+	if msg != "rate limited, try again soon" {
+		t.Fatalf("unexpected generic rate limit format: %q", msg)
+	}
+
+	msg = formatDiscordError(errors.New("chat sender is not allowlisted"))
+	if msg != "not allowed in this channel or user scope" {
+		t.Fatalf("unexpected allowlist format: %q", msg)
+	}
+
+	msg = formatDiscordError(errors.New("httpchannel: run queue is full"))
+	if msg != "run queue is full, retry shortly" {
+		t.Fatalf("unexpected queue-full format: %q", msg)
+	}
 }

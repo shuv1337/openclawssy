@@ -357,7 +357,26 @@ func (h *Handler) listChatSessions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to list sessions", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"sessions": sessions})
+
+	limit, offset, err := parseLimitOffset(q, 50, 500)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	total := len(sessions)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	writeJSON(w, map[string]any{
+		"sessions": sessions[offset:end],
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+	})
 }
 
 func (h *Handler) chatSessionMessages(w http.ResponseWriter, r *http.Request) {
@@ -407,6 +426,33 @@ func (h *Handler) chatSessionMessages(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseLimitOffset(q map[string][]string, defaultLimit, maxLimit int) (int, int, error) {
+	limit := defaultLimit
+	offset := 0
+	if rawLimit := strings.TrimSpace(firstQueryValue(q, "limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed < 1 || parsed > maxLimit {
+			return 0, 0, errors.New("invalid limit")
+		}
+		limit = parsed
+	}
+	if rawOffset := strings.TrimSpace(firstQueryValue(q, "offset")); rawOffset != "" {
+		parsed, err := strconv.Atoi(rawOffset)
+		if err != nil || parsed < 0 {
+			return 0, 0, errors.New("invalid offset")
+		}
+		offset = parsed
+	}
+	return limit, offset, nil
+}
+
+func firstQueryValue(q map[string][]string, key string) string {
+	if len(q[key]) == 0 {
+		return ""
+	}
+	return q[key][0]
 }
 
 const dashboardHTML = `<!doctype html>

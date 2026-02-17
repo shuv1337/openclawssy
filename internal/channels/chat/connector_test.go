@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,7 +24,7 @@ func TestConnectorQueuesAllowedMessage(t *testing.T) {
 		RateLimiter:    limiter,
 		DefaultAgentID: "default",
 		Store:          store,
-		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
 			_ = ctx
 			if sessionID == "" {
 				t.Fatal("expected session id")
@@ -33,6 +34,9 @@ func TestConnectorQueuesAllowedMessage(t *testing.T) {
 			}
 			if !strings.Contains(message, "hello") {
 				t.Fatalf("unexpected message: %s", message)
+			}
+			if thinkingMode != "" {
+				t.Fatalf("expected empty thinking mode, got %q", thinkingMode)
 			}
 			return QueuedRun{ID: "run-1", Status: "queued"}, nil
 		},
@@ -60,7 +64,7 @@ func TestConnectorRejectsUnallowlisted(t *testing.T) {
 			}
 			return store
 		}(),
-		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
 			return QueuedRun{}, nil
 		},
 	}
@@ -81,7 +85,7 @@ func TestConnectorNewResumeAndChatsCommands(t *testing.T) {
 	connector := &Connector{
 		Store:          store,
 		DefaultAgentID: "default",
-		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
 			if sessionID == "" {
 				t.Fatal("expected session id")
 			}
@@ -105,12 +109,12 @@ func TestConnectorNewResumeAndChatsCommands(t *testing.T) {
 	}
 
 	sessionID := strings.TrimPrefix(res.Response, "Started new chat: ")
-	res, err = connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "/chats"})
+	res, err = connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "/sessions"})
 	if err != nil {
-		t.Fatalf("chats command: %v", err)
+		t.Fatalf("sessions command: %v", err)
 	}
 	if !strings.Contains(res.Response, sessionID) {
-		t.Fatalf("expected /chats to include session id, got: %q", res.Response)
+		t.Fatalf("expected /sessions to include session id, got: %q", res.Response)
 	}
 
 	res, err = connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "/resume " + sessionID})
@@ -139,17 +143,20 @@ func TestConnectorQueuesRawMessageAndStoresHistory(t *testing.T) {
 	connector := &Connector{
 		Store:          store,
 		DefaultAgentID: "default",
-		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error) {
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
 			queuedMessage = message
 			queuedSessionID = sessionID
+			if thinkingMode != "always" {
+				t.Fatalf("expected thinking mode override to propagate, got %q", thinkingMode)
+			}
 			return QueuedRun{ID: "run-1", Status: "queued"}, nil
 		},
 	}
 
-	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "first"}); err != nil {
+	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "first", ThinkingMode: "always"}); err != nil {
 		t.Fatalf("first message: %v", err)
 	}
-	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "second"}); err != nil {
+	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "second", ThinkingMode: "always"}); err != nil {
 		t.Fatalf("second message: %v", err)
 	}
 
@@ -180,5 +187,43 @@ func TestConnectorQueuesRawMessageAndStoresHistory(t *testing.T) {
 	}
 	if sessions[0].SessionID != queuedSessionID {
 		t.Fatalf("expected queued session %q, got %q", sessions[0].SessionID, queuedSessionID)
+	}
+}
+
+func TestConnectorGlobalRateLimiterReturnsCooldown(t *testing.T) {
+	store, err := chatstore.NewStore(filepath.Join(t.TempDir(), ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	now := time.Date(2026, 2, 17, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	connector := &Connector{
+		Store:          store,
+		DefaultAgentID: "default",
+		GlobalLimiter:  NewRateLimiterWithClock(1, time.Minute, clock),
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
+			return QueuedRun{ID: "run-1", Status: "queued"}, nil
+		},
+	}
+
+	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "first"}); err != nil {
+		t.Fatalf("first message: %v", err)
+	}
+	_, err = connector.HandleMessage(context.Background(), Message{UserID: "u2", RoomID: "dashboard", Source: "dashboard", Text: "second"})
+	if err == nil {
+		t.Fatal("expected rate limit error")
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited, got %v", err)
+	}
+	var rateErr *RateLimitError
+	if !errors.As(err, &rateErr) {
+		t.Fatalf("expected RateLimitError, got %T", err)
+	}
+	if rateErr.Scope != "global" {
+		t.Fatalf("expected global scope, got %q", rateErr.Scope)
+	}
+	if rateErr.RetryAfterSeconds < 1 {
+		t.Fatalf("expected cooldown in error, got %+v", rateErr)
 	}
 }

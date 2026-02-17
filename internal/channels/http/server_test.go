@@ -16,6 +16,18 @@ type testChatConnector struct {
 	response ChatResponse
 }
 
+type rateLimitedTestError struct {
+	retryAfter time.Duration
+}
+
+func (e rateLimitedTestError) Error() string {
+	return "chat sender is rate limited"
+}
+
+func (e rateLimitedTestError) RetryAfter() time.Duration {
+	return e.retryAfter
+}
+
 func (c testChatConnector) HandleMessage(ctx context.Context, msg ChatMessage) (ChatResponse, error) {
 	_ = ctx
 	_ = msg
@@ -99,6 +111,66 @@ func TestServer_PostAndGetRun(t *testing.T) {
 	}
 }
 
+func TestServer_ListRunsSupportsPaginationAndStatusFilter(t *testing.T) {
+	store := NewInMemoryRunStore()
+	now := time.Now().UTC()
+	for _, run := range []Run{
+		{ID: "run-1", AgentID: "agent-1", Message: "m1", Status: "queued", CreatedAt: now, UpdatedAt: now},
+		{ID: "run-2", AgentID: "agent-1", Message: "m2", Status: "completed", CreatedAt: now, UpdatedAt: now},
+		{ID: "run-3", AgentID: "agent-1", Message: "m3", Status: "completed", CreatedAt: now, UpdatedAt: now},
+	} {
+		if _, err := store.Create(context.Background(), run); err != nil {
+			t.Fatalf("create run %s: %v", run.ID, err)
+		}
+	}
+
+	s := NewServer(Config{BearerToken: "secret", Store: store, Executor: NopExecutor{}})
+	req := httptest.NewRequest(http.MethodGet, "/v1/runs?status=completed&limit=1&offset=1", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	var payload struct {
+		Runs   []Run `json:"runs"`
+		Total  int   `json:"total"`
+		Limit  int   `json:"limit"`
+		Offset int   `json:"offset"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Total != 2 || payload.Limit != 1 || payload.Offset != 1 {
+		t.Fatalf("unexpected pagination payload: %+v", payload)
+	}
+	if len(payload.Runs) != 1 || payload.Runs[0].ID != "run-3" {
+		t.Fatalf("unexpected page content: %+v", payload.Runs)
+	}
+}
+
+func TestServer_ListRunsRejectsInvalidPagination(t *testing.T) {
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}})
+	req := httptest.NewRequest(http.MethodGet, "/v1/runs?limit=0", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, rr.Code)
+	}
+
+	var resp errorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != "request.invalid_input" {
+		t.Fatalf("unexpected error code: %#v", resp)
+	}
+}
+
 func TestServer_ListenAndServeRequiresToken(t *testing.T) {
 	s := NewServer(Config{Store: NewInMemoryRunStore()})
 	err := s.ListenAndServe(context.Background())
@@ -162,6 +234,30 @@ func TestServer_ChatMessageDenied(t *testing.T) {
 	}
 }
 
+func TestServer_ChatMessageRateLimited(t *testing.T) {
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}, Chat: testChatConnector{err: rateLimitedTestError{retryAfter: 2300 * time.Millisecond}}})
+	body := bytes.NewBufferString(`{"user_id":"u1","message":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/messages", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected %d, got %d", http.StatusTooManyRequests, rr.Code)
+	}
+
+	var resp errorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != "chat.rate_limited" {
+		t.Fatalf("unexpected error code: %#v", resp)
+	}
+	if resp.Error.RetryAfterSeconds != 3 {
+		t.Fatalf("expected retry_after_seconds=3, got %d", resp.Error.RetryAfterSeconds)
+	}
+}
+
 func TestServer_ChatMessageImmediateResponse(t *testing.T) {
 	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}, Chat: testChatConnector{response: ChatResponse{Response: "Started new chat: s1"}}})
 	body := bytes.NewBufferString(`{"user_id":"u1","message":"/new"}`)
@@ -184,6 +280,12 @@ func TestServer_ChatMessageImmediateResponse(t *testing.T) {
 }
 
 func TestServer_ReturnsTooManyRequestsWhenRunQueueIsFull(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := WaitForQueuedRuns(ctx); err != nil {
+		t.Fatalf("wait for prior queued runs: %v", err)
+	}
+
 	defaultQueuedRunTracker.mu.Lock()
 	originalLimit := defaultQueuedRunTracker.maxInFlight
 	defaultQueuedRunTracker.maxInFlight = 1
@@ -214,9 +316,84 @@ func TestServer_ReturnsTooManyRequestsWhenRunQueueIsFull(t *testing.T) {
 	}
 
 	close(release)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
 	if err := WaitForQueuedRuns(ctx); err != nil {
 		t.Fatalf("wait for queued runs: %v", err)
+	}
+}
+
+func TestServer_PostRunAcceptsThinkingModeOverride(t *testing.T) {
+	store := NewInMemoryRunStore()
+	s := NewServer(Config{BearerToken: "secret", Store: store, Executor: NopExecutor{}})
+
+	body := bytes.NewBufferString(`{"agent_id":"agent-1","message":"hello","thinking_mode":"always"}`)
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/runs", body)
+	postReq.Header.Set("Authorization", "Bearer secret")
+	postResp := httptest.NewRecorder()
+	s.Handler().ServeHTTP(postResp, postReq)
+	if postResp.Code != http.StatusAccepted {
+		t.Fatalf("expected %d, got %d", http.StatusAccepted, postResp.Code)
+	}
+
+	var created postRunResponse
+	if err := json.Unmarshal(postResp.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		run, err := store.Get(context.Background(), created.ID)
+		if err != nil {
+			t.Fatalf("get run: %v", err)
+		}
+		if run.Status == "completed" {
+			if run.ThinkingMode != "always" {
+				t.Fatalf("expected persisted thinking_mode=always, got %q", run.ThinkingMode)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not complete in time: status=%q", run.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestServer_PostRunRejectsInvalidThinkingMode(t *testing.T) {
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}})
+
+	body := bytes.NewBufferString(`{"agent_id":"agent-1","message":"hello","thinking_mode":"sometimes"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/runs", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, rr.Code)
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != "request.invalid_thinking_mode" {
+		t.Fatalf("unexpected error code: %#v", resp)
+	}
+}
+
+func TestServer_ChatRejectsInvalidThinkingMode(t *testing.T) {
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: NopExecutor{}, Chat: testChatConnector{}})
+	body := bytes.NewBufferString(`{"user_id":"u1","room_id":"r1","message":"hello","thinking_mode":"invalid"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/messages", body)
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, rr.Code)
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.Error.Code != "request.invalid_thinking_mode" {
+		t.Fatalf("unexpected error code: %#v", resp)
 	}
 }

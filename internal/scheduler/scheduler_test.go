@@ -1,6 +1,8 @@
 package scheduler
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -364,5 +366,233 @@ func TestSetJobEnabledPersistsAcrossRestart(t *testing.T) {
 	}
 	if jobs[0].Enabled {
 		t.Fatalf("expected job to remain disabled after reload: %+v", jobs[0])
+	}
+}
+
+func TestExecutorCatchUpDisabledSkipsMissedRecurringRunsOnFirstCheck(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	lastRun := time.Date(2026, 2, 17, 12, 0, 0, 0, time.UTC)
+	if err := store.Add(Job{ID: "job-catch-up", Schedule: "@every 1m", AgentID: "agent", Message: "run", Enabled: true, LastRun: lastRun.Format(time.RFC3339)}); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+
+	runs := 0
+	exec := NewExecutorWithPolicy(store, time.Second, 2, false, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	now := lastRun.Add(10 * time.Minute)
+	exec.check(now)
+	if runs != 0 {
+		t.Fatalf("expected missed run to be skipped when catch_up=false, got %d", runs)
+	}
+
+	jobs := store.List()
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job in store, got %d", len(jobs))
+	}
+	if jobs[0].LastRun == "" {
+		t.Fatalf("expected skipped run to update LastRun timestamp")
+	}
+
+	exec.check(now.Add(2 * time.Minute))
+	if runs != 1 {
+		t.Fatalf("expected subsequent due run to execute after skip, got %d", runs)
+	}
+}
+
+func TestExecutorCatchUpDisabledSkipsMissedOneShot(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	oneShotAt := time.Date(2026, 2, 17, 10, 0, 0, 0, time.UTC)
+	if err := store.Add(Job{ID: "job-one-shot-skip", Schedule: oneShotAt.Format(time.RFC3339), AgentID: "agent", Message: "run once", Enabled: true}); err != nil {
+		t.Fatalf("add one-shot: %v", err)
+	}
+
+	runs := 0
+	exec := NewExecutorWithPolicy(store, time.Second, 1, false, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	exec.check(oneShotAt.Add(2 * time.Hour))
+	if runs != 0 {
+		t.Fatalf("expected missed one-shot to be skipped when catch_up=false, got %d", runs)
+	}
+	jobs := store.List()
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job after skip, got %d", len(jobs))
+	}
+	if jobs[0].Enabled {
+		t.Fatalf("expected skipped one-shot to be disabled, got %+v", jobs[0])
+	}
+}
+
+func TestExecutorStressHandlesMultipleDueJobsWithBoundedWorkers(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	const totalJobs = 24
+	for i := 0; i < totalJobs; i++ {
+		id := "job-stress-" + time.Now().Add(time.Duration(i)).Format("150405.000000000")
+		if err := store.Add(Job{ID: id, Schedule: "@every 1ms", AgentID: "agent", Message: "run", Enabled: true}); err != nil {
+			t.Fatalf("add job %d: %v", i, err)
+		}
+	}
+
+	var mu sync.Mutex
+	maxConcurrent := 0
+	inFlight := 0
+	runs := 0
+	exec := NewExecutorWithPolicy(store, time.Second, 4, true, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		mu.Lock()
+		runs++
+		inFlight++
+		if inFlight > maxConcurrent {
+			maxConcurrent = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(8 * time.Millisecond)
+		mu.Lock()
+		inFlight--
+		mu.Unlock()
+	})
+
+	exec.check(time.Now().UTC())
+	if runs != totalJobs {
+		t.Fatalf("expected %d runs, got %d", totalJobs, runs)
+	}
+	if maxConcurrent > 4 {
+		t.Fatalf("expected worker bound <= 4, got %d", maxConcurrent)
+	}
+	for _, job := range store.List() {
+		if job.LastRun == "" {
+			t.Fatalf("expected LastRun to be persisted for %q", job.ID)
+		}
+	}
+}
+
+func TestExecutorStartAndStop(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := store.Add(Job{ID: "job-start-stop", Schedule: "@every 1ms", AgentID: "agent", Message: "run", Enabled: true}); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+
+	runs := make(chan struct{}, 1)
+	exec := NewExecutorWithPolicy(store, time.Millisecond, 1, true, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		select {
+		case runs <- struct{}{}:
+		default:
+		}
+	})
+
+	exec.Start()
+	select {
+	case <-runs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected scheduled run while executor is started")
+	}
+	exec.Stop()
+}
+
+func TestNewExecutorWithPolicyAppliesFallbackDefaults(t *testing.T) {
+	exec := NewExecutorWithPolicy(nil, 0, 0, false, nil)
+	if exec.maxConcurrent != 1 {
+		t.Fatalf("expected fallback maxConcurrent=1, got %d", exec.maxConcurrent)
+	}
+	if exec.catchUp {
+		t.Fatal("expected catchUp to preserve explicit false")
+	}
+	if exec.ticker == nil || exec.stopCh == nil || exec.doneCh == nil {
+		t.Fatalf("expected executor channels/ticker initialized: %+v", exec)
+	}
+	exec.Start()
+	exec.Stop()
+}
+
+func TestStoreValidationAndLoadErrors(t *testing.T) {
+	if _, err := NewStore(""); err == nil {
+		t.Fatal("expected empty store path error")
+	}
+
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	if err := os.WriteFile(storePath, []byte("{not-json}"), 0o600); err != nil {
+		t.Fatalf("write malformed scheduler file: %v", err)
+	}
+	if _, err := NewStore(storePath); err == nil {
+		t.Fatal("expected parse error for malformed scheduler file")
+	}
+}
+
+func TestStoreRemoveAndEnableMissingJobs(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := store.Remove("missing"); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("expected ErrJobNotFound from remove, got %v", err)
+	}
+	if err := store.SetJobEnabled("missing", true); !errors.Is(err, ErrJobNotFound) {
+		t.Fatalf("expected ErrJobNotFound from set enabled, got %v", err)
+	}
+}
+
+func TestNextDueAndParseLastRunValidation(t *testing.T) {
+	now := time.Date(2026, 2, 17, 12, 0, 0, 0, time.UTC)
+	if _, _, err := nextDue(Job{ID: "bad-duration", Schedule: "@every nope"}, now); err == nil {
+		t.Fatal("expected invalid duration error")
+	}
+	if _, _, err := nextDue(Job{ID: "zero-duration", Schedule: "@every 0s"}, now); err == nil {
+		t.Fatal("expected zero duration error")
+	}
+	if _, _, err := nextDue(Job{ID: "bad-schedule", Schedule: "daily"}, now); err == nil {
+		t.Fatal("expected invalid schedule error")
+	}
+
+	due, disable, err := nextDue(Job{ID: "one-shot-future", Schedule: now.Add(time.Hour).Format(time.RFC3339)}, now)
+	if err != nil || due || disable {
+		t.Fatalf("expected future one-shot not due, got due=%v disable=%v err=%v", due, disable, err)
+	}
+
+	due, disable, err = nextDue(Job{ID: "one-shot-ran", Schedule: now.Add(-time.Hour).Format(time.RFC3339), LastRun: now.Add(-30 * time.Minute).Format(time.RFC3339)}, now)
+	if err != nil || due || !disable {
+		t.Fatalf("expected ran one-shot to be disabled, got due=%v disable=%v err=%v", due, disable, err)
+	}
+
+	if _, err := parseLastRun("not-a-time"); err == nil {
+		t.Fatal("expected invalid lastRun parse error")
+	}
+}
+
+func TestAtomicWriteFileWritesDataAndCreatesParentDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "jobs.json")
+	if err := atomicWriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatalf("atomicWriteFile: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read written file: %v", err)
+	}
+	if string(raw) != "hello" {
+		t.Fatalf("unexpected written data: %q", string(raw))
 	}
 }

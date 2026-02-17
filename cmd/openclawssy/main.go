@@ -105,8 +105,8 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	schedulerExec := scheduler.NewExecutorWithConcurrency(jobsStore, time.Second, 4, func(agentID string, message string) {
-		_, _ = httpchannel.QueueRun(context.Background(), runStore, exec, agentID, message, "scheduler", "")
+	schedulerExec := scheduler.NewExecutorWithPolicy(jobsStore, time.Second, runtimeCfg.Scheduler.MaxConcurrentJobs, runtimeCfg.Scheduler.CatchUp, func(agentID string, message string) {
+		_, _ = httpchannel.QueueRun(context.Background(), runStore, exec, agentID, message, "scheduler", "", "")
 	})
 	schedulerExec.Start()
 	defer schedulerExec.Stop()
@@ -379,7 +379,7 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 type runtimeExecutor struct{ engine *runtime.Engine }
 
 func (e runtimeExecutor) Execute(ctx context.Context, input httpchannel.ExecutionInput) (httpchannel.ExecutionResult, error) {
-	res, err := e.engine.ExecuteWithInput(ctx, runtime.ExecuteInput{AgentID: input.AgentID, Message: input.Message, Source: input.Source, SessionID: input.SessionID})
+	res, err := e.engine.ExecuteWithInput(ctx, runtime.ExecuteInput{AgentID: input.AgentID, Message: input.Message, Source: input.Source, SessionID: input.SessionID, ThinkingMode: input.ThinkingMode})
 	if err != nil {
 		return httpchannel.ExecutionResult{Trace: res.Trace, Provider: res.Provider, Model: res.Model, ToolCalls: res.ToolCalls}, err
 	}
@@ -405,8 +405,9 @@ func buildSharedChatConnector(cfg config.Config, store httpchannel.RunStore, exe
 		DefaultAgentID: defaultAgentID,
 		Store:          chatStore,
 		HistoryLimit:   30,
-		Queue: func(ctx context.Context, agentID, message, source, sessionID string) (chat.QueuedRun, error) {
-			run, err := httpchannel.QueueRun(ctx, store, exec, agentID, message, source, sessionID)
+		GlobalLimiter:  chat.NewRateLimiter(cfg.Chat.GlobalRateLimitPerMin, time.Minute),
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (chat.QueuedRun, error) {
+			run, err := httpchannel.QueueRun(ctx, store, exec, agentID, message, source, sessionID, thinkingMode)
 			if err != nil {
 				return chat.QueuedRun{}, err
 			}
@@ -440,7 +441,7 @@ func buildDiscordMessageHandler(connector *chat.Connector, defaultAgentID string
 		if agentID == "" {
 			agentID = "default"
 		}
-		queued, err := connector.HandleMessage(ctx, chat.Message{UserID: msg.UserID, RoomID: msg.RoomID, AgentID: agentID, Source: "discord", Text: msg.Text})
+		queued, err := connector.HandleMessage(ctx, chat.Message{UserID: msg.UserID, RoomID: msg.RoomID, AgentID: agentID, Source: "discord", Text: msg.Text, ThinkingMode: msg.ThinkingMode})
 		if err != nil {
 			return discord.Response{}, err
 		}
@@ -460,14 +461,16 @@ func (a scopedChatAdapter) HandleMessage(ctx context.Context, msg httpchannel.Ch
 	if a.allow != nil && !a.allow.MessageAllowed(msg.UserID, msg.RoomID) {
 		return httpchannel.ChatResponse{}, chat.ErrNotAllowlisted
 	}
-	if a.limiter != nil && !a.limiter.Allow(msg.UserID+":"+msg.RoomID) {
-		return httpchannel.ChatResponse{}, chat.ErrRateLimited
+	if a.limiter != nil {
+		if allowed, retryAfter := a.limiter.AllowWithDetails(msg.UserID + ":" + msg.RoomID); !allowed {
+			return httpchannel.ChatResponse{}, chat.NewRateLimitError("sender", retryAfter)
+		}
 	}
 	agentID := strings.TrimSpace(msg.AgentID)
 	if agentID == "" {
 		agentID = strings.TrimSpace(a.defaultAgentID)
 	}
-	queued, err := a.connector.HandleMessage(ctx, chat.Message{UserID: msg.UserID, RoomID: msg.RoomID, AgentID: agentID, Source: a.source, Text: msg.Message})
+	queued, err := a.connector.HandleMessage(ctx, chat.Message{UserID: msg.UserID, RoomID: msg.RoomID, AgentID: agentID, Source: a.source, Text: msg.Message, ThinkingMode: msg.ThinkingMode})
 	if err != nil {
 		return httpchannel.ChatResponse{}, err
 	}

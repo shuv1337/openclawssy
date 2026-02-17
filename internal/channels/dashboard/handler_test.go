@@ -213,6 +213,61 @@ func TestListChatSessionsEndpoint(t *testing.T) {
 	}
 }
 
+func TestListChatSessionsEndpointPagination(t *testing.T) {
+	root := t.TempDir()
+	store, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"}); err != nil {
+			t.Fatalf("create session %d: %v", i, err)
+		}
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/chat/sessions?agent_id=default&user_id=dashboard_user&room_id=dashboard&channel=dashboard&limit=1&offset=1", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	var payload struct {
+		Sessions []any `json:"sessions"`
+		Total    int   `json:"total"`
+		Limit    int   `json:"limit"`
+		Offset   int   `json:"offset"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Total != 3 || payload.Limit != 1 || payload.Offset != 1 {
+		t.Fatalf("unexpected pagination metadata: %+v", payload)
+	}
+	if len(payload.Sessions) != 1 {
+		t.Fatalf("expected one paged session, got %d", len(payload.Sessions))
+	}
+}
+
+func TestListChatSessionsEndpointInvalidLimit(t *testing.T) {
+	root := t.TempDir()
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/chat/sessions?limit=0", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, rr.Code)
+	}
+}
+
 func TestChatSessionMessagesEndpoint(t *testing.T) {
 	root := t.TempDir()
 	store, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))

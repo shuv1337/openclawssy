@@ -28,17 +28,18 @@ const defaultQueuedRunMaxInFlight = 64
 
 var ErrQueueFull = errors.New("httpchannel: run queue is full")
 
-func QueueRun(ctx context.Context, store RunStore, executor RunExecutor, agentID, message, source, sessionID string) (Run, error) {
+func QueueRun(ctx context.Context, store RunStore, executor RunExecutor, agentID, message, source, sessionID, thinkingMode string) (Run, error) {
 	now := time.Now().UTC()
 	run := Run{
-		ID:        newRunID(),
-		AgentID:   agentID,
-		Message:   message,
-		Source:    source,
-		SessionID: sessionID,
-		Status:    "queued",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:           newRunID(),
+		AgentID:      agentID,
+		Message:      message,
+		ThinkingMode: strings.TrimSpace(thinkingMode),
+		Source:       source,
+		SessionID:    sessionID,
+		Status:       "queued",
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if !defaultQueuedRunTracker.tryBegin() {
 		return Run{}, ErrQueueFull
@@ -59,7 +60,7 @@ func executeQueuedRun(ctx context.Context, store RunStore, executor RunExecutor,
 	run.UpdatedAt = time.Now().UTC()
 	_ = store.Update(ctx, run)
 
-	result, err := executeWithRetry(ctx, executor, ExecutionInput{AgentID: run.AgentID, Message: run.Message, Source: run.Source, SessionID: run.SessionID})
+	result, err := executeWithRetry(ctx, executor, ExecutionInput{AgentID: run.AgentID, Message: run.Message, Source: run.Source, SessionID: run.SessionID, ThinkingMode: run.ThinkingMode})
 	if err != nil {
 		run.Status = "failed"
 		run.Error = err.Error()

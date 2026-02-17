@@ -20,6 +20,7 @@ const (
 	defaultFileMode        = 0o600
 	defaultDirMode         = 0o755
 	defaultLineBreak       = '\n'
+	defaultFlushInterval   = 2 * time.Second
 )
 
 type Event struct {
@@ -37,9 +38,16 @@ type Logger struct {
 	mu     sync.Mutex
 	file   *os.File
 	writer *bufio.Writer
+
+	flushInterval time.Duration
+	lastFlushAt   time.Time
 }
 
 func NewLogger(path string, redact func(any) any) (*Logger, error) {
+	return newLoggerWithFlushInterval(path, redact, defaultFlushInterval)
+}
+
+func newLoggerWithFlushInterval(path string, redact func(any) any, flushInterval time.Duration) (*Logger, error) {
 	if err := os.MkdirAll(filepath.Dir(path), defaultDirMode); err != nil {
 		return nil, err
 	}
@@ -50,7 +58,17 @@ func NewLogger(path string, redact func(any) any) (*Logger, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Logger{path: path, redact: redact, file: f, writer: bufio.NewWriterSize(f, 32*1024)}, nil
+	if flushInterval <= 0 {
+		flushInterval = defaultFlushInterval
+	}
+	return &Logger{
+		path:          path,
+		redact:        redact,
+		file:          f,
+		writer:        bufio.NewWriterSize(f, 32*1024),
+		flushInterval: flushInterval,
+		lastFlushAt:   time.Now().UTC(),
+	}, nil
 }
 
 func (l *Logger) LogEvent(ctx context.Context, eventType string, fields map[string]any) error {
@@ -99,17 +117,43 @@ func (l *Logger) LogEvent(ctx context.Context, eventType string, fields map[stri
 		}
 		l.file = f
 		l.writer = bufio.NewWriterSize(f, 32*1024)
+		l.lastFlushAt = time.Now().UTC()
 	}
 
 	if _, err := l.writer.Write(line); err != nil {
 		return err
 	}
-	if err := l.writer.Flush(); err != nil {
-		return err
-	}
 	if eventType == EventRunEnd {
-		return l.file.Sync()
+		return l.flushLocked(true)
 	}
+	if l.shouldPeriodicFlushLocked(time.Now().UTC()) {
+		return l.flushLocked(true)
+	}
+	return nil
+}
+
+func (l *Logger) shouldPeriodicFlushLocked(now time.Time) bool {
+	if l.flushInterval <= 0 {
+		return false
+	}
+	if l.lastFlushAt.IsZero() {
+		return true
+	}
+	return now.Sub(l.lastFlushAt) >= l.flushInterval
+}
+
+func (l *Logger) flushLocked(syncDisk bool) error {
+	if l.writer != nil {
+		if err := l.writer.Flush(); err != nil {
+			return err
+		}
+	}
+	if syncDisk && l.file != nil {
+		if err := l.file.Sync(); err != nil {
+			return err
+		}
+	}
+	l.lastFlushAt = time.Now().UTC()
 	return nil
 }
 
@@ -122,15 +166,7 @@ func (l *Logger) Close() error {
 	if l.file == nil {
 		return nil
 	}
-	if l.writer != nil {
-		if err := l.writer.Flush(); err != nil {
-			_ = l.file.Close()
-			l.file = nil
-			l.writer = nil
-			return err
-		}
-	}
-	if err := l.file.Sync(); err != nil {
+	if err := l.flushLocked(true); err != nil {
 		_ = l.file.Close()
 		l.file = nil
 		l.writer = nil

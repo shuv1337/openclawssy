@@ -43,11 +43,14 @@ Recent runtime hardening and UX upgrades:
 - Model response cap is enforced via `model.max_tokens` (1..20000, default 20000).
 - Tool activity now includes concise summaries (for example `wrote N line(s) to file`) in trace, dashboard, and Discord updates.
 - Thinking extraction is first-class (`ExtractThinking`) with `output.thinking_mode` controls (`never` default, `on_error`, `always`) and redacted thinking persistence in trace/artifacts/audit.
+- Thinking output is bounded by `output.max_thinking_chars` and per-request overrides are supported in HTTP and Discord chat flows.
 - Chatstore now uses cross-process locking for session writes and lock-respecting reads for `messages.jsonl` and active-session pointers.
-- Scheduler now supports bounded concurrent execution and persisted global pause/resume plus per-job enable/disable controls.
+- Scheduler now supports bounded concurrent execution (`scheduler.max_concurrent_jobs`), startup catch-up policy (`scheduler.catch_up`), and persisted global pause/resume plus per-job enable/disable controls.
 - Run queue saturation is guarded by a global in-flight cap; overload returns HTTP `429` instead of unbounded queuing.
+- Runtime execution is guarded by `engine.max_concurrent_runs` to reject excess concurrent runs early.
 - Dashboard chat layout improvements: resizable chat panel, collapsible panes, focus-chat mode, persisted layout preferences, and continuous in-chat progress updates for long runs.
 - Chat API queue responses now include `session_id` so clients can keep progress/tool timelines tied to the active session.
+- Chat rate limiting supports sender + global policies with cooldown hints (`chat.rate_limited`).
 
 Ussyverse flavor, practical core.
 
@@ -65,6 +68,7 @@ This project is a **PROTOTYPE IN ACTIVE DEVELOPMENT**.
 - Workspace-only writes.
 - Chat user allowlist is deny-by-default when empty.
 - `shell.exec` disabled unless sandbox is active.
+- `shell.allowed_commands` can enforce explicit command-prefix allowlists when shell exec is enabled.
 - Network disabled by default.
 - HTTP API disabled by default; when enabled it should stay on loopback with token auth.
 - Append-only JSONL audit logs with redaction.
@@ -228,11 +232,13 @@ This artifact-first layout is intentional: every run should be reproducible, ins
 
 ## HTTP and Chat Queue
 
-- HTTP run API: `POST /v1/runs`, `GET /v1/runs/{id}`
+- HTTP run API: `POST /v1/runs`, `GET /v1/runs`, `GET /v1/runs/{id}`
 - Chat bridge API: `POST /v1/chat/messages`
 - Both require bearer token.
 - Global queue saturation returns `429` when in-flight run capacity is exhausted.
 - Chat queue uses allowlist + rate limit from `chat.*` config.
+- Run listing supports pagination/filtering (`limit`, `offset`, `status`).
+- Chat rate-limit responses are structured (`chat.rate_limited`) and include `retry_after_seconds`.
 - Chat queue response includes `session_id` for queued runs so clients can reattach to the same session timeline.
 - Chat runs persist tool-call messages with metadata (`tool_name`, `tool_call_id`, `run_id`) so multi-step tool activity is visible in UI/channel outputs.
 

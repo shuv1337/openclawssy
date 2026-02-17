@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -1098,6 +1099,243 @@ func TestProviderModelToolDirectiveSupportsBashAlias(t *testing.T) {
 	if resp.ToolCalls[0].Name != "shell.exec" {
 		t.Fatalf("expected canonical shell.exec, got %q", resp.ToolCalls[0].Name)
 	}
+}
+
+func TestParseLooseJSONToolCallsDedupesCandidates(t *testing.T) {
+	trace := newRunTraceCollector("run-loose", "", "", "")
+	content := `first {"tool_name":"fs.list","arguments":{"path":"."}} then {"tool_name":"fs.list","arguments":{"path":"."}} and {"tool_name":"fs.read","arguments":{"path":"README.md"}}`
+	calls := parseLooseJSONToolCalls(content, []string{"fs.list", "fs.read"}, trace)
+
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 deduped calls, got %d (%+v)", len(calls), calls)
+	}
+	if calls[0].Name != "fs.list" || calls[1].Name != "fs.read" {
+		t.Fatalf("unexpected call order/names: %+v", calls)
+	}
+	if !strings.HasPrefix(calls[0].ID, "tool-json-loose-") {
+		t.Fatalf("expected loose-json id prefix, got %q", calls[0].ID)
+	}
+
+	snapshot := trace.Snapshot()
+	extractions, ok := snapshot["extracted_tool_calls"].([]any)
+	if !ok || len(extractions) == 0 {
+		t.Fatalf("expected extraction trace entries, got %#v", snapshot["extracted_tool_calls"])
+	}
+}
+
+func TestSynthesizeWriteCallFromResponse(t *testing.T) {
+	content := "Here is the file:\n```txt\nhello\nworld\n```"
+	call, ok := synthesizeWriteCallFromResponse(content, "create notes.txt with this content", 3)
+	if !ok {
+		t.Fatal("expected synthesized write call")
+	}
+	if call.Name != "fs.write" || call.ID != "tool-synth-3" {
+		t.Fatalf("unexpected synthesized call: %+v", call)
+	}
+	args := decodeToolArgs(t, call.Arguments)
+	if args["path"] != "notes.txt" {
+		t.Fatalf("expected notes.txt path, got %#v", args["path"])
+	}
+	if args["content"] != "hello\nworld" {
+		t.Fatalf("unexpected synthesized content: %#v", args["content"])
+	}
+
+	if _, ok := synthesizeWriteCallFromResponse(content, "summarize this", 1); ok {
+		t.Fatal("expected synthesis disabled for non-create request")
+	}
+}
+
+func TestParseBashBlocksAndShellSnippets(t *testing.T) {
+	bashCalls := parseBashCodeBlocks("```bash\n$ ls -la\ncat README.md\n```", 2)
+	if len(bashCalls) != 1 {
+		t.Fatalf("expected one bash call, got %d", len(bashCalls))
+	}
+	if bashCalls[0].Name != "shell.exec" || bashCalls[0].ID != "tool-bash-2" {
+		t.Fatalf("unexpected bash call: %+v", bashCalls[0])
+	}
+	args := decodeToolArgs(t, bashCalls[0].Arguments)
+	if args["command"] != "bash" {
+		t.Fatalf("expected bash command, got %#v", args["command"])
+	}
+
+	plain := removeFencedCodeBlocks("before\n```bash\nls\n```\nafter")
+	if strings.Contains(plain, "ls") {
+		t.Fatalf("expected fenced block removal, got %q", plain)
+	}
+
+	snippets := parseShellSnippets("ls -la ./docs\ncat README.md\n$ ls", 5)
+	if len(snippets) != 3 {
+		t.Fatalf("expected 3 shell snippet calls, got %d", len(snippets))
+	}
+	if snippets[0].Name != "fs.list" || snippets[1].Name != "fs.list" || snippets[2].Name != "fs.read" {
+		t.Fatalf("unexpected snippet calls: %+v", snippets)
+	}
+}
+
+func TestParseJSONToolCallAndCandidateExtraction(t *testing.T) {
+	raw := `{"function":"bash.exec","command":"pwd"}`
+	call, ok := parseJSONToolCall(raw, 7)
+	if !ok {
+		t.Fatal("expected valid json tool call")
+	}
+	if call.Name != "shell.exec" || call.ID != "tool-json-7" {
+		t.Fatalf("unexpected parsed json tool call: %+v", call)
+	}
+	args := decodeToolArgs(t, call.Arguments)
+	if args["command"] != "pwd" {
+		t.Fatalf("expected command=pwd, got %#v", args["command"])
+	}
+
+	if _, ok := parseJSONToolCall(`{"arguments":{"path":"."}}`, 1); ok {
+		t.Fatal("expected invalid json tool call without tool name")
+	}
+
+	cands := extractJSONObjectCandidates(`noise {"tool_name":"fs.list","arguments":{"path":"{x}"}} bad {oops} tail {"tool_name":"fs.read","arguments":{"path":"README.md"}}`)
+	if len(cands) != 2 {
+		t.Fatalf("expected 2 valid object candidates, got %d (%#v)", len(cands), cands)
+	}
+}
+
+func TestParseFunctionCallAndArgsString(t *testing.T) {
+	call := parseFunctionCall(`fs.list(path="docs")`)
+	if call == nil || call.Name != "fs.list" {
+		t.Fatalf("expected fs.list function call, got %+v", call)
+	}
+	args := decodeToolArgs(t, call.Arguments)
+	if args["path"] != "docs" {
+		t.Fatalf("expected path=docs, got %#v", args["path"])
+	}
+
+	call = parseFunctionCall(`fs.read("README.md")`)
+	if call == nil || call.Name != "fs.read" {
+		t.Fatalf("expected fs.read function call, got %+v", call)
+	}
+	args = decodeToolArgs(t, call.Arguments)
+	if args["path"] != "README.md" {
+		t.Fatalf("expected positional path, got %#v", args["path"])
+	}
+
+	if call := parseFunctionCall("not a function call"); call != nil {
+		t.Fatalf("expected nil call for invalid syntax, got %+v", call)
+	}
+
+	parsed := parseArgsString(`{"path":".","recursive":true}`)
+	if parsed["path"] != "." || parsed["recursive"] != true {
+		t.Fatalf("unexpected json args parse: %#v", parsed)
+	}
+	parsed = parseArgsString(`path=README.md mode=ro`)
+	if parsed["path"] != "README.md" || parsed["mode"] != "ro" {
+		t.Fatalf("unexpected key=value args parse: %#v", parsed)
+	}
+}
+
+func TestToolNameHelpersAndAllowlist(t *testing.T) {
+	if isToolAllowed("tool.result", nil) {
+		t.Fatal("tool.result must never be allowed")
+	}
+	if !isToolAllowed("fs.list", nil) {
+		t.Fatal("expected unrestricted allowlist to allow fs.list")
+	}
+	if !isToolAllowed("shell.exec", []string{"bash.exec"}) {
+		t.Fatal("expected alias to map and allow shell.exec")
+	}
+	if isToolAllowed("fs.write", []string{"fs.read"}) {
+		t.Fatal("expected fs.write to be denied")
+	}
+
+	if canonical, ok := canonicalToolName("terminal.run"); !ok || canonical != "shell.exec" {
+		t.Fatalf("unexpected canonical alias mapping: ok=%v canonical=%q", ok, canonical)
+	}
+	if _, ok := canonicalToolName("unknown.tool"); ok {
+		t.Fatal("expected unknown tool alias to fail")
+	}
+}
+
+type testNetError struct{}
+
+func (testNetError) Error() string   { return "temporary network failure" }
+func (testNetError) Timeout() bool   { return true }
+func (testNetError) Temporary() bool { return true }
+
+func TestProviderRetryAndTimeoutHelpers(t *testing.T) {
+	if shouldRetryProviderError(nil) {
+		t.Fatal("nil errors must not be retryable")
+	}
+	if shouldRetryProviderError(context.Canceled) {
+		t.Fatal("context canceled must not be retryable")
+	}
+	if !shouldRetryProviderError(context.DeadlineExceeded) {
+		t.Fatal("deadline exceeded should be retryable")
+	}
+	if !shouldRetryProviderError(testNetError{}) {
+		t.Fatal("timeout net error should be retryable")
+	}
+	if !shouldRetryProviderError(errors.New("retryable provider status: 429")) {
+		t.Fatal("retryable status text should be retryable")
+	}
+
+	ctx := context.Background()
+	timeoutCtx, cancel := ensureProviderRequestTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if _, ok := timeoutCtx.Deadline(); !ok {
+		t.Fatal("expected timeout context to have deadline")
+	}
+
+	base, baseCancel := context.WithTimeout(ctx, time.Second)
+	defer baseCancel()
+	keptCtx, keptCancel := ensureProviderRequestTimeout(base, 10*time.Millisecond)
+	defer keptCancel()
+	originalDeadline, ok := base.Deadline()
+	if !ok {
+		t.Fatal("expected base context deadline")
+	}
+	keptDeadline, ok := keptCtx.Deadline()
+	if !ok || !keptDeadline.Equal(originalDeadline) {
+		t.Fatalf("expected existing deadline to be preserved, got %v (ok=%v), want %v", keptDeadline, ok, originalDeadline)
+	}
+}
+
+func TestProviderEndpointAndMessageHelpers(t *testing.T) {
+	cfg := config.Default()
+	providers := []string{"openai", "openrouter", "requesty", "zai", "generic"}
+	for _, name := range providers {
+		if _, err := providerEndpoint(cfg, name); err != nil {
+			t.Fatalf("expected provider %q to resolve, got %v", name, err)
+		}
+	}
+	if _, err := providerEndpoint(cfg, "unknown"); err == nil {
+		t.Fatal("expected unsupported provider error")
+	}
+
+	messages := []agent.ChatMessage{{Role: "assistant", Content: "a"}, {Role: "system", Content: "s"}}
+	if got := lastUserMessage(messages); got != "s" {
+		t.Fatalf("expected fallback to last message content, got %q", got)
+	}
+	if got := lastUserMessage(nil); got != "" {
+		t.Fatalf("expected empty last user message for empty history, got %q", got)
+	}
+
+	trimmed := truncateCompactedMessages("sys", []agent.ChatMessage{
+		{Role: "system", Content: strings.Repeat("s", 1200)},
+		{Role: "user", Content: strings.Repeat("u", 1200)},
+		{Role: "assistant", Content: strings.Repeat("a", 1200)},
+		{Role: "user", Content: "tail"},
+	}, 20)
+	if len(trimmed) >= 4 {
+		t.Fatalf("expected compaction to drop older messages, got %d entries", len(trimmed))
+	}
+	if trimmed[len(trimmed)-1].Content != "tail" {
+		t.Fatalf("expected latest turn preserved, got %+v", trimmed)
+	}
+}
+
+func decodeToolArgs(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	out := map[string]any{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode args: %v", err)
+	}
+	return out
 }
 
 func testProviderModel(t *testing.T, baseURL string) *ProviderModel {

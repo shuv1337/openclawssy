@@ -41,3 +41,23 @@ func TestRateLimiter_PerKeyIsolation(t *testing.T) {
 		t.Fatal("u2 should have independent quota")
 	}
 }
+
+func TestRateLimiter_AllowWithDetailsIncludesRetryAfter(t *testing.T) {
+	now := time.Date(2026, 2, 15, 10, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	rl := NewRateLimiterWithClock(1, 5*time.Second, clock)
+
+	allowed, retryAfter := rl.AllowWithDetails("u1")
+	if !allowed || retryAfter != 0 {
+		t.Fatalf("expected first request allowed with zero retryAfter, got allowed=%v retryAfter=%s", allowed, retryAfter)
+	}
+
+	now = now.Add(1200 * time.Millisecond)
+	allowed, retryAfter = rl.AllowWithDetails("u1")
+	if allowed {
+		t.Fatal("expected second request blocked")
+	}
+	if retryAfter < 3700*time.Millisecond || retryAfter > 3900*time.Millisecond {
+		t.Fatalf("unexpected retryAfter window: %s", retryAfter)
+	}
+}

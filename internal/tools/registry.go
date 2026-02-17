@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -41,12 +42,13 @@ type ShellExecutor interface {
 type Handler func(ctx context.Context, req Request) (map[string]any, error)
 
 type Request struct {
-	AgentID   string
-	Tool      string
-	Workspace string
-	Args      map[string]any
-	Policy    Policy
-	Shell     ShellExecutor
+	AgentID              string
+	Tool                 string
+	Workspace            string
+	Args                 map[string]any
+	Policy               Policy
+	Shell                ShellExecutor
+	ShellAllowedCommands []string
 }
 
 type registryItem struct {
@@ -55,11 +57,12 @@ type registryItem struct {
 }
 
 type Registry struct {
-	policy Policy
-	audit  Auditor
-	shell  ShellExecutor
-	mu     sync.RWMutex
-	tools  map[string]registryItem
+	policy               Policy
+	audit                Auditor
+	shell                ShellExecutor
+	shellAllowedCommands []string
+	mu                   sync.RWMutex
+	tools                map[string]registryItem
 }
 
 func NewRegistry(policy Policy, audit Auditor) *Registry {
@@ -74,6 +77,12 @@ func (r *Registry) SetShellExecutor(shell ShellExecutor) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.shell = shell
+}
+
+func (r *Registry) SetShellAllowedCommands(prefixes []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.shellAllowedCommands = append([]string(nil), prefixes...)
 }
 
 func (r *Registry) Register(spec ToolSpec, handler Handler) error {
@@ -138,6 +147,17 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 			return nil, err
 		}
 	}
+	for field, expected := range item.spec.ArgTypes {
+		value, ok := args[field]
+		if !ok {
+			continue
+		}
+		if !matchesArgType(value, expected) {
+			err := &ToolError{Code: ErrCodeInvalidInput, Tool: name, Message: fmt.Sprintf("invalid type for field %s: expected %s", field, expected)}
+			_ = r.emit(ctx, "tool.result", map[string]any{"agent_id": agentID, "tool": name, "error": err.Error()})
+			return nil, err
+		}
+	}
 
 	if r.policy != nil {
 		if err := r.policy.CheckTool(agentID, name); err != nil {
@@ -153,18 +173,16 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 	}
 
 	res, err := item.handler(ctx, Request{
-		AgentID:   agentID,
-		Tool:      name,
-		Workspace: workspace,
-		Args:      args,
-		Policy:    r.policy,
-		Shell:     r.shell,
+		AgentID:              agentID,
+		Tool:                 name,
+		Workspace:            workspace,
+		Args:                 args,
+		Policy:               r.policy,
+		Shell:                r.shell,
+		ShellAllowedCommands: append([]string(nil), r.shellAllowedCommands...),
 	})
 	if err != nil {
-		errCode := ErrCodeExecution
-		if errors.Is(err, context.DeadlineExceeded) {
-			errCode = ErrCodeTimeout
-		}
+		errCode := classifyToolErrorCode(err)
 		execErr := wrapError(errCode, name, err)
 		_ = r.emit(ctx, "tool.result", map[string]any{"agent_id": agentID, "tool": name, "error": execErr.Error()})
 		return nil, execErr
@@ -176,6 +194,26 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 		"result":   res,
 	})
 	return res, nil
+}
+
+func classifyToolErrorCode(err error) ErrorCode {
+	if err == nil {
+		return ErrCodeExecution
+	}
+	var toolErr *ToolError
+	if errors.As(err, &toolErr) {
+		if toolErr.Code != "" {
+			return toolErr.Code
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrCodeTimeout
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(lower, "invalid") || strings.Contains(lower, "must be") || strings.Contains(lower, "required") || strings.Contains(lower, "missing") {
+		return ErrCodeInvalidInput
+	}
+	return ErrCodeExecution
 }
 
 func matchesArgType(value any, expected ArgType) bool {

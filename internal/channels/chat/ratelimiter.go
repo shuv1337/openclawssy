@@ -37,6 +37,11 @@ func NewRateLimiterWithClock(limit int, window time.Duration, now func() time.Ti
 }
 
 func (r *RateLimiter) Allow(key string) bool {
+	allowed, _ := r.AllowWithDetails(key)
+	return allowed
+}
+
+func (r *RateLimiter) AllowWithDetails(key string) (bool, time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -53,10 +58,14 @@ func (r *RateLimiter) Allow(key string) bool {
 
 	if len(kept) >= r.limit {
 		r.events[key] = kept
-		return false
+		retryAfter := kept[0].Add(r.window).Sub(now)
+		if retryAfter < time.Millisecond {
+			retryAfter = time.Millisecond
+		}
+		return false, retryAfter
 	}
 
 	kept = append(kept, now)
 	r.events[key] = kept
-	return true
+	return true, 0
 }

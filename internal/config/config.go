@@ -15,6 +15,8 @@ type Config struct {
 	Shell     ShellConfig     `json:"shell"`
 	Sandbox   SandboxConfig   `json:"sandbox"`
 	Server    ServerConfig    `json:"server"`
+	Engine    EngineConfig    `json:"engine"`
+	Scheduler SchedulerConfig `json:"scheduler"`
 	Output    OutputConfig    `json:"output"`
 	Workspace WorkspaceConfig `json:"workspace"`
 	Model     ModelConfig     `json:"model"`
@@ -31,7 +33,8 @@ const (
 )
 
 type OutputConfig struct {
-	ThinkingMode string `json:"thinking_mode"`
+	ThinkingMode     string `json:"thinking_mode"`
+	MaxThinkingChars int    `json:"max_thinking_chars,omitempty"`
 }
 
 func NormalizeThinkingMode(mode string) string {
@@ -58,7 +61,17 @@ type NetworkConfig struct {
 }
 
 type ShellConfig struct {
-	EnableExec bool `json:"enable_exec"`
+	EnableExec      bool     `json:"enable_exec"`
+	AllowedCommands []string `json:"allowed_commands,omitempty"`
+}
+
+type EngineConfig struct {
+	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+}
+
+type SchedulerConfig struct {
+	CatchUp           bool `json:"catch_up"`
+	MaxConcurrentJobs int  `json:"max_concurrent_jobs,omitempty"`
 }
 
 type SandboxConfig struct {
@@ -102,11 +115,12 @@ type ProvidersConfig struct {
 }
 
 type ChatConfig struct {
-	Enabled         bool     `json:"enabled"`
-	DefaultAgentID  string   `json:"default_agent_id"`
-	AllowUsers      []string `json:"allow_users,omitempty"`
-	AllowRooms      []string `json:"allow_rooms,omitempty"`
-	RateLimitPerMin int      `json:"rate_limit_per_min,omitempty"`
+	Enabled               bool     `json:"enabled"`
+	DefaultAgentID        string   `json:"default_agent_id"`
+	AllowUsers            []string `json:"allow_users,omitempty"`
+	AllowRooms            []string `json:"allow_rooms,omitempty"`
+	RateLimitPerMin       int      `json:"rate_limit_per_min,omitempty"`
+	GlobalRateLimitPerMin int      `json:"global_rate_limit_per_min,omitempty"`
 }
 
 type DiscordConfig struct {
@@ -138,6 +152,13 @@ func Default() Config {
 			Active:   false,
 			Provider: "none",
 		},
+		Engine: EngineConfig{
+			MaxConcurrentRuns: 64,
+		},
+		Scheduler: SchedulerConfig{
+			CatchUp:           true,
+			MaxConcurrentJobs: 4,
+		},
 		Server: ServerConfig{
 			BindAddress: "127.0.0.1",
 			Port:        8080,
@@ -147,7 +168,8 @@ func Default() Config {
 			Dashboard:   true,
 		},
 		Output: OutputConfig{
-			ThinkingMode: ThinkingModeNever,
+			ThinkingMode:     ThinkingModeNever,
+			MaxThinkingChars: 4000,
 		},
 		Workspace: WorkspaceConfig{
 			Root: "./workspace",
@@ -181,9 +203,10 @@ func Default() Config {
 			},
 		},
 		Chat: ChatConfig{
-			Enabled:         true,
-			DefaultAgentID:  "default",
-			RateLimitPerMin: 20,
+			Enabled:               true,
+			DefaultAgentID:        "default",
+			RateLimitPerMin:       20,
+			GlobalRateLimitPerMin: 120,
 		},
 		Discord: DiscordConfig{
 			Enabled:         false,
@@ -218,6 +241,15 @@ func (c *Config) ApplyDefaults() {
 	} else {
 		c.Output.ThinkingMode = NormalizeThinkingMode(c.Output.ThinkingMode)
 	}
+	if c.Output.MaxThinkingChars <= 0 {
+		c.Output.MaxThinkingChars = d.Output.MaxThinkingChars
+	}
+	if c.Engine.MaxConcurrentRuns <= 0 {
+		c.Engine.MaxConcurrentRuns = d.Engine.MaxConcurrentRuns
+	}
+	if c.Scheduler.MaxConcurrentJobs <= 0 {
+		c.Scheduler.MaxConcurrentJobs = d.Scheduler.MaxConcurrentJobs
+	}
 	if c.Server.TLSCertFile == "" {
 		c.Server.TLSCertFile = d.Server.TLSCertFile
 	}
@@ -238,6 +270,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Chat.RateLimitPerMin == 0 {
 		c.Chat.RateLimitPerMin = d.Chat.RateLimitPerMin
+	}
+	if c.Chat.GlobalRateLimitPerMin == 0 {
+		c.Chat.GlobalRateLimitPerMin = d.Chat.GlobalRateLimitPerMin
 	}
 	if c.Discord.TokenEnv == "" {
 		c.Discord.TokenEnv = d.Discord.TokenEnv
@@ -303,6 +338,11 @@ func (c Config) Validate() error {
 	if !c.Sandbox.Active && c.Shell.EnableExec {
 		return errors.New("shell execution requires active sandbox")
 	}
+	for _, cmd := range c.Shell.AllowedCommands {
+		if strings.TrimSpace(cmd) == "" {
+			return errors.New("shell.allowed_commands cannot contain empty entries")
+		}
+	}
 
 	if strings.TrimSpace(c.Workspace.Root) == "" {
 		return errors.New("workspace.root cannot be empty")
@@ -310,6 +350,15 @@ func (c Config) Validate() error {
 
 	if !IsValidThinkingMode(c.Output.ThinkingMode) {
 		return fmt.Errorf("output.thinking_mode must be one of never|on_error|always")
+	}
+	if c.Output.MaxThinkingChars < 64 || c.Output.MaxThinkingChars > 100000 {
+		return errors.New("output.max_thinking_chars must be between 64 and 100000")
+	}
+	if c.Engine.MaxConcurrentRuns < 1 || c.Engine.MaxConcurrentRuns > 10000 {
+		return errors.New("engine.max_concurrent_runs must be between 1 and 10000")
+	}
+	if c.Scheduler.MaxConcurrentJobs < 1 || c.Scheduler.MaxConcurrentJobs > 1000 {
+		return errors.New("scheduler.max_concurrent_jobs must be between 1 and 1000")
 	}
 
 	for _, d := range c.Network.AllowedDomains {
@@ -337,6 +386,9 @@ func (c Config) Validate() error {
 	}
 	if c.Chat.RateLimitPerMin < 1 {
 		return errors.New("chat.rate_limit_per_min must be >= 1")
+	}
+	if c.Chat.GlobalRateLimitPerMin < 1 {
+		return errors.New("chat.global_rate_limit_per_min must be >= 1")
 	}
 	if c.Discord.RateLimitPerMin < 1 {
 		return errors.New("discord.rate_limit_per_min must be >= 1")

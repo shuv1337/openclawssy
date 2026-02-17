@@ -13,6 +13,7 @@ type Run struct {
 	ID           string         `json:"id"`
 	AgentID      string         `json:"agent_id"`
 	Message      string         `json:"message"`
+	ThinkingMode string         `json:"thinking_mode,omitempty"`
 	Source       string         `json:"source,omitempty"`
 	SessionID    string         `json:"session_id,omitempty"`
 	Status       string         `json:"status"`

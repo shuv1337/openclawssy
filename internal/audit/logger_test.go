@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoggerAppendOnly(t *testing.T) {
@@ -22,6 +23,9 @@ func TestLoggerAppendOnly(t *testing.T) {
 	}
 	if err := logger.LogEvent(context.Background(), EventRunEnd, map[string]any{"run_id": "r1"}); err != nil {
 		t.Fatalf("log 2: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
 	}
 
 	raw, err := os.ReadFile(path)
@@ -65,6 +69,9 @@ func TestLoggerRedactsPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("log event: %v", err)
 	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -79,5 +86,41 @@ func TestLoggerRedactsPayload(t *testing.T) {
 
 	if evt.Payload["api_token"] != "[REDACTED]" {
 		t.Fatalf("expected redacted token payload, got %#v", evt.Payload["api_token"])
+	}
+}
+
+func TestLoggerPeriodicFlush(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger, err := newLoggerWithFlushInterval(path, nil, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("new logger: %v", err)
+	}
+
+	if err := logger.LogEvent(context.Background(), EventToolCall, map[string]any{"tool": "fs.list"}); err != nil {
+		t.Fatalf("log first event: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit before flush: %v", err)
+	}
+	if strings.TrimSpace(string(raw)) != "" {
+		t.Fatalf("expected no flushed data yet, got %q", string(raw))
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	if err := logger.LogEvent(context.Background(), EventToolResult, map[string]any{"tool": "fs.list"}); err != nil {
+		t.Fatalf("log second event: %v", err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatalf("close logger: %v", err)
+	}
+
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read audit after periodic flush: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines after periodic flush, got %d", len(lines))
 	}
 }

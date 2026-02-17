@@ -37,7 +37,15 @@ Provider API key env defaults:
     "allowed_domains": []
   },
   "shell": {
-    "enable_exec": false
+    "enable_exec": false,
+    "allowed_commands": []
+  },
+  "engine": {
+    "max_concurrent_runs": 64
+  },
+  "scheduler": {
+    "catch_up": true,
+    "max_concurrent_jobs": 4
   },
   "sandbox": {
     "active": false,
@@ -52,7 +60,8 @@ Provider API key env defaults:
     "dashboard_enabled": true
   },
   "output": {
-    "thinking_mode": "never"
+    "thinking_mode": "never",
+    "max_thinking_chars": 4000
   },
   "workspace": {
     "root": "./workspace"
@@ -90,7 +99,8 @@ Provider API key env defaults:
     "default_agent_id": "default",
     "allow_users": [],
     "allow_rooms": [],
-    "rate_limit_per_min": 20
+    "rate_limit_per_min": 20,
+    "global_rate_limit_per_min": 120
   },
   "discord": {
     "enabled": false,
@@ -113,6 +123,7 @@ Provider API key env defaults:
 - Config is human-managed; agent tools do not get write access to `.openclawssy/`.
 - Workspace write policy stays enforced after path and symlink resolution.
 - `shell.exec` is enabled only when sandbox is active and provider is not `none`.
+- `shell.allowed_commands` entries must be non-empty when provided.
 - Supported sandbox providers are `none` and `local`.
 - HTTP APIs require bearer token.
 - Chat queue accepts allowlisted senders only and enforces rate limits.
@@ -128,4 +139,14 @@ Provider API key env defaults:
 ## Output Notes
 - `output.thinking_mode` supports: `never`, `on_error`, `always`.
 - Default is `never`.
+- `output.max_thinking_chars` bounds persisted/returned thinking content.
 - CLI `ask` supports per-call override: `openclawssy ask --thinking=always ...`.
+
+## Concurrency and Scheduling Notes
+- `engine.max_concurrent_runs` limits concurrent runtime executions.
+- `scheduler.max_concurrent_jobs` limits scheduler worker concurrency per tick.
+- `scheduler.catch_up=true` runs missed jobs once at startup check; `false` skips missed windows.
+
+## Chat Rate Limiting
+- `chat.rate_limit_per_min` applies to sender-scoped keys.
+- `chat.global_rate_limit_per_min` applies process-wide across all chat senders.

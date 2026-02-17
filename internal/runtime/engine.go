@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"openclawssy/internal/agent"
@@ -27,17 +29,31 @@ type Engine struct {
 	rootDir      string
 	workspaceDir string
 	agentsDir    string
+
+	runLimitMu  sync.Mutex
+	runLimitCap int
+	runSlots    chan struct{}
 }
 
 type RunResult struct {
-	RunID        string
-	FinalText    string
-	ArtifactPath string
-	DurationMS   int64
-	ToolCalls    int
-	Provider     string
-	Model        string
-	Trace        map[string]any
+	RunID            string
+	FinalText        string
+	ArtifactPath     string
+	DurationMS       int64
+	ToolCalls        int
+	Provider         string
+	Model            string
+	Trace            map[string]any
+	ParseDiagnostics *ParseDiagnostics
+}
+
+type ParseDiagnostics struct {
+	Rejected []ParseDiagnosticEntry `json:"rejected,omitempty"`
+}
+
+type ParseDiagnosticEntry struct {
+	Snippet string `json:"snippet,omitempty"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type ExecuteInput struct {
@@ -49,14 +65,26 @@ type ExecuteInput struct {
 }
 
 const (
-	maxPersistedThinkingChars   = 700
-	maxSessionContextChars      = 12000
-	maxSessionMessageChars      = 1400
-	maxSessionToolSummaryChars  = 220
-	maxSessionToolOutputChars   = 1000
-	maxSessionToolErrorChars    = 320
-	maxSessionContextMessageCap = 200
+	maxSessionContextChars         = 12000
+	maxSessionMessageChars         = 1400
+	maxSessionToolSummaryChars     = 220
+	maxSessionToolOutputChars      = 1000
+	maxSessionToolErrorChars       = 320
+	maxSessionContextMessageCap    = 200
+	maxParseDiagnosticSnippetChars = 260
+	maxParseDiagnosticReasonChars  = 180
 )
+
+type RunLimitError struct {
+	Limit int
+}
+
+func (e *RunLimitError) Error() string {
+	if e == nil || e.Limit <= 0 {
+		return "engine.max_concurrent_runs exceeded"
+	}
+	return fmt.Sprintf("engine.max_concurrent_runs exceeded (%d)", e.Limit)
+}
 
 func NewEngine(rootDir string) (*Engine, error) {
 	if rootDir == "" {
@@ -146,6 +174,11 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runtime: load config: %w", err)
 	}
+	releaseSlot, err := e.acquireRunSlot(cfg.Engine.MaxConcurrentRuns)
+	if err != nil {
+		return RunResult{}, err
+	}
+	defer releaseSlot()
 	thinkingMode := config.NormalizeThinkingMode(cfg.Output.ThinkingMode)
 	if strings.TrimSpace(in.ThinkingMode) != "" {
 		if !config.IsValidThinkingMode(in.ThinkingMode) {
@@ -188,6 +221,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	}); err != nil {
 		return RunResult{}, fmt.Errorf("runtime: register core tools: %w", err)
 	}
+	registry.SetShellAllowedCommands(cfg.Shell.AllowedCommands)
 
 	var provider sandbox.Provider
 	if cfg.Sandbox.Active {
@@ -266,7 +300,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	})
 
 	artifactPath := ""
-	persistedThinking, thinkingPresent := sanitizedPersistedThinking(out.Thinking, out.ThinkingPresent)
+	persistedThinking, thinkingPresent := sanitizedPersistedThinking(out.Thinking, out.ThinkingPresent, cfg.Output.MaxThinkingChars)
 	includeThinking := shouldIncludeThinking(thinkingMode, runErr != nil, out.ToolParseFailure, thinkingPresent)
 	if runErr == nil {
 		durationMS := time.Since(start).Milliseconds()
@@ -334,31 +368,34 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	traceCollector.RecordThinking(persistedThinking, thinkingPresent)
 	traceCollector.RecordToolExecution(out.ToolCalls)
 	traceSnapshot := traceCollector.Snapshot()
+	parseDiagnostics := buildRunParseDiagnostics(traceSnapshot, thinkingMode == config.ThinkingModeAlways || out.ToolParseFailure)
 
 	if runErr != nil {
 		if includeThinking {
 			runErr = fmt.Errorf("%w\n\nThinking:\n%s", runErr, persistedThinking)
 		}
 		return RunResult{
-			RunID:        runID,
-			ArtifactPath: artifactPath,
-			DurationMS:   time.Since(start).Milliseconds(),
-			ToolCalls:    len(out.ToolCalls),
-			Provider:     model.ProviderName(),
-			Model:        model.ModelName(),
-			Trace:        traceSnapshot,
+			RunID:            runID,
+			ArtifactPath:     artifactPath,
+			DurationMS:       time.Since(start).Milliseconds(),
+			ToolCalls:        len(out.ToolCalls),
+			Provider:         model.ProviderName(),
+			Model:            model.ModelName(),
+			Trace:            traceSnapshot,
+			ParseDiagnostics: parseDiagnostics,
 		}, runErr
 	}
 
 	return RunResult{
-		RunID:        runID,
-		FinalText:    out.FinalText,
-		ArtifactPath: artifactPath,
-		DurationMS:   time.Since(start).Milliseconds(),
-		ToolCalls:    len(out.ToolCalls),
-		Provider:     model.ProviderName(),
-		Model:        model.ModelName(),
-		Trace:        traceSnapshot,
+		RunID:            runID,
+		FinalText:        out.FinalText,
+		ArtifactPath:     artifactPath,
+		DurationMS:       time.Since(start).Milliseconds(),
+		ToolCalls:        len(out.ToolCalls),
+		Provider:         model.ProviderName(),
+		Model:            model.ModelName(),
+		Trace:            traceSnapshot,
+		ParseDiagnostics: parseDiagnostics,
 	}, nil
 }
 
@@ -376,16 +413,83 @@ func shouldIncludeThinking(mode string, runError bool, parseFailure bool, thinki
 	}
 }
 
-func sanitizedPersistedThinking(thinking string, present bool) (string, bool) {
+func sanitizedPersistedThinking(thinking string, present bool, maxChars int) (string, bool) {
 	present = present || strings.TrimSpace(thinking) != ""
 	if !present {
 		return "", false
 	}
 	redacted := policy.RedactString(strings.TrimSpace(thinking))
-	if len(redacted) > maxPersistedThinkingChars {
-		redacted = strings.TrimSpace(redacted[:maxPersistedThinkingChars]) + "..."
+	if maxChars <= 0 {
+		maxChars = 4000
+	}
+	if len([]rune(redacted)) > maxChars {
+		redacted = strings.TrimSpace(truncateRunes(redacted, maxChars)) + "..."
 	}
 	return redacted, true
+}
+
+func (e *Engine) acquireRunSlot(limit int) (func(), error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	e.runLimitMu.Lock()
+	if e.runSlots == nil {
+		e.runSlots = make(chan struct{}, limit)
+		e.runLimitCap = limit
+	} else if e.runLimitCap != limit && len(e.runSlots) == 0 {
+		e.runSlots = make(chan struct{}, limit)
+		e.runLimitCap = limit
+	}
+	slots := e.runSlots
+	activeCap := e.runLimitCap
+	e.runLimitMu.Unlock()
+
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	default:
+		log.Printf("runtime: rejected run due to max concurrent runs limit (%d)", activeCap)
+		return nil, &RunLimitError{Limit: activeCap}
+	}
+}
+
+func buildRunParseDiagnostics(trace map[string]any, include bool) *ParseDiagnostics {
+	if !include || len(trace) == 0 {
+		return nil
+	}
+	raw, ok := trace["extracted_tool_calls"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil
+	}
+	rejected := make([]ParseDiagnosticEntry, 0, len(raw))
+	for _, item := range raw {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		accepted, _ := entry["accepted"].(bool)
+		if accepted {
+			continue
+		}
+		snippet := policy.RedactString(strings.TrimSpace(fmt.Sprintf("%v", entry["raw_snippet"])))
+		if snippet == "<nil>" {
+			snippet = ""
+		}
+		reason := policy.RedactString(strings.TrimSpace(fmt.Sprintf("%v", entry["reason"])))
+		if reason == "<nil>" {
+			reason = ""
+		}
+		snippet = truncateRunes(snippet, maxParseDiagnosticSnippetChars)
+		reason = truncateRunes(reason, maxParseDiagnosticReasonChars)
+		if snippet == "" && reason == "" {
+			continue
+		}
+		rejected = append(rejected, ParseDiagnosticEntry{Snippet: snippet, Reason: reason})
+	}
+	if len(rejected) == 0 {
+		return nil
+	}
+	return &ParseDiagnostics{Rejected: rejected}
 }
 
 func formatFinalOutputWithThinking(finalText, thinking string) string {

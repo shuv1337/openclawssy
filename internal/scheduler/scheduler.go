@@ -179,6 +179,8 @@ type Executor struct {
 	runFunc       RunFunc
 	nowFn         func() time.Time
 	maxConcurrent int
+	catchUp       bool
+	firstCheck    bool
 }
 
 func NewExecutor(store *Store, tickInterval time.Duration, runFn RunFunc) *Executor {
@@ -186,6 +188,10 @@ func NewExecutor(store *Store, tickInterval time.Duration, runFn RunFunc) *Execu
 }
 
 func NewExecutorWithConcurrency(store *Store, tickInterval time.Duration, maxConcurrent int, runFn RunFunc) *Executor {
+	return NewExecutorWithPolicy(store, tickInterval, maxConcurrent, true, runFn)
+}
+
+func NewExecutorWithPolicy(store *Store, tickInterval time.Duration, maxConcurrent int, catchUp bool, runFn RunFunc) *Executor {
 	if tickInterval <= 0 {
 		tickInterval = time.Second
 	}
@@ -200,6 +206,8 @@ func NewExecutorWithConcurrency(store *Store, tickInterval time.Duration, maxCon
 		runFunc:       runFn,
 		nowFn:         time.Now,
 		maxConcurrent: maxConcurrent,
+		catchUp:       catchUp,
+		firstCheck:    true,
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
 		ticker:        time.NewTicker(tickInterval),
@@ -230,6 +238,8 @@ func (e *Executor) check(now time.Time) {
 	if e.store == nil || e.store.IsPaused() {
 		return
 	}
+	isFirstCheck := e.firstCheck
+	e.firstCheck = false
 	jobs := e.store.List()
 	type dueJob struct {
 		job             Job
@@ -242,6 +252,10 @@ func (e *Executor) check(now time.Time) {
 		}
 		due, disableAfterRun, err := nextDue(job, now)
 		if err != nil || !due {
+			continue
+		}
+		if isFirstCheck && !e.catchUp && isMissedRun(job, now) {
+			_ = e.store.updateAfterRun(job, now, disableAfterRun)
 			continue
 		}
 		dueJobs = append(dueJobs, dueJob{job: job, disableAfterRun: disableAfterRun})
@@ -274,6 +288,30 @@ func (e *Executor) check(now time.Time) {
 	}
 	close(jobsCh)
 	wg.Wait()
+}
+
+func isMissedRun(job Job, now time.Time) bool {
+	if strings.HasPrefix(job.Schedule, "@every ") {
+		raw := strings.TrimSpace(strings.TrimPrefix(job.Schedule, "@every "))
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			return false
+		}
+		last, err := parseLastRun(job.LastRun)
+		if err != nil || last.IsZero() {
+			return false
+		}
+		return now.Sub(last) >= d
+	}
+	oneShotAt, err := time.Parse(time.RFC3339, job.Schedule)
+	if err != nil {
+		return false
+	}
+	last, err := parseLastRun(job.LastRun)
+	if err != nil || !last.IsZero() {
+		return false
+	}
+	return now.After(oneShotAt)
 }
 
 func nextDue(job Job, now time.Time) (bool, bool, error) {

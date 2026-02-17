@@ -21,11 +21,12 @@ const (
 )
 
 type Message struct {
-	UserID  string
-	RoomID  string
-	AgentID string
-	Source  string
-	Text    string
+	UserID       string
+	RoomID       string
+	AgentID      string
+	Source       string
+	Text         string
+	ThinkingMode string
 }
 
 type Response struct {
@@ -93,6 +94,11 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if content == "" {
 		return
 	}
+	content, thinkingMode, parseErr := parseThinkingOverride(content)
+	if parseErr != nil {
+		_, _ = s.ChannelMessageSendReply(m.ChannelID, formatDiscordError(parseErr), m.Reference())
+		return
+	}
 
 	if len(b.cfg.AllowGuilds) > 0 && !contains(b.cfg.AllowGuilds, m.GuildID) {
 		return
@@ -100,9 +106,11 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if b.allow != nil && !b.allow.MessageAllowed(m.Author.ID, m.ChannelID) {
 		return
 	}
-	if b.limiter != nil && !b.limiter.Allow(m.Author.ID+":"+m.ChannelID) {
-		_, _ = s.ChannelMessageSendReply(m.ChannelID, "rate limited, try again soon", m.Reference())
-		return
+	if b.limiter != nil {
+		if allowed, retryAfter := b.limiter.AllowWithDetails(m.Author.ID + ":" + m.ChannelID); !allowed {
+			_, _ = s.ChannelMessageSendReply(m.ChannelID, formatDiscordRateLimit(retryAfter), m.Reference())
+			return
+		}
 	}
 	if b.handler == nil {
 		_, _ = s.ChannelMessageSendReply(m.ChannelID, "chat handler is not configured", m.Reference())
@@ -114,14 +122,15 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 		agentID = "default"
 	}
 	res, err := b.handler(context.Background(), Message{
-		UserID:  m.Author.ID,
-		RoomID:  m.ChannelID,
-		AgentID: agentID,
-		Source:  "discord",
-		Text:    content,
+		UserID:       m.Author.ID,
+		RoomID:       m.ChannelID,
+		AgentID:      agentID,
+		Source:       "discord",
+		Text:         content,
+		ThinkingMode: thinkingMode,
 	})
 	if err != nil {
-		_, _ = s.ChannelMessageSendReply(m.ChannelID, "request failed: "+err.Error(), m.Reference())
+		_, _ = s.ChannelMessageSendReply(m.ChannelID, formatDiscordError(err), m.Reference())
 		return
 	}
 
@@ -164,6 +173,94 @@ func normalizeInboundMessage(content, commandPrefix string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(content, commandPrefix))
+}
+
+func parseThinkingOverride(content string) (string, string, error) {
+	clean := strings.TrimSpace(content)
+	if clean == "" {
+		return "", "", errors.New("message is required")
+	}
+	lower := strings.ToLower(clean)
+	if strings.HasPrefix(clean, "/") && !strings.HasPrefix(lower, "/ask") {
+		return clean, "", nil
+	}
+	if strings.HasPrefix(lower, "/ask") {
+		clean = strings.TrimSpace(strings.TrimSpace(clean[4:]))
+	}
+	if clean == "" {
+		return "", "", errors.New("message is required")
+	}
+	parts := strings.Fields(clean)
+	if len(parts) == 0 {
+		return "", "", errors.New("message is required")
+	}
+	first := strings.ToLower(strings.TrimSpace(parts[0]))
+	if !strings.HasPrefix(first, "thinking=") {
+		return clean, "", nil
+	}
+	rawMode := strings.TrimSpace(strings.TrimPrefix(parts[0], "thinking="))
+	normalized := config.NormalizeThinkingMode(rawMode)
+	if !config.IsValidThinkingMode(normalized) {
+		return "", "", fmt.Errorf("request.invalid_thinking_mode: thinking must be one of never|on_error|always")
+	}
+	clean = strings.TrimSpace(strings.TrimPrefix(clean, parts[0]))
+	if clean == "" {
+		return "", "", errors.New("message is required")
+	}
+	return clean, normalized, nil
+}
+
+func formatDiscordError(err error) string {
+	if err == nil {
+		return "request failed"
+	}
+	if retryAfter := retryAfterFromError(err); retryAfter > 0 {
+		return formatDiscordRateLimit(retryAfter)
+	}
+	msg := strings.TrimSpace(err.Error())
+	if msg == "" {
+		msg = "request failed"
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "rate limited") {
+		return "rate limited, try again soon"
+	}
+	if strings.Contains(lower, "not allowlisted") {
+		return "not allowed in this channel or user scope"
+	}
+	if strings.Contains(lower, "run queue is full") {
+		return "run queue is full, retry shortly"
+	}
+	if strings.Contains(msg, "request.invalid_thinking_mode") {
+		return "error[request.invalid_thinking_mode]: thinking must be one of never|on_error|always"
+	}
+	return "request failed: " + msg
+}
+
+type retryAfterError interface {
+	RetryAfter() time.Duration
+}
+
+func retryAfterFromError(err error) time.Duration {
+	var cooldown retryAfterError
+	if errors.As(err, &cooldown) {
+		return cooldown.RetryAfter()
+	}
+	return 0
+}
+
+func formatDiscordRateLimit(retryAfter time.Duration) string {
+	if retryAfter <= 0 {
+		return "rate limited, try again soon"
+	}
+	seconds := int(retryAfter / time.Second)
+	if retryAfter%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return fmt.Sprintf("rate limited, retry in %ds", seconds)
 }
 
 func (b *Bot) awaitAndPostResult(s *discordgo.Session, m *discordgo.MessageCreate, runID string) {

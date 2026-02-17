@@ -91,6 +91,9 @@ func TestApplyDefaultsSetsThinkingModeNever(t *testing.T) {
 	if cfg.Output.ThinkingMode != ThinkingModeNever {
 		t.Fatalf("expected thinking_mode default %q, got %q", ThinkingModeNever, cfg.Output.ThinkingMode)
 	}
+	if cfg.Output.MaxThinkingChars != 4000 {
+		t.Fatalf("expected max_thinking_chars default 4000, got %d", cfg.Output.MaxThinkingChars)
+	}
 }
 
 func TestValidateRejectsInvalidThinkingMode(t *testing.T) {
@@ -106,5 +109,34 @@ func TestValidateRejectsUnsupportedSandboxProvider(t *testing.T) {
 	cfg.Sandbox.Provider = "docker"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for unsupported sandbox provider")
+	}
+}
+
+func TestDefaultConfigSetsConcurrencyAndSchedulerDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Engine.MaxConcurrentRuns != 64 {
+		t.Fatalf("expected engine.max_concurrent_runs=64, got %d", cfg.Engine.MaxConcurrentRuns)
+	}
+	if cfg.Scheduler.MaxConcurrentJobs != 4 {
+		t.Fatalf("expected scheduler.max_concurrent_jobs=4, got %d", cfg.Scheduler.MaxConcurrentJobs)
+	}
+	if !cfg.Scheduler.CatchUp {
+		t.Fatal("expected scheduler.catch_up=true by default")
+	}
+}
+
+func TestValidateRejectsInvalidMaxThinkingChars(t *testing.T) {
+	cfg := Default()
+	cfg.Output.MaxThinkingChars = 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for output.max_thinking_chars")
+	}
+}
+
+func TestValidateRejectsEmptyShellAllowedCommand(t *testing.T) {
+	cfg := Default()
+	cfg.Shell.AllowedCommands = []string{"git", "   "}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for empty shell.allowed_commands entry")
 	}
 }

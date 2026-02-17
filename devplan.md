@@ -1,141 +1,392 @@
-**Purpose:** Address all remaining gaps identified in the latest code review.  This plan focuses on items not yet resolved after v0.2, prioritising reliability and security.  Use this checklist to guide incremental pull requests (PRs) and track progress.
+Openclawssy DevPlan v0.4
 
-## How to use this plan
+Focus: Finish remaining gaps after thinking-mode + parser improvements.
+Theme: Stability, visibility, scheduling, connectors, tests, and documentation alignment.
 
-- Every numbered item should be delivered as a **self‑contained PR**.  Keep PRs small and focused.  Each PR must update the **Progress Log** (append a dated entry), mark relevant tasks as complete (`[x]`), and include new/updated tests.  
-- Always update docs/specs when interfaces or behaviours change.  
-- After each milestone, increment the version (e.g., v0.3 → v0.4).
+How To Use This Plan
 
-## Progress Log
-*(append a new entry for each merged PR)*
+Each numbered item = one focused PR
 
-- 2026-02-17 — PR###: Completed M1.1 by confirming/fixing trace condition regressions in `internal/runtime/trace.go` and adding focused unit coverage for shell fallback summarization and nil/empty `intValue()` parsing behavior.
+Every PR must:
 
-- 2026-02-17 — PR###: Completed M1.2 by hardening `internal/policy/pathguard.go` for cross-platform Windows path forms (drive letters, UNC, mixed separators), adding explicit absolute-path detection, and expanding policy tests with POSIX + Windows-style traversal and absolute-path cases.
+✅ Add or update tests
 
-- 2026-02-17 — PR###: Completed M1.3 via the “remove Docker provider” path by restricting sandbox providers to `none|local` in config validation, removing docker support from sandbox provider selection and docs, and updating runtime/config/sandbox tests accordingly.
+✅ Update docs if behavior changes
 
-- 2026-02-17 — PR###: Completed M1.4 by extending chatstore file locking to reads (`messages.jsonl` and `_active` pointers), and adding contention tests that prove reads wait for lock release while concurrent writers/lock-holders are active.
+✅ Append entry to Progress Log
 
-- 2026-02-17 — PR###: Completed M2.1 using the spec-alignment path by documenting that scheduler supports only `@every <duration>` and one-shot RFC3339 schedules, and that cron expressions are rejected.
+✅ Mark checklist items complete
 
-- 2026-02-17 — PR###: Completed M2.2 by documenting missed-job behavior explicitly, adding bounded concurrent scheduler execution with a worker pool, and adding restart/resume tests covering no-replay `@every` and one-shot disable-after-run behavior.
+Keep PRs small and reviewable.
 
-- 2026-02-17 — PR###: Completed M3.1 by validating full thinking extraction wiring end-to-end and aligning `output.thinking_mode` defaults/behavior to `never` by default with `on_error` and `always` overrides via config/CLI/runtime.
+Progress Log
 
-- 2026-02-17 — PR###: Completed M3.2 by confirming unified tool parsing + diagnostics entrypoints are used by runtime, surfaced in trace, and covered by malformed-call parser tests.
+(Append entries here as work lands)
 
-- 2026-02-17 — PR###: Completed M4.2 by expanding coverage for scheduler concurrency/restart behavior, chatstore lock-respecting reads, provider network failure handling, path/protected-write enforcement, and dashboard admin API endpoints (`status`, `config`, `secrets`, debug/chat).
+2026-02-17 — PR###: Landed runtime/config/channel hardening pass: per-request `thinking_mode` for HTTP/chat/Discord, bounded thinking output (`output.max_thinking_chars`), parse diagnostics exposure in run results, scheduler catch-up + worker concurrency controls, engine run concurrency cap, and shell allowlist wiring with expanded validation tests.
 
-- 2026-02-17 — PR###: Progressed M4.3 by aligning `CONFIG.md` and `CONTRACTS.md` with current runtime behavior (sandbox providers, scheduler schema/capabilities, thinking defaults) and rewriting `ACCEPTANCE.md` to a v0.2-aligned acceptance checklist.
+2026-02-17 — PR###: Updated docs/specs for new config/runtime contracts (`CONFIG.md`, `CONTRACTS.md`, `ACCEPTANCE.md`) and added architecture reference (`ARCHITECTURE.md`).
 
-- 2026-02-17 — PR###: Partially completed M4.4 by adding registry-level required argument type enforcement (`ToolSpec.ArgTypes`) so invalid types are rejected before handler execution, plus tests for typed validation failures.
+2026-02-17 — PR###: Added connector rate-limit hardening (global + sender cooldown errors, structured HTTP `chat.rate_limited` response, Discord cooldown messaging) and completed audit logger buffered flush policy (periodic + run-end sync) with tests.
 
-- 2026-02-17 — PR###: Further completed M4.4 by adding a bounded global run-queue guard (default max in-flight runs), returning queue-full errors/HTTP 429 under overload, and adding pipeline/server tests for queue saturation behavior.
+2026-02-17 — PR###: Added HTTP run listing pagination/filtering (`GET /v1/runs`) and dashboard chat-session pagination controls with tests and contracts updates.
 
-- 2026-02-17 — PR###: Completed the remaining M4.4 scheduler-cleanup item by removing unused `mode` and `notifyTarget` fields from scheduler job models/CLI wiring and aligning scheduler contracts/docs with the simplified job schema.
+2026-02-17 — PR###: Completed shell allowlist wiring in runtime (`shell.allowed_commands` now enforced on live `shell.exec` calls), plus README/spec cleanup (removed Dockerfile examples, documented concurrency/rate-limit behavior).
 
-- 2026-02-17 — PR###: Completed M4.1 by adding authenticated scheduler admin HTTP endpoints (list/add/delete jobs plus global/per-job pause/resume control) and extending CLI cron commands with `delete` alias and `pause`/`resume` controls backed by persisted scheduler state.
+2026-02-17 — PR###: Expanded runtime+scheduler test coverage with parser/helper/compaction and scheduler lifecycle edge-case tests; coverage now meets target (`runtime=85.0%`, `scheduler=88.6%`).
 
----
+2026-02-17 — PR###: Aligned acceptance checklist with shipped scheduler admin controls, CLI pause/resume support, and audit buffering completion.
 
-## Milestone M1 — Core Correctness Fixes (highest priority)
+YYYY-MM-DD — PR###: …
 
-### M1.1 Fix trace‑collector bugs
+YYYY-MM-DD — PR###: …
 
-- [x] **Deduplicate conditions** – Correct duplicate conditions in `runtime/trace.go`:
-  - `fallback != "" && fallback != ""` should check for actual fallback presence【268606176511821†L70-L73】.
-  - `if s == "" || s == ""` in `intValue()` should properly detect empty string【268606176511821†L77-L79】.
-- [x] Add unit tests for `summarizeToolExecution()` and `intValue()` to ensure correct fallback messages and integer parsing.
+Milestone 1 — Thinking & Diagnostics Completion (High Priority)
 
-### M1.2 Robust path guard & cross‑platform support
+The core thinking feature exists but is not fully surfaced or hardened.
 
-- [x] Update `policy/pathguard.go` to correctly handle Windows drive letters and UNC paths; ensure path traversal detection works on Windows【222064012191688†L17-L29】.
-- [x] Add tests covering POSIX and Windows path variants (simulate in tests via path strings; no need for actual Windows runtime).
+M1.1 Expose thinking-mode in HTTP & Discord
 
-### M1.3 Complete sandbox support
+Problem: CLI supports -thinking, but HTTP and Discord do not.
 
-- [x] Decide: implement Docker provider or remove it.  If implementing:
-  - Create a minimal `DockerProvider` that runs commands in a container with workspace mounted read‑write, capturing stdout/stderr/exit code.
-  - Add basic resource limits (CPU/memory/time).  
-  - Ensure `shell.exec` fails gracefully if Docker is unavailable.
-- [x] If removing: remove `docker` as a valid provider in config and docs; update defaults accordingly.
-- [x] Add tests verifying sandbox provider behaviour (exec allowed vs. denied).
+Tasks
 
-### M1.4 Chat store concurrency safety
+ Extend HTTP RunRequest / ChatRequest struct to include:
 
-- [x] Implement cross‑process file locking for `messages.jsonl` and `_active` pointers (e.g., using OS‑level advisory locks or a lock file).  Use minimal dependencies.
-- [x] Ensure reads respect locks to avoid reading partial writes.
-- [x] Add integration tests simulating concurrent writes (could spawn goroutines writing concurrently).
+thinking_mode (optional override)
 
-## Milestone M2 — Scheduler & Cron (important)
+ Validate and normalize via config.NormalizeThinkingMode
 
-### M2.1 Cron expression support or spec update
+ Pass override into engine RunInput
 
-- [x] Either implement cron‑string parsing (use a minimal library or write a parser) or explicitly update `docs/specs/CONTRACTS.md` to state that only `@every` and one‑shot timestamps are supported.
-- [x] If implementing, support at least standard 5‑field cron syntax and `@hourly`, `@daily`, etc. *(N/A — chose spec-update path instead of cron implementation.)*
-- [x] Add `nextDue` logic for cron expressions and tests covering daily/hourly schedules, misfires, and time zones. *(N/A — chose spec-update path instead of cron implementation.)*
+ Extend Discord command syntax:
 
-### M2.2 Missed‑job handling and concurrency
+/ask thinking=always
 
-- [x] Decide on policy for missed jobs (e.g., run immediately on startup or skip).  Document this in the spec.
-- [x] Allow multiple jobs to run concurrently with a worker pool (limit concurrency to avoid overload).
-- [x] Add tests ensuring the scheduler persists and resumes jobs correctly after restart.
+ Ensure invalid values return structured error
 
-## Milestone M3 — Thinking & Diagnostics (important)
+Acceptance
 
-### M3.1 Replace `stripThinkingTags` with extraction
+ HTTP call with thinking_mode=always shows thinking
 
-- [x] Implement `ExtractThinking` that returns `(visibleText, thinkingText)` instead of deleting thinking.  If extraction fails, leave original text intact.
-- [x] Replace all calls to `stripThinkingTags` with the new extractor.  Store `thinkingText` in the trace and bundle (with redaction).  
-- [x] Add config & CLI flag `output.thinking_mode` with values: `never` (default), `on_error`, `always`.  Use this to decide when to display thinking to users.
+ Discord command override works
 
-### M3.2 Unified tool‑parse diagnostics
+ Tests for HTTP handler validation
 
-- [x] Consolidate tool parsing into a single entrypoint that returns both accepted calls and diagnostic data (parsed name, arguments, acceptance reason).  Replace ad‑hoc parsing scattered across `model.go` and `toolparse`.
-- [x] Expose diagnostics in the run trace so users can see why a tool call was rejected (e.g., invalid JSON, unsupported tool name, not allowed).
-- [x] Add tests for various malformed tool call patterns.
+M1.2 Add thinking length limit
 
-## Milestone M4 — Remaining Gaps & Hardening (medium priority)
+Problem: Thinking may be unbounded and bloat responses/artifacts.
 
-### M4.1 Cron & admin features in HTTP/CLI
+Tasks
 
-- [x] Expose scheduler CRUD via HTTP API and CLI (add, list, delete jobs).  Require proper auth.
-- [x] Add endpoints/commands to pause/resume scheduler globally and per job.
+ Add config:
 
-### M4.2 Test coverage expansion
+output.max_thinking_chars (default: 4000)
 
-- [x] Add tests for:
-  - `scheduler` concurrency and persistence.
-  - `chatstore` cross‑process locks.
-  - Path traversal & protected file editing.
-  - Provider error handling (simulate network failures/timeouts).
-  - Dashboard actions (basic admin API functions).
+ Truncate thinking before:
 
-### M4.3 Documentation alignment
+Including in visible output
 
-- [x] Update `docs/specs/CONFIG.md`, `CONTRACTS.md`, `ACCEPTANCE.md` to reflect implemented features and removed/stubbed ones (e.g., update sandbox provider list, scheduler capabilities, thinking mode semantics).
-- [x] Ensure README highlights **prototype** status, improved iteration limits, and new safety controls.
+Writing to artifacts
 
-### M4.4 Miscellaneous fixes
+ Preserve ThinkingPresent=true even if truncated
 
-- [x] Clean up unused fields like `Mode` and `NotifyTarget` in scheduler `Job` struct if not implemented.  Or implement their intended functions (e.g., different run contexts, notification channels).
-- [x] Ensure tool registry enforces required argument types (not just presence).
-- [x] Add per‑tool concurrency limit or global run queue size limit to avoid over‑loading the engine.
+Acceptance
 
----
+ Unit test verifying truncation
 
-## Recommended PR Sequence
+ Long synthetic thinking input is capped
 
-1. **PR‑1:** Fix trace bugs (M1.1) + tests.
-2. **PR‑2:** Path guard cross‑platform + tests (M1.2).
-3. **PR‑3:** Implement or remove Docker provider (M1.3).
-4. **PR‑4:** Add file locks in chatstore (M1.4).
-5. **PR‑5:** Cron support or spec update (M2.1) + tests.
-6. **PR‑6:** Missed‑job handling & concurrency (M2.2).
-7. **PR‑7:** Thinking extraction & config (M3.1).
-8. **PR‑8:** Unified tool parse diagnostics (M3.2).
-9. **PR‑9+:** Scheduler admin endpoints & CLI (M4.1), followed by expanded tests (M4.2) and docs alignment (M4.3).
+M1.3 Surface parse diagnostics in RunResult
 
-If you need more granular guidance (e.g., specific file names and functions), feel free to ask.
-EOF
+Problem: Parser diagnostics are only in trace files.
+
+Tasks
+
+ Add ParseDiagnostics field to RunResult
+
+ Include:
+
+Rejected snippets (truncated)
+
+Reason
+
+ Only include when:
+
+thinking_mode == always
+
+OR parseFailure == true
+
+ Redact secrets before returning
+
+Acceptance
+
+ Tool malformed JSON shows structured rejection reason
+
+ Tests for diagnostic inclusion
+
+Milestone 2 — Scheduler Completion (High Priority)
+
+Scheduler still does not match spec expectations.
+
+M2.1 Decide: Cron Support vs Spec Update
+
+Choose one:
+
+Option A: Implement Cron (Recommended)
+
+ Add cron parser (minimal 5-field format)
+
+ Support:
+
+@hourly, @daily
+
+Standard * * * * *
+
+ Add NextDue() calculation
+
+ Tests for cron schedule correctness
+
+Option B: Update Spec
+
+ Explicitly document only:
+
+@every
+
+RFC3339 one-shot
+
+ Remove cron mentions from docs
+
+M2.2 Missed Job Policy
+
+Define and implement one:
+
+ On startup:
+
+Either execute missed runs immediately
+
+OR mark skipped
+
+ Add config:
+
+scheduler.catch_up = true|false
+
+ Add persistence test:
+
+Simulate restart with past-due job
+
+M2.3 Concurrency Control
+
+ Add worker pool:
+
+Config: scheduler.max_concurrent_jobs
+
+ Prevent unbounded goroutine growth
+
+ Add stress test with multiple jobs
+
+Milestone 3 — Tool & Execution Hardening (Medium Priority)
+M3.1 Global Run Concurrency Limit
+
+Problem: Many runs could overwhelm system.
+
+Tasks
+
+ Add engine-level semaphore:
+
+engine.max_concurrent_runs
+
+ Reject new runs with structured error if exceeded
+
+ Expose metric/log entry
+
+M3.2 Improve Tool Parse Feedback
+
+Current error: “Tool call malformed; please retry.”
+
+Improve to:
+
+ Include:
+
+Snippet excerpt (truncated)
+
+Reason
+
+ Avoid leaking sensitive data
+
+ Add test for helpful error message
+
+M3.3 Strengthen Tool Argument Validation
+
+Currently only checks object shape.
+
+ Enforce required fields per tool
+
+ Enforce argument type validation
+
+ Return canonical error codes
+
+ Add per-tool validation tests
+
+Milestone 4 — Security & Isolation (Medium Priority)
+M4.1 Improve Shell Safety
+
+Current: only none and local providers.
+
+Tasks
+
+ Add config:
+
+shell.allowed_commands (allowlist)
+
+ Reject commands not matching prefix list
+
+ Optional:
+
+Disable shell entirely unless explicitly enabled
+
+M4.2 Add Audit Logger Buffering
+
+Current: file reopened frequently.
+
+Tasks
+
+ Maintain buffered writer
+
+ Flush:
+
+On run completion
+
+Every N seconds
+
+ Ensure crash-safe semantics
+
+Milestone 5 — Connector Improvements (Medium Priority)
+M5.1 Rate Limiter Enhancements
+
+ Add global rate limit
+
+ Add structured response when limited
+
+ Add cooldown message
+
+M5.2 HTTP Improvements
+
+ Add pagination to:
+
+Run listing
+
+Chat listing
+
+ Add filtering by status
+
+M5.3 Discord Improvements
+
+ Add:
+
+/resume
+
+/sessions
+
+ Add better error display formatting
+
+Milestone 6 — Test Coverage Expansion (High Priority)
+
+Add missing test coverage for:
+
+ Thinking-mode gating logic
+
+ Thinking truncation
+
+ Parse diagnostics
+
+ Scheduler cron/missed jobs
+
+ Cross-process chat locking
+
+ Concurrency limits
+
+ Shell allowlist enforcement
+
+ HTTP validation paths
+
+Target:
+
+85% coverage on runtime + scheduler
+
+Integration tests for:
+
+Chat session multi-step flow
+
+Tool failure recovery
+
+Milestone 7 — Documentation Alignment (High Priority)
+M7.1 Update All Specs
+
+ Remove Docker references
+
+ Clarify scheduler behavior
+
+ Document thinking modes
+
+ Document concurrency limits
+
+ Update README security posture
+
+M7.2 Add Architecture Diagram
+
+ Update ARCHITECTURE.md
+
+ Include:
+
+Runner loop
+
+Parser flow
+
+Thinking extraction
+
+Scheduler execution path
+
+Suggested PR Order
+
+PR1 — Thinking truncation (M1.2)
+
+PR2 — Parse diagnostics surfaced (M1.3)
+
+PR3 — HTTP thinking override (M1.1)
+
+PR4 — Scheduler decision (M2.1)
+
+PR5 — Scheduler missed-job handling (M2.2)
+
+PR6 — Scheduler concurrency (M2.3)
+
+PR7 — Tool argument validation (M3.3)
+
+PR8 — Global concurrency limits (M3.1)
+
+PR9 — Shell allowlist (M4.1)
+
+PR10 — Audit buffering (M4.2)
+
+PR11+ — Connector polish + docs alignment
+
+v0.4 Completion Criteria
+
+Mark v0.4 complete when:
+
+ Thinking behavior is fully configurable across CLI + HTTP + Discord
+
+ Thinking is safely truncated
+
+ Parse diagnostics are visible to users
+
+ Scheduler behavior is consistent with spec
+
+ Concurrency limits exist at scheduler + engine level
+
+ Shell execution is constrained
+
+ Test coverage expanded
+
+ Docs reflect real behavior

@@ -16,11 +16,12 @@ var (
 )
 
 type Message struct {
-	UserID  string
-	RoomID  string
-	AgentID string
-	Source  string
-	Text    string
+	UserID       string
+	RoomID       string
+	AgentID      string
+	Source       string
+	Text         string
+	ThinkingMode string
 }
 
 type Result struct {
@@ -35,11 +36,12 @@ type QueuedRun struct {
 	Status string
 }
 
-type QueueFunc func(ctx context.Context, agentID, message, source, sessionID string) (QueuedRun, error)
+type QueueFunc func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error)
 
 type Connector struct {
 	Allowlist      *Allowlist
 	RateLimiter    *RateLimiter
+	GlobalLimiter  *RateLimiter
 	Queue          QueueFunc
 	DefaultAgentID string
 	Store          *chatstore.Store
@@ -59,10 +61,15 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 	if c.Allowlist != nil && !c.Allowlist.MessageAllowed(msg.UserID, msg.RoomID) {
 		return Result{}, ErrNotAllowlisted
 	}
+	if c.GlobalLimiter != nil {
+		if allowed, retryAfter := c.GlobalLimiter.AllowWithDetails("global"); !allowed {
+			return Result{}, NewRateLimitError("global", retryAfter)
+		}
+	}
 	if c.RateLimiter != nil {
 		key := fmt.Sprintf("%s:%s", msg.UserID, msg.RoomID)
-		if !c.RateLimiter.Allow(key) {
-			return Result{}, ErrRateLimited
+		if allowed, retryAfter := c.RateLimiter.AllowWithDetails(key); !allowed {
+			return Result{}, NewRateLimitError("sender", retryAfter)
 		}
 	}
 
@@ -111,7 +118,7 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		}
 		return Result{Response: "Resumed chat: " + parts[1], SessionID: parts[1]}, nil
 	}
-	if text == "/chats" {
+	if text == "/chats" || text == "/sessions" {
 		sessions, err := c.Store.ListSessions(agentID, msg.UserID, roomID, source)
 		if err != nil {
 			return Result{}, err
@@ -139,7 +146,7 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		return Result{}, err
 	}
 
-	queued, err := c.Queue(ctx, agentID, msg.Text, source, session.SessionID)
+	queued, err := c.Queue(ctx, agentID, msg.Text, source, session.SessionID, msg.ThinkingMode)
 	if err != nil {
 		return Result{}, err
 	}

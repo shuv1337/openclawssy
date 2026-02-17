@@ -43,7 +43,7 @@ func (b blockingExecutor) Execute(_ context.Context, _ ExecutionInput) (Executio
 
 func TestQueueRunPersistsSessionAndTrace(t *testing.T) {
 	store := NewInMemoryRunStore()
-	queued, err := QueueRun(context.Background(), store, traceExecutor{result: ExecutionResult{Output: "ok", Trace: map[string]any{"run_id": "trace-run", "prompt_length": float64(12)}}}, "agent-1", "hello", "dashboard", "chat_123")
+	queued, err := QueueRun(context.Background(), store, traceExecutor{result: ExecutionResult{Output: "ok", Trace: map[string]any{"run_id": "trace-run", "prompt_length": float64(12)}}}, "agent-1", "hello", "dashboard", "chat_123", "always")
 	if err != nil {
 		t.Fatalf("queue run: %v", err)
 	}
@@ -55,6 +55,9 @@ func TestQueueRunPersistsSessionAndTrace(t *testing.T) {
 			t.Fatalf("get run: %v", getErr)
 		}
 		if run.Status == "completed" {
+			if run.ThinkingMode != "always" {
+				t.Fatalf("expected thinking mode to persist, got %q", run.ThinkingMode)
+			}
 			if run.SessionID != "chat_123" {
 				t.Fatalf("expected session_id chat_123, got %q", run.SessionID)
 			}
@@ -72,7 +75,7 @@ func TestQueueRunPersistsSessionAndTrace(t *testing.T) {
 
 func TestQueueRunPersistsTraceOnFailure(t *testing.T) {
 	store := NewInMemoryRunStore()
-	queued, err := QueueRun(context.Background(), store, traceExecutor{result: ExecutionResult{Trace: map[string]any{"run_id": "trace-fail"}}, err: context.DeadlineExceeded}, "agent-1", "hello", "dashboard", "chat_123")
+	queued, err := QueueRun(context.Background(), store, traceExecutor{result: ExecutionResult{Trace: map[string]any{"run_id": "trace-fail"}}, err: context.DeadlineExceeded}, "agent-1", "hello", "dashboard", "chat_123", "")
 	if err != nil {
 		t.Fatalf("queue run: %v", err)
 	}
@@ -99,7 +102,7 @@ func TestQueueRunPersistsTraceOnFailure(t *testing.T) {
 func TestWaitForQueuedRunsBlocksUntilCompletion(t *testing.T) {
 	store := NewInMemoryRunStore()
 	release := make(chan struct{})
-	_, err := QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "hello", "dashboard", "chat_123")
+	_, err := QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "hello", "dashboard", "chat_123", "")
 	if err != nil {
 		t.Fatalf("queue run: %v", err)
 	}
@@ -122,7 +125,7 @@ func TestWaitForQueuedRunsBlocksUntilCompletion(t *testing.T) {
 func TestQueueRunRetriesRetryableExecutorFailureOnce(t *testing.T) {
 	store := NewInMemoryRunStore()
 	exec := &flakyRetryableExecutor{}
-	queued, err := QueueRun(context.Background(), store, exec, "agent-1", "hello", "dashboard", "chat_123")
+	queued, err := QueueRun(context.Background(), store, exec, "agent-1", "hello", "dashboard", "chat_123", "")
 	if err != nil {
 		t.Fatalf("queue run: %v", err)
 	}
@@ -166,12 +169,12 @@ func TestQueueRunRejectsWhenQueueLimitReached(t *testing.T) {
 	}()
 
 	release := make(chan struct{})
-	_, err := QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "hello", "dashboard", "chat_123")
+	_, err := QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "hello", "dashboard", "chat_123", "")
 	if err != nil {
 		t.Fatalf("queue first run: %v", err)
 	}
 
-	_, err = QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "second", "dashboard", "chat_123")
+	_, err = QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "second", "dashboard", "chat_123", "")
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("expected ErrQueueFull, got %v", err)
 	}

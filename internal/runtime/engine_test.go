@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,10 +12,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"openclawssy/internal/agent"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/sandbox"
 )
 
 type capturedChatRequest struct {
@@ -47,6 +50,12 @@ func TestEngineInitCreatesAgentArtifacts(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("expected %s to exist: %v", p, err)
 		}
+	}
+}
+
+func TestNewEngineRequiresRootDir(t *testing.T) {
+	if _, err := NewEngine(""); err == nil {
+		t.Fatal("expected error when root dir is empty")
 	}
 }
 
@@ -1257,5 +1266,357 @@ func TestExecutePersistsRedactedThinkingInTraceArtifactAndAudit(t *testing.T) {
 	}
 	if !strings.Contains(string(auditRaw), "\"thinking\":\"[REDACTED]\"") {
 		t.Fatalf("expected redacted thinking in audit log, got %q", string(auditRaw))
+	}
+}
+
+func TestExecuteTruncatesThinkingUsingConfiguredMaxChars(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	longThinking := strings.Repeat("very-long-thinking-segment-", 300)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<think>" + longThinking + "</think>done"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	cfg.Output.MaxThinkingChars = 90
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi", ThinkingMode: "always"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	traceThinking, _ := res.Trace["thinking"].(string)
+	if traceThinking == "" {
+		t.Fatal("expected thinking in trace")
+	}
+	if len([]rune(traceThinking)) > 95 {
+		t.Fatalf("expected trace thinking to be truncated near 90 chars, got %d", len([]rune(traceThinking)))
+	}
+	if present, ok := res.Trace["thinking_present"].(bool); !ok || !present {
+		t.Fatalf("expected thinking_present=true, got %#v", res.Trace["thinking_present"])
+	}
+	if !strings.Contains(res.FinalText, "Thinking:\n") {
+		t.Fatalf("expected visible output to include thinking section, got %q", res.FinalText)
+	}
+}
+
+func TestExecuteIncludesParseDiagnosticsOnParseFailureEvenWhenThinkingNever(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"},\"token\":\"super-secret-token-abcdefghijklmnopqrstuvwxyz\"\n```"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	cfg.Output.ThinkingMode = config.ThinkingModeNever
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.ParseDiagnostics == nil || len(res.ParseDiagnostics.Rejected) == 0 {
+		t.Fatalf("expected parse diagnostics on parse failure, got %#v", res.ParseDiagnostics)
+	}
+	entry := res.ParseDiagnostics.Rejected[0]
+	if strings.TrimSpace(entry.Reason) == "" {
+		t.Fatalf("expected rejection reason, got %#v", entry)
+	}
+	if strings.Contains(strings.ToLower(entry.Snippet), "super-secret") {
+		t.Fatalf("expected redacted diagnostic snippet, got %q", entry.Snippet)
+	}
+	if len([]rune(entry.Snippet)) > maxParseDiagnosticSnippetChars {
+		t.Fatalf("expected snippet truncated to %d, got %d", maxParseDiagnosticSnippetChars, len([]rune(entry.Snippet)))
+	}
+}
+
+func TestExecuteDoesNotExposeParseDiagnosticsWithoutParseFailure(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "plain response"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if res.ParseDiagnostics != nil {
+		t.Fatalf("expected parse diagnostics to be absent, got %#v", res.ParseDiagnostics)
+	}
+}
+
+func TestExecuteRejectsWhenEngineConcurrencyLimitExceeded(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "ok"}}}})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	cfg.Engine.MaxConcurrentRuns = 1
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		_, _ = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "first"})
+		close(firstDone)
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "second"})
+	if err == nil {
+		t.Fatal("expected max concurrent runs error")
+	}
+	var limitErr *RunLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("expected RunLimitError, got %T (%v)", err, err)
+	}
+	if limitErr.Limit != 1 {
+		t.Fatalf("expected limit=1, got %d", limitErr.Limit)
+	}
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first run to finish")
+	}
+}
+
+type stubSandboxProvider struct {
+	result sandbox.Result
+	err    error
+}
+
+func (s stubSandboxProvider) Start(context.Context) error { return nil }
+func (s stubSandboxProvider) Stop() error                 { return nil }
+func (s stubSandboxProvider) Exec(cmd sandbox.Command) (sandbox.Result, error) {
+	_ = cmd
+	return s.result, s.err
+}
+
+func TestRunLimitErrorMessage(t *testing.T) {
+	if (&RunLimitError{}).Error() != "engine.max_concurrent_runs exceeded" {
+		t.Fatalf("unexpected default run limit message: %q", (&RunLimitError{}).Error())
+	}
+	if (&RunLimitError{Limit: 3}).Error() != "engine.max_concurrent_runs exceeded (3)" {
+		t.Fatalf("unexpected run limit message with cap: %q", (&RunLimitError{Limit: 3}).Error())
+	}
+}
+
+func TestGetStringSliceArgSupportsStringAndAnySlices(t *testing.T) {
+	args := map[string]any{"values": []string{" a ", "", "b"}}
+	out := getStringSliceArg(args, "values")
+	if len(out) != 2 || out[0] != "a" || out[1] != "b" {
+		t.Fatalf("unexpected []string normalization: %#v", out)
+	}
+
+	args = map[string]any{"values": []any{" x ", 42, ""}}
+	out = getStringSliceArg(args, "values")
+	if len(out) != 2 || out[0] != "x" || out[1] != "42" {
+		t.Fatalf("unexpected []any normalization: %#v", out)
+	}
+
+	if out := getStringSliceArg(map[string]any{"values": "bad-type"}, "values"); len(out) != 0 {
+		t.Fatalf("expected empty slice for unsupported type, got %#v", out)
+	}
+}
+
+func TestSandboxShellExecutorPassesThroughProviderResult(t *testing.T) {
+	exec := &sandboxShellExecutor{provider: stubSandboxProvider{result: sandbox.Result{Stdout: "ok", Stderr: "warn", ExitCode: 9}, err: errors.New("boom")}}
+	stdout, stderr, code, err := exec.Exec(context.Background(), "echo", []string{"hello"})
+	if stdout != "ok" || stderr != "warn" || code != 9 {
+		t.Fatalf("unexpected passthrough output: stdout=%q stderr=%q code=%d", stdout, stderr, code)
+	}
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("expected passthrough error, got %v", err)
+	}
+}
+
+func TestNormalizeToolArgsCoversFieldMappings(t *testing.T) {
+	readArgs := normalizeToolArgs("fs.read", map[string]any{"file": "README.md"})
+	if readArgs["path"] != "README.md" {
+		t.Fatalf("expected fs.read path mapping, got %#v", readArgs)
+	}
+
+	listArgs := normalizeToolArgs("fs.list", map[string]any{"target": "docs"})
+	if listArgs["path"] != "docs" {
+		t.Fatalf("expected fs.list target mapping, got %#v", listArgs)
+	}
+
+	writeArgs := normalizeToolArgs("fs.write", map[string]any{"file": "notes.txt", "text": "hello"})
+	if writeArgs["path"] != "notes.txt" || writeArgs["content"] != "hello" {
+		t.Fatalf("expected fs.write path/content mapping, got %#v", writeArgs)
+	}
+
+	editArgs := normalizeToolArgs("fs.edit", map[string]any{"file": "notes.txt", "find": "a", "replace": "b"})
+	if editArgs["path"] != "notes.txt" || editArgs["old"] != "a" || editArgs["new"] != "b" {
+		t.Fatalf("expected fs.edit old/new mapping, got %#v", editArgs)
+	}
+
+	searchArgs := normalizeToolArgs("code.search", map[string]any{"query": "TODO"})
+	if searchArgs["pattern"] != "TODO" {
+		t.Fatalf("expected code.search query->pattern mapping, got %#v", searchArgs)
+	}
+
+	shellArgs := normalizeToolArgs("shell.exec", map[string]any{"cmd": "pwd"})
+	if shellArgs["command"] != "pwd" {
+		t.Fatalf("expected shell cmd alias mapping, got %#v", shellArgs)
+	}
+
+	wrapped := normalizeToolArgs("shell.exec", map[string]any{"command": "ls -la"})
+	if wrapped["command"] != "bash" {
+		t.Fatalf("expected shell command to wrap in bash, got %#v", wrapped)
+	}
+	args, ok := wrapped["args"].([]string)
+	if !ok || len(args) != 2 || args[0] != "-lc" || args[1] != "ls -la" {
+		t.Fatalf("expected bash -lc wrapping args, got %#v", wrapped["args"])
+	}
+}
+
+func TestAppendRunConversationPersistsToolAndAssistantMessages(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init engine: %v", err)
+	}
+
+	store, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	out := agent.RunOutput{
+		FinalText: "done",
+		ToolCalls: []agent.ToolCallRecord{{
+			Request: agent.ToolCallRequest{ID: "tool-1", Name: "fs.list"},
+			Result:  agent.ToolCallResult{ID: "tool-1", Output: `{"path":".","entries":["a.txt"]}`},
+		}},
+	}
+	if err := e.appendRunConversation(session.SessionID, "run-1", out, true); err != nil {
+		t.Fatalf("append run conversation: %v", err)
+	}
+
+	msgs, err := store.ReadRecentMessages(session.SessionID, 10)
+	if err != nil {
+		t.Fatalf("read messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected tool + assistant messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "tool" || msgs[1].Role != "assistant" {
+		t.Fatalf("unexpected appended roles: %+v", msgs)
+	}
+
+	if err := e.appendRunConversation(session.SessionID, "run-2", agent.RunOutput{FinalText: "ok"}, false); err != nil {
+		t.Fatalf("append assistant-only conversation: %v", err)
+	}
+}
+
+func TestFormatFinalOutputWithThinking(t *testing.T) {
+	if got := formatFinalOutputWithThinking("answer", "thought"); got != "answer\n\nThinking:\nthought" {
+		t.Fatalf("unexpected formatted output with text: %q", got)
+	}
+	if got := formatFinalOutputWithThinking("", "thought"); got != "Thinking:\nthought" {
+		t.Fatalf("unexpected formatted output without final text: %q", got)
 	}
 }

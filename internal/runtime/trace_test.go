@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -131,5 +132,49 @@ func TestIntValueReturnsZeroForNilAndEmptyInputs(t *testing.T) {
 	}
 	if got := intValue("   "); got != 0 {
 		t.Fatalf("expected whitespace string to parse as 0, got %d", got)
+	}
+}
+
+func TestTruncateSummaryAndContextHelpers(t *testing.T) {
+	if got := truncateSummary("abcdef", 3); got != "abc" {
+		t.Fatalf("expected hard truncation for max<=3, got %q", got)
+	}
+	if got := truncateSummary("abcdef", 5); got != "ab..." {
+		t.Fatalf("expected ellipsis truncation, got %q", got)
+	}
+
+	collector := newRunTraceCollector("run_ctx", "", "", "")
+	ctx := withRunTraceCollector(context.Background(), collector)
+	if got := runTraceCollectorFromContext(ctx); got != collector {
+		t.Fatalf("expected collector from context, got %+v", got)
+	}
+	if got := runTraceCollectorFromContext(nil); got != nil {
+		t.Fatalf("expected nil collector from nil context, got %+v", got)
+	}
+}
+
+func TestIntValueSupportsAdditionalNumericTypes(t *testing.T) {
+	cases := []struct {
+		in   any
+		want int
+	}{
+		{in: int8(7), want: 7},
+		{in: int16(8), want: 8},
+		{in: int32(9), want: 9},
+		{in: int64(10), want: 10},
+		{in: uint(11), want: 11},
+		{in: uint8(12), want: 12},
+		{in: uint16(13), want: 13},
+		{in: uint32(14), want: 14},
+		{in: uint64(15), want: 15},
+		{in: float32(16.9), want: 16},
+		{in: json.Number("17.8"), want: 17},
+		{in: "18.7", want: 18},
+		{in: "<nil>", want: 0},
+	}
+	for _, tc := range cases {
+		if got := intValue(tc.in); got != tc.want {
+			t.Fatalf("intValue(%#v) = %d, want %d", tc.in, got, tc.want)
+		}
 	}
 }
