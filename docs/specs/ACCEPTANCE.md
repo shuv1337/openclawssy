@@ -2,6 +2,11 @@
 
 Source of truth: `devplan.md` phases 1-9.
 
+## Implementation Notes (2026-02-17)
+- Chat/session UX, runtime reliability, tool summary rendering, and dashboard layout controls have advanced significantly.
+- This checklist is retained as a phase-gate artifact and is not yet being auto-derived from tests.
+- See `docs/PROJECT_STATUS.md` and `mondaynight.md` for the latest implementation detail.
+
 ## Phase 1 - Repo Bootstrap + Contracts
 - [ ] `go.mod` exists with module `openclawssy` and Go 1.24.
 - [ ] `Makefile` has `fmt`, `lint`, `test`, `build` targets.

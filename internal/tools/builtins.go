@@ -307,7 +307,21 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 		}
 	}
 	stdout, stderr, exitCode, execErr := req.Shell.Exec(ctx, command, args)
+	fallbackUsed := ""
+	if execErr != nil && command == "bash" && isExecutableNotFound(execErr) {
+		for _, candidate := range []string{"/bin/bash", "/usr/bin/bash", "sh"} {
+			fbStdout, fbStderr, fbExitCode, fbErr := req.Shell.Exec(ctx, candidate, args)
+			if fbErr == nil || !isExecutableNotFound(fbErr) {
+				stdout, stderr, exitCode, execErr = fbStdout, fbStderr, fbExitCode, fbErr
+				fallbackUsed = candidate
+				break
+			}
+		}
+	}
 	res := map[string]any{"stdout": stdout, "stderr": stderr, "exit_code": exitCode}
+	if fallbackUsed != "" {
+		res["shell_fallback"] = fallbackUsed
+	}
 	if execErr != nil {
 		res["error"] = execErr.Error()
 	}
@@ -315,6 +329,17 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 		res["timeout_ms"] = normalizeInt(timeoutRaw)
 	}
 	return res, execErr
+}
+
+func isExecutableNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "executable file not found") || strings.Contains(text, "not found in $path") || strings.Contains(text, "no such file or directory")
 }
 
 func normalizeInt(v any) int {

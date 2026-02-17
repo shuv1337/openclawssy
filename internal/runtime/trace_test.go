@@ -40,3 +40,10 @@ func TestRecordToolExecutionAddsSummaryToTrace(t *testing.T) {
 		t.Fatalf("expected summary in trace entry, got %#v", entry)
 	}
 }
+
+func TestSummarizeToolExecutionShellFallback(t *testing.T) {
+	summary := summarizeToolExecution("shell.exec", `{"stdout":"ok","stderr":"","exit_code":0,"shell_fallback":"sh"}`, "")
+	if summary != "shell command completed via sh fallback (exit 0)" {
+		t.Fatalf("unexpected summary: %q", summary)
+	}
+}

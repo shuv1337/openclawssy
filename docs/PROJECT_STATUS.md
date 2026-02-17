@@ -14,12 +14,23 @@ What works now:
 - HTTP API + dashboard
 - Discord bridge queueing runs
 - encrypted secret ingestion
+- persistent chat sessions (`/new`, `/resume`, `/chats`) with session history
+- multi-tool parsing and normalized tool call IDs across runs
+- repeated identical tool calls reuse successful cached results within a run
+- per-tool execution summaries in trace/dashboard/Discord output
+- long-context handling with compaction around 80 percent budget
+- model response cap (`model.max_tokens`, default 20000)
+- dashboard chat layout controls (resizable chat, collapsible panes, focus mode)
 
 What is not production-ready:
 - compatibility and schema stability
 - full authn/authz model for multi-tenant use
 - external security review
 - complete observability and disaster recovery
+
+Known open issue in test suite:
+- Full `go test ./...` currently reports one existing unrelated chat allowlist failure:
+  `internal/channels/chat` -> `TestAllowlist_EmptyUsersDenyByDefault`
 
 ## Recommendation
 

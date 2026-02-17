@@ -180,9 +180,24 @@ Response `200`:
   "duration_ms": 42,
   "tool_calls": 1,
   "provider": "openrouter",
-  "model": "openai/gpt-4o-mini"
+  "model": "openai/gpt-4o-mini",
+  "trace": {
+    "tool_execution_results": [
+      {
+        "tool": "fs.write",
+        "tool_call_id": "tool-json-1",
+        "summary": "wrote 24 line(s) to Dockerfile",
+        "output": "{...}",
+        "error": ""
+      }
+    ]
+  }
 }
 ```
+
+Notes:
+- `trace` is optional but typically present for completed/failed runs.
+- `tool_execution_results[].summary` is a short display-friendly summary when available.
 
 ### POST `/v1/chat/messages`
 Request:
@@ -211,6 +226,8 @@ Response `202`:
 - `POST /api/admin/config` -> persist validated config
 - `GET /api/admin/secrets` -> list secret keys only
 - `POST /api/admin/secrets` -> one-way secret ingestion `{name,value}` (value not retrievable via API)
+- `GET /api/admin/chat/sessions` -> list chat sessions for an agent/user/room/channel filter
+- `GET /api/admin/chat/sessions/{session_id}/messages` -> ordered session messages including tool metadata (`tool_name`, `tool_call_id`, `run_id`)
 
 ### GET `/healthz`
 Response `200`:

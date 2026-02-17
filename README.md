@@ -33,6 +33,14 @@ Welcome to the **Ussyverse**: the tiny but principled corner of agent tooling wh
 - Security: encrypted secret store, append-only audit logs, path/symlink guards
 - Providers: OpenAI, OpenRouter, Requesty, ZAI, generic OpenAI-compatible endpoints
 
+Recent runtime hardening and UX upgrades:
+- Chat sessions with `/new`, `/resume <session>`, `/chats`, persisted message history, and session listing.
+- Multi-tool runs with normalized unique tool call IDs and repeated-call result reuse (no hard stop on benign duplicates).
+- Context safety improvements: historical tool-role messages are excluded from model history, current message drives directive detection, and context compacts at ~80 percent usage.
+- Model response cap is enforced via `model.max_tokens` (1..20000, default 20000).
+- Tool activity now includes concise summaries (for example `wrote N line(s) to file`) in trace, dashboard, and Discord updates.
+- Dashboard chat layout improvements: resizable chat panel, collapsible panes, focus-chat mode, and persisted layout preferences.
+
 Ussyverse flavor, practical core.
 
 ## Prototype Warning
@@ -92,6 +100,11 @@ Then open:
 3. `openclawssy ask -agent default -message "hello"` for a synchronous run.
 4. `openclawssy run -agent default -message '/tool time.now {}'` for tool flow.
 5. `openclawssy serve --token change-me` and monitor in `/dashboard`.
+
+Dashboard chat quick controls:
+- Use `New chat`, `Resume`, and `List chats` in the chat controls row.
+- Use `Focus chat` to collapse non-chat sections temporarily.
+- Drag the bottom edge of the chat history panel or use the height slider to resize.
 
 Expected CLI commands for the `openclawssy` binary:
 
@@ -205,6 +218,7 @@ This artifact-first layout is intentional: every run should be reproducible, ins
 - Chat bridge API: `POST /v1/chat/messages`
 - Both require bearer token.
 - Chat queue uses allowlist + rate limit from `chat.*` config.
+- Chat runs persist tool-call messages with metadata (`tool_name`, `tool_call_id`, `run_id`) so multi-step tool activity is visible in UI/channel outputs.
 
 ## Discord Bot
 
@@ -230,6 +244,7 @@ Discord token precedence:
 - Start server with token and open `https://<bind>:<port>/dashboard`.
 - Dashboard includes:
   - run monitoring
+  - session-aware chat console and tool activity timeline
   - config management (providers/models)
   - one-way secret ingestion + secret key listing
 
@@ -267,3 +282,4 @@ If you need battle-tested enterprise controls today, this is not that product ye
 - `docs/specs/ACCEPTANCE.md`
 - `docs/specs/CONFIG.md`
 - `docs/security/THREAT_MODEL.md`
+- `mondaynight.md` (latest implementation handoff)

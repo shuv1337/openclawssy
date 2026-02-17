@@ -22,6 +22,8 @@ This model maps known threats to mandatory invariants and concrete abuse tests.
 | No sandbox means no `shell.exec` | Arbitrary command execution on host |
 | Network off by default | Data exfiltration and untrusted remote control |
 | All tool calls audited + redacted | Stealth abuse, secret leakage, weak forensics |
+| Historical tool messages excluded from model context | Tool replay from stale chat history |
+| Repeated identical tool calls reuse prior success | Loop amplification and unnecessary repeated side effects |
 
 ## Abuse Cases and Expected Outcome
 1. Prompt asks agent to edit `.openclawssy/config.json`.
@@ -36,6 +38,8 @@ This model maps known threats to mandatory invariants and concrete abuse tests.
    - Expected: sensitive values redacted in audit artifacts.
 6. HTTP endpoint is called without token.
    - Expected: `401` and no run created.
+7. Prior chat history contains a `/tool ...` directive and current user asks normal question.
+   - Expected: runtime uses current message; stale directive is not executed.
 
 ## Required Security Tests (v0.1)
 - Config mutation denial test.

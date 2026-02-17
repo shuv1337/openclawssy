@@ -168,6 +168,13 @@ func summarizeToolExecution(toolName, output, errText string) string {
 			}
 			return fmt.Sprintf("read %s", path)
 		}
+	case "shell.exec":
+		exitCode := intValue(parsed["exit_code"])
+		fallback := strings.TrimSpace(fmt.Sprintf("%v", parsed["shell_fallback"]))
+		if fallback != "" && fallback != "<nil>" {
+			return fmt.Sprintf("shell command completed via %s fallback (exit %d)", fallback, exitCode)
+		}
+		return fmt.Sprintf("shell command completed (exit %d)", exitCode)
 	}
 
 	return truncateSummary(output, 180)

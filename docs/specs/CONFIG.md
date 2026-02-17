@@ -9,6 +9,11 @@ Default config path: `.openclawssy/config.json`
 4. Verify with `openclawssy doctor -v`.
 5. Optional: enable sandbox + shell exec, HTTPS dashboard, Discord bridge.
 
+Default shipping profile:
+- `model.provider`: `zai`
+- `model.name`: `GLM-4.7`
+- `model.max_tokens`: `20000`
+
 ## Provider Support
 - `openai` (OpenAI endpoint)
 - `openrouter`
@@ -52,7 +57,8 @@ Provider API key env defaults:
   "model": {
     "provider": "openai",
     "name": "gpt-4o-mini",
-    "temperature": 0.2
+    "temperature": 0.2,
+    "max_tokens": 20000
   },
   "providers": {
     "openai": {
@@ -109,3 +115,8 @@ Provider API key env defaults:
 - Discord queue accepts allowlisted senders/channels/guilds and enforces rate limits.
 - Secret values are write-only at API/UI surface; only key names are listed.
 - Tool calls and run lifecycle events are always audited with redaction.
+
+## Model Runtime Notes
+- `model.max_tokens` is validated in the range `1..20000`.
+- Runtime enforces this cap on provider requests.
+- Long chat history is compacted by runtime before context exhaustion.

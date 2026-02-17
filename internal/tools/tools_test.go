@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,50 @@ type fakeShell struct{}
 func (fakeShell) Exec(ctx context.Context, command string, args []string) (string, string, int, error) {
 	_ = ctx
 	return command + " " + args[0], "", 0, nil
+}
+
+type fallbackShell struct {
+	calls []string
+}
+
+func (s *fallbackShell) Exec(ctx context.Context, command string, args []string) (string, string, int, error) {
+	_ = ctx
+	s.calls = append(s.calls, command)
+	if command == "bash" {
+		return "", "", -1, errors.New(`exec: "bash": executable file not found in $PATH`)
+	}
+	if command == "/bin/bash" {
+		return "venv ready", "", 0, nil
+	}
+	if command == "/usr/bin/bash" {
+		return "", "", -1, errors.New(`fork/exec /usr/bin/bash: no such file or directory`)
+	}
+	if command == "sh" {
+		return "venv ready", "", 0, nil
+	}
+	return "", "", 127, errors.New("unexpected command")
+}
+
+type shOnlyFallbackShell struct {
+	calls []string
+}
+
+func (s *shOnlyFallbackShell) Exec(ctx context.Context, command string, args []string) (string, string, int, error) {
+	_ = ctx
+	s.calls = append(s.calls, command)
+	if command == "bash" {
+		return "", "", -1, errors.New(`exec: "bash": executable file not found in $PATH`)
+	}
+	if command == "/bin/bash" {
+		return "", "", -1, errors.New(`fork/exec /bin/bash: no such file or directory`)
+	}
+	if command == "/usr/bin/bash" {
+		return "", "", -1, errors.New(`fork/exec /usr/bin/bash: no such file or directory`)
+	}
+	if command == "sh" {
+		return "venv ready via sh", "", 0, nil
+	}
+	return "", "", 127, errors.New("unexpected command")
 }
 
 func (m *memAudit) LogEvent(ctx context.Context, eventType string, fields map[string]any) error {
@@ -164,6 +209,56 @@ func TestShellExecTool(t *testing.T) {
 	}
 	if res["stdout"] != "echo ok" {
 		t.Fatalf("unexpected stdout: %#v", res["stdout"])
+	}
+}
+
+func TestShellExecFallsBackToShWhenBashUnavailable(t *testing.T) {
+	reg := NewRegistry(fakePolicy{}, nil)
+	shell := &fallbackShell{}
+	reg.SetShellExecutor(shell)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	res, err := reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
+		"command": "bash",
+		"args":    []any{"-lc", "python -m venv .venv"},
+	})
+	if err != nil {
+		t.Fatalf("shell.exec expected fallback success, got error: %v", err)
+	}
+	if len(shell.calls) != 2 || shell.calls[0] != "bash" || shell.calls[1] != "/bin/bash" {
+		t.Fatalf("expected bash then /bin/bash fallback, got %#v", shell.calls)
+	}
+	if res["stdout"] != "venv ready" {
+		t.Fatalf("unexpected stdout after fallback: %#v", res["stdout"])
+	}
+	if res["shell_fallback"] != "/bin/bash" {
+		t.Fatalf("expected shell_fallback=/bin/bash, got %#v", res["shell_fallback"])
+	}
+}
+
+func TestShellExecFallsBackToShWhenBashBinaryMissing(t *testing.T) {
+	reg := NewRegistry(fakePolicy{}, nil)
+	shell := &shOnlyFallbackShell{}
+	reg.SetShellExecutor(shell)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	res, err := reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
+		"command": "bash",
+		"args":    []any{"-lc", "python -m venv .venv"},
+	})
+	if err != nil {
+		t.Fatalf("shell.exec expected sh fallback success, got error: %v", err)
+	}
+	if len(shell.calls) != 4 || shell.calls[0] != "bash" || shell.calls[1] != "/bin/bash" || shell.calls[2] != "/usr/bin/bash" || shell.calls[3] != "sh" {
+		t.Fatalf("expected bash -> /bin/bash -> /usr/bin/bash -> sh order, got %#v", shell.calls)
+	}
+	if res["stdout"] != "venv ready via sh" {
+		t.Fatalf("unexpected stdout after sh fallback: %#v", res["stdout"])
+	}
+	if res["shell_fallback"] != "sh" {
+		t.Fatalf("expected shell_fallback=sh, got %#v", res["shell_fallback"])
 	}
 }
 
