@@ -461,3 +461,85 @@ func TestRunnerAsksUserGuidanceAfterThreeMoreFailures(t *testing.T) {
 		t.Fatalf("expected runner to stop without extra model call after escalation, got %d", len(model.reqs))
 	}
 }
+
+func TestRunnerRecoversWithToolSummaryWhenModelCallFailsMidRun(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","tailscale status"]}`)}}},
+	}}
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Error: "exit status 1", Output: "failed to connect to local tailscaled: socket missing"},
+	}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "help me connect tailscale"})
+	if err != nil {
+		t.Fatalf("expected graceful recovery from model failure, got %v", err)
+	}
+	if !strings.Contains(out.FinalText, "model/API error") {
+		t.Fatalf("expected model error context in final text, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "no more responses") {
+		t.Fatalf("expected wrapped model error details, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "failed to connect to local tailscaled") {
+		t.Fatalf("expected tool output in fallback summary, got %q", out.FinalText)
+	}
+}
+
+func TestRunnerTreatsStructuredToolOutputErrorsAsFailures(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","curl -fsSL https://tailscale.com/install.sh | sh"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","curl -fsSL https://tailscale.com/install.sh | sh"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "3", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","apk add --no-cache openrc"]}`)}}},
+		{FinalText: "done"},
+	}}
+
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Output: `{"exit_code":127,"stderr":"sh: rc-update: not found","stdout":"Installing Tailscale","error":"exit status 127"}`},
+		"2": {ID: "2", Output: `{"exit_code":127,"stderr":"sh: rc-update: not found","stdout":"Installing Tailscale","error":"exit status 127"}`},
+		"3": {ID: "3", Output: `{"exit_code":0,"stderr":"","stdout":"OK"}`},
+	}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "install tailscale"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(model.reqs) < 3 {
+		t.Fatalf("expected at least 3 model requests, got %d", len(model.reqs))
+	}
+	if !strings.Contains(model.reqs[2].SystemPrompt, "ERROR_RECOVERY_MODE") {
+		t.Fatalf("expected recovery mode after structured output errors, got %q", model.reqs[2].SystemPrompt)
+	}
+}
+
+func TestRunnerEscalatesGuidanceForStructuredToolOutputErrors(t *testing.T) {
+	responses := make([]ModelResponse, 0, 6)
+	results := make(map[string]ToolCallResult, 6)
+	for i := 1; i <= 6; i++ {
+		id := "call-" + strconv.Itoa(i)
+		responses = append(responses, ModelResponse{ToolCalls: []ToolCallRequest{{ID: id, Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","curl -fsSL https://tailscale.com/install.sh | sh"]}`)}}})
+		results[id] = ToolCallResult{ID: id, Output: `{"exit_code":127,"stderr":"sh: rc-update: not found","stdout":"Installing Tailscale","error":"exit status 127"}`}
+	}
+
+	model := &mockModel{responses: responses}
+	tools := &mockTools{results: results}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "install tailscale via curl"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !strings.Contains(out.FinalText, "need your guidance before I continue") {
+		t.Fatalf("expected guidance escalation, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "rc-update: not found") {
+		t.Fatalf("expected structured stderr in guidance output, got %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 5 {
+		t.Fatalf("expected 5 tool calls before escalation, got %d", len(out.ToolCalls))
+	}
+}

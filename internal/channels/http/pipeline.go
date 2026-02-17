@@ -2,7 +2,10 @@ package httpchannel
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,6 +21,8 @@ type ExecutionResult struct {
 }
 
 var defaultQueuedRunTracker = newQueuedRunTracker()
+
+const queuedRunMaxAttempts = 2
 
 func QueueRun(ctx context.Context, store RunStore, executor RunExecutor, agentID, message, source, sessionID string) (Run, error) {
 	now := time.Now().UTC()
@@ -47,7 +52,7 @@ func executeQueuedRun(ctx context.Context, store RunStore, executor RunExecutor,
 	run.UpdatedAt = time.Now().UTC()
 	_ = store.Update(ctx, run)
 
-	result, err := executor.Execute(ctx, ExecutionInput{AgentID: run.AgentID, Message: run.Message, Source: run.Source, SessionID: run.SessionID})
+	result, err := executeWithRetry(ctx, executor, ExecutionInput{AgentID: run.AgentID, Message: run.Message, Source: run.Source, SessionID: run.SessionID})
 	if err != nil {
 		run.Status = "failed"
 		run.Error = err.Error()
@@ -67,6 +72,54 @@ func executeQueuedRun(ctx context.Context, store RunStore, executor RunExecutor,
 	}
 	run.UpdatedAt = time.Now().UTC()
 	_ = store.Update(ctx, run)
+}
+
+func executeWithRetry(ctx context.Context, executor RunExecutor, input ExecutionInput) (ExecutionResult, error) {
+	var lastResult ExecutionResult
+	var lastErr error
+	for attempt := 1; attempt <= queuedRunMaxAttempts; attempt++ {
+		result, err := executor.Execute(ctx, input)
+		if err == nil {
+			if attempt > 1 {
+				result.Trace = withRetryMeta(result.Trace, attempt-1)
+			}
+			return result, nil
+		}
+		lastResult = result
+		lastErr = err
+		if !isRetryableExecutionError(err) || attempt == queuedRunMaxAttempts {
+			break
+		}
+	}
+	if lastResult.Trace != nil {
+		lastResult.Trace = withRetryMeta(lastResult.Trace, 1)
+	}
+	return lastResult, lastErr
+}
+
+func withRetryMeta(trace map[string]any, retries int) map[string]any {
+	if retries <= 0 {
+		return trace
+	}
+	if trace == nil {
+		trace = map[string]any{}
+	}
+	trace["queue_retry_attempts"] = retries
+	return trace
+}
+
+func isRetryableExecutionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded") || strings.Contains(lower, "unexpected eof")
 }
 
 func WaitForQueuedRuns(ctx context.Context) error {

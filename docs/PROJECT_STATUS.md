@@ -21,6 +21,10 @@ What works now:
 - long-context handling with compaction around 80 percent budget
 - model response cap (`model.max_tokens`, default 20000)
 - dashboard chat layout controls (resizable chat, collapsible panes, focus mode)
+- long-running tool defaults (`120` iterations, `900s` per tool call) for heavy shell workflows
+- staged failure recovery (after 2 failures, force error-recovery mode; after 3 additional failures, ask user with attempted commands/errors/outputs)
+- dashboard chat auto-progress updates for long runs (elapsed time + completed tool calls + latest summary)
+- chat queue API now returns `session_id` for queued runs so clients can stay attached to session context
 
 What is not production-ready:
 - compatibility and schema stability

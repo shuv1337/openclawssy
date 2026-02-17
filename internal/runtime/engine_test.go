@@ -690,9 +690,12 @@ func TestExecuteWithInputPersistsToolMessageEvenWhenRunFailsLater(t *testing.T) 
 		t.Fatalf("save config: %v", err)
 	}
 
-	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "list files then continue", Source: "dashboard", SessionID: session.SessionID})
-	if err == nil {
-		t.Fatal("expected run to fail after second provider response")
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "list files then continue", Source: "dashboard", SessionID: session.SessionID})
+	if err != nil {
+		t.Fatalf("expected graceful recovery from second provider response failure, got %v", err)
+	}
+	if !strings.Contains(res.FinalText, "model/API error") {
+		t.Fatalf("expected degraded final response to mention model error, got %q", res.FinalText)
 	}
 
 	msgs, err := chat.ReadRecentMessages(session.SessionID, 20)

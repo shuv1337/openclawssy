@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -107,6 +108,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			ToolResults:  append([]ToolCallResult(nil), toolResults...),
 		})
 		if err != nil {
+			if len(toolResults) > 0 {
+				out.FinalText = recoverFromModelError(err, toolResults, toolCap)
+				out.CompletedAt = time.Now().UTC()
+				return out, nil
+			}
 			out.CompletedAt = time.Now().UTC()
 			return out, err
 		}
@@ -149,6 +155,10 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					now := time.Now().UTC()
 					cached.ID = call.ID
 					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
+					errText := toolResultErrorText(record.Result)
+					if strings.TrimSpace(record.Result.Error) == "" && errText != "" {
+						record.Result.Error = errText
+					}
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
 					registerToolOutcome(record.Result.Error)
@@ -164,6 +174,10 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					now := time.Now().UTC()
 					cached.ID = call.ID
 					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
+					errText := toolResultErrorText(record.Result)
+					if strings.TrimSpace(record.Result.Error) == "" && errText != "" {
+						record.Result.Error = errText
+					}
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
 					registerToolOutcome(record.Result.Error)
@@ -190,6 +204,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			}
 			if execErr != nil {
 				result.Error = execErr.Error()
+			}
+			if strings.TrimSpace(result.Error) == "" {
+				if inferred := toolResultErrorText(result); inferred != "" {
+					result.Error = inferred
+				}
 			}
 
 			record.Result = result
@@ -291,16 +310,42 @@ func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
 
 	var b strings.Builder
 	b.WriteString("I reached the tool-iteration limit before producing a final response. Here are the latest tool results:\n")
+	b.WriteString(formatLatestToolResults(results))
+	b.WriteString(fmt.Sprintf("\n(Iteration cap: %d)", toolCap))
+	return b.String()
+}
+
+func recoverFromModelError(err error, toolResults []ToolCallResult, toolCap int) string {
+	msg := strings.TrimSpace("I hit a model/API error while processing the next step: " + strings.TrimSpace(err.Error()))
+	if len(toolResults) == 0 {
+		return msg
+	}
+	return msg + "\n\nLatest tool results before the model/API error:\n" + formatLatestToolResults(toolResults) + fmt.Sprintf("\n(Iteration cap: %d)", toolCap)
+}
+
+func formatLatestToolResults(results []ToolCallResult) string {
+	if len(results) == 0 {
+		return ""
+	}
 
 	start := len(results) - 5
 	if start < 0 {
 		start = 0
 	}
+
+	var b strings.Builder
 	for i := start; i < len(results); i++ {
 		item := results[i]
 		idx := i + 1
 		if strings.TrimSpace(item.Error) != "" {
 			b.WriteString(fmt.Sprintf("- %d) error: %s\n", idx, strings.TrimSpace(item.Error)))
+			out := strings.TrimSpace(item.Output)
+			if len(out) > 1200 {
+				out = out[:1200] + "..."
+			}
+			if out != "" {
+				b.WriteString(fmt.Sprintf("  output: %s\n", out))
+			}
 			continue
 		}
 		out := strings.TrimSpace(item.Output)
@@ -312,7 +357,6 @@ func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
 		}
 		b.WriteString(fmt.Sprintf("- %d) output: %s\n", idx, out))
 	}
-	b.WriteString(fmt.Sprintf("\n(Iteration cap: %d)", toolCap))
 	return b.String()
 }
 
@@ -387,6 +431,39 @@ func truncateGuidanceText(value string, maxChars int) string {
 		return text[:maxChars]
 	}
 	return strings.TrimSpace(text[:maxChars-3]) + "..."
+}
+
+func toolResultErrorText(result ToolCallResult) string {
+	if text := strings.TrimSpace(result.Error); text != "" {
+		return text
+	}
+	raw := strings.TrimSpace(result.Output)
+	if raw == "" || (!strings.HasPrefix(raw, "{") && !strings.HasPrefix(raw, "[")) {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	if v, ok := payload["error"]; ok {
+		errText := strings.TrimSpace(fmt.Sprintf("%v", v))
+		if errText != "" && errText != "<nil>" {
+			return errText
+		}
+	}
+	if v, ok := payload["exit_code"]; ok {
+		switch n := v.(type) {
+		case float64:
+			if int(n) != 0 {
+				return fmt.Sprintf("exit status %d", int(n))
+			}
+		case int:
+			if n != 0 {
+				return fmt.Sprintf("exit status %d", n)
+			}
+		}
+	}
+	return ""
 }
 
 func uniqueToolCallID(rawID string, ordinal int, used map[string]struct{}) string {

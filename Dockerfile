@@ -45,6 +45,7 @@ RUN apk add --no-cache \
     nodejs \
     npm \
     openssh-client \
+    openrc \
     openssl \
     procps \
     py3-pip \

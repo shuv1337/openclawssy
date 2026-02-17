@@ -178,10 +178,7 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 		} `json:"choices"`
 		Error any `json:"error"`
 	}
-	requestCtx, cancel := ensureProviderRequestTimeout(ctx, defaultProviderTimeout)
-	defer cancel()
-
-	statusCode, err := m.doChatCompletionWithRetry(requestCtx, raw, &payload)
+	statusCode, err := m.doChatCompletionWithRetry(ctx, raw, &payload)
 	if err != nil {
 		return agent.ModelResponse{}, err
 	}
@@ -221,7 +218,9 @@ func (m *ProviderModel) doChatCompletionWithRetry(ctx context.Context, raw []byt
 
 	var lastErr error
 	for attempt := 1; attempt <= providerMaxAttempts; attempt++ {
-		statusCode, err := m.doChatCompletionOnce(ctx, raw, payload)
+		attemptCtx, cancel := ensureProviderRequestTimeout(ctx, defaultProviderTimeout)
+		statusCode, err := m.doChatCompletionOnce(attemptCtx, raw, payload)
+		cancel()
 		if err == nil {
 			return statusCode, nil
 		}

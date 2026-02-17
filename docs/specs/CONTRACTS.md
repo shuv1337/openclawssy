@@ -81,6 +81,11 @@ Required event order:
 5. zero or more `tool.result`
 6. one terminal event: `run.completed` | `run.failed` | `run.cancelled`
 
+Failure-loop handling contract:
+- After 2 consecutive failing tool results, the next model turn is run in explicit error-recovery mode.
+- If 3 additional failing tool results occur while recovery mode is active, runner returns a terminal assistant response asking user guidance.
+- That escalation response must include recent attempts, errors, and output snippets.
+
 Event minimum fields:
 - `event_id`, `event_type`, `ts`
 - `run_id`, `agent_id`
@@ -216,9 +221,14 @@ Response `202`:
 ```json
 {
   "id": "run_456",
-  "status": "queued"
+  "status": "queued",
+  "session_id": "session_abc"
 }
 ```
+
+Notes:
+- `session_id` is included when the request is associated with a persisted chat session.
+- Command-style chat requests (for example `/new`, `/resume`) may return `200` with an immediate `response` message and optional `session_id` instead of queueing a run.
 
 ### Dashboard Admin APIs (token-auth)
 - `GET /api/admin/status` -> run list + selected model/provider status

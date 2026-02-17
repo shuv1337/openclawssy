@@ -41,6 +41,9 @@ Openclawssy is now pre-configured to use **ZAI's GLM-4.7 Coding Plan** as the de
 - **Persistent Storage**: Configuration and workspace are saved locally
 - **Shell-ready runtime image**: Includes `bash`, `python3`/`pip`, `node`/`npm`, `git`, `curl`, `wget`, `jq`, and common GNU utilities
 - **Network diagnostics included**: `nmap`, `dig`/`nslookup`, `ip`, `ss`, `netstat`, `traceroute`, `tcpdump`, `mtr`, `nc`, `socat`, and related tools
+- **Installer-script compatibility**: Includes `openrc` tools (`rc-update`) so common curl-piped installers on Alpine fail less often
+- **Long-run progress UX**: Dashboard chat keeps polling with elapsed time + tool progress instead of stalling on manual refresh prompts
+- **Failure escalation flow**: After repeated tool failures, the agent shifts to recovery mode and then asks for user guidance with attempted steps/errors/output
 
 ### Environment Variables
 
@@ -130,6 +133,14 @@ Openclawssy is configured to be accessible over Tailscale for secure remote acce
 - Rebuild with the updated image: `docker-compose build --no-cache openclawssy`
 - Restart the service: `docker-compose up -d`
 - Verify tools are present: `docker-compose exec openclawssy sh -lc 'bash --version && python3 --version && node --version'`
+
+**Tool calls keep failing in loops:**
+- The runner now auto-enters recovery mode after repeated failures and escalates with a guidance request after additional failures.
+- Review the returned attempted steps/errors/output, then provide a corrective instruction (for example capabilities, auth, or alternate approach).
+
+**Curl installer script fails with `rc-update: not found`:**
+- Rebuild with updated image that includes `openrc`: `docker-compose build --no-cache openclawssy && docker-compose up -d`
+- Retry installer command after rebuild.
 
 **Verify network diagnostic tools are present:**
 - `docker-compose exec openclawssy sh -lc 'nmap --version && dig +short example.com && ip -br a && ss -tulpen | head -n 5'`

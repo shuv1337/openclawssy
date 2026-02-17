@@ -3,6 +3,7 @@ package httpchannel
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -14,6 +15,21 @@ type traceExecutor struct {
 
 type blockingExecutor struct {
 	release <-chan struct{}
+}
+
+type flakyRetryableExecutor struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (f *flakyRetryableExecutor) Execute(_ context.Context, _ ExecutionInput) (ExecutionResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls == 1 {
+		return ExecutionResult{Trace: map[string]any{"first_attempt": true}}, context.DeadlineExceeded
+	}
+	return ExecutionResult{Output: "ok", Trace: map[string]any{"attempt": f.calls}}, nil
 }
 
 func (t traceExecutor) Execute(_ context.Context, _ ExecutionInput) (ExecutionResult, error) {
@@ -100,5 +116,38 @@ func TestWaitForQueuedRunsBlocksUntilCompletion(t *testing.T) {
 	defer longCancel()
 	if err := WaitForQueuedRuns(longCtx); err != nil {
 		t.Fatalf("expected in-flight drain success, got %v", err)
+	}
+}
+
+func TestQueueRunRetriesRetryableExecutorFailureOnce(t *testing.T) {
+	store := NewInMemoryRunStore()
+	exec := &flakyRetryableExecutor{}
+	queued, err := QueueRun(context.Background(), store, exec, "agent-1", "hello", "dashboard", "chat_123")
+	if err != nil {
+		t.Fatalf("queue run: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		run, getErr := store.Get(context.Background(), queued.ID)
+		if getErr != nil {
+			t.Fatalf("get run: %v", getErr)
+		}
+		if run.Status == "completed" {
+			if run.Output != "ok" {
+				t.Fatalf("expected successful retry output, got %q", run.Output)
+			}
+			if run.Trace == nil || run.Trace["queue_retry_attempts"] != 1 {
+				t.Fatalf("expected retry metadata in trace, got %#v", run.Trace)
+			}
+			if exec.calls != 2 {
+				t.Fatalf("expected exactly two executor attempts, got %d", exec.calls)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not complete in time, last status=%q", run.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

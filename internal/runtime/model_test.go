@@ -525,6 +525,39 @@ func TestProviderModelRetriesOnUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestProviderModelRetriesUseFreshAttemptTimeouts(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls < 3 {
+			time.Sleep(80 * time.Millisecond)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "recovered after multiple retry attempts",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	model.httpClient = &http.Client{Timeout: 30 * time.Millisecond}
+
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "hi"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if resp.FinalText != "recovered after multiple retry attempts" {
+		t.Fatalf("unexpected final text: %q", resp.FinalText)
+	}
+	if calls < 3 {
+		t.Fatalf("expected third attempt to succeed, got %d calls", calls)
+	}
+}
+
 func TestProviderModelIgnoresUnknownToolNames(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

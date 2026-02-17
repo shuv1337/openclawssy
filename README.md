@@ -36,10 +36,14 @@ Welcome to the **Ussyverse**: the tiny but principled corner of agent tooling wh
 Recent runtime hardening and UX upgrades:
 - Chat sessions with `/new`, `/resume <session>`, `/chats`, persisted message history, and session listing.
 - Multi-tool runs with normalized unique tool call IDs and repeated-call result reuse (no hard stop on benign duplicates).
+- Long-running run defaults raised to support real workloads (`120` tool iterations, `900s` per-tool timeout) with no-progress loop guarding.
+- Staged failure handling: after 2 consecutive tool failures, the model is forced into recovery mode; after 3 more failures, the run asks the user for guidance with attempted commands, errors, and outputs.
+- Structured tool-output errors (for example shell JSON output with `error`/`exit_code`) are treated as failures for recovery/escalation decisions.
 - Context safety improvements: historical tool-role messages are excluded from model history, current message drives directive detection, and context compacts at ~80 percent usage.
 - Model response cap is enforced via `model.max_tokens` (1..20000, default 20000).
 - Tool activity now includes concise summaries (for example `wrote N line(s) to file`) in trace, dashboard, and Discord updates.
-- Dashboard chat layout improvements: resizable chat panel, collapsible panes, focus-chat mode, and persisted layout preferences.
+- Dashboard chat layout improvements: resizable chat panel, collapsible panes, focus-chat mode, persisted layout preferences, and continuous in-chat progress updates for long runs.
+- Chat API queue responses now include `session_id` so clients can keep progress/tool timelines tied to the active session.
 
 Ussyverse flavor, practical core.
 
@@ -186,7 +190,7 @@ Provider key precedence:
 
 `shell.exec` stays disabled unless all are true:
 - `sandbox.active=true`
-- `sandbox.provider=local|docker`
+- `sandbox.provider=local`
 - `shell.enable_exec=true`
 
 Example tool call through runner:
@@ -194,6 +198,8 @@ Example tool call through runner:
 ```bash
 openclawssy run -agent default -message '/tool shell.exec {"command":"pwd"}'
 ```
+
+Docker runtime note: the image includes `openrc` (`rc-update`) for better compatibility with installer scripts run via `curl ... | sh` on Alpine.
 
 Time utility example:
 
@@ -218,6 +224,7 @@ This artifact-first layout is intentional: every run should be reproducible, ins
 - Chat bridge API: `POST /v1/chat/messages`
 - Both require bearer token.
 - Chat queue uses allowlist + rate limit from `chat.*` config.
+- Chat queue response includes `session_id` for queued runs so clients can reattach to the same session timeline.
 - Chat runs persist tool-call messages with metadata (`tool_name`, `tool_call_id`, `run_id`) so multi-step tool activity is visible in UI/channel outputs.
 
 ## Discord Bot

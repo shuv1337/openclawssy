@@ -46,6 +46,7 @@ Dashboard tips:
 - Chat is session-aware (`/new`, `/resume <session_id>`, `/chats`).
 - Tool activity is summarized per step (for example file writes show line counts).
 - You can resize the chat panel and collapse tool/session/status/admin panes.
+- Long runs keep updating in-place with elapsed time, completed tool-call count, and latest tool summary.
 
 ## 6) Send a run
 
@@ -64,6 +65,14 @@ curl -s -X POST http://127.0.0.1:8080/v1/chat/messages \
   -H 'Content-Type: application/json' \
   -d '{"user_id":"dashboard_user","room_id":"dashboard","agent_id":"default","message":"list files and read README.md"}'
 ```
+
+Queued chat responses include `session_id` when available so clients can poll the same session history and tool timeline.
+
+## Failure recovery behavior
+
+- After 2 consecutive tool failures, the runner switches the model into recovery mode and expects a changed approach.
+- If 3 additional failures occur after recovery mode starts, the run stops and asks for user guidance.
+- The guidance prompt includes attempted commands, error text, and output snippets to make next-step steering explicit.
 
 ## Important warning
 
