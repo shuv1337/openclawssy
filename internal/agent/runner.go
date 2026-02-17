@@ -92,6 +92,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 
 		if toolIterations >= toolCap {
+			if len(toolResults) > 0 {
+				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
+				out.CompletedAt = time.Now().UTC()
+				return out, nil
+			}
 			out.CompletedAt = time.Now().UTC()
 			return out, ErrToolIterationCapExceeded
 		}
@@ -144,4 +149,36 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 		toolIterations++
 	}
+}
+
+func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
+	if len(results) == 0 {
+		return "I hit the tool iteration limit before I could finish."
+	}
+
+	var b strings.Builder
+	b.WriteString("I reached the tool-iteration limit before producing a final response. Here are the latest tool results:\n")
+
+	start := len(results) - 5
+	if start < 0 {
+		start = 0
+	}
+	for i := start; i < len(results); i++ {
+		item := results[i]
+		idx := i + 1
+		if strings.TrimSpace(item.Error) != "" {
+			b.WriteString(fmt.Sprintf("- %d) error: %s\n", idx, strings.TrimSpace(item.Error)))
+			continue
+		}
+		out := strings.TrimSpace(item.Output)
+		if len(out) > 320 {
+			out = out[:320] + "..."
+		}
+		if out == "" {
+			out = "(empty output)"
+		}
+		b.WriteString(fmt.Sprintf("- %d) output: %s\n", idx, out))
+	}
+	b.WriteString(fmt.Sprintf("\n(Iteration cap: %d)", toolCap))
+	return b.String()
 }

@@ -27,6 +27,7 @@ Completed
 - [x] Phase 3 polish: Added tool status quick filter (`all/errors/output`) and session sort modes (`recent/oldest/active first`).
 - [x] Phase 2.4 hardening tweak: repeated tool calls now inject recoverable tool errors first, only fail after threshold repeats, and allow immediate retry when previous call errored.
 - [x] Phase 3 UX resilience: dashboard run polling now distinguishes long-running jobs from hard failures, continues background polling, and updates chat when the run eventually completes/fails.
+- [x] Phase 4 UX resilience: when tool-iteration cap is reached after useful tool outputs, runner now returns a graceful fallback response with recent tool results instead of hard-failing the run.
 
 Still In Progress
 - [ ] Phase 3 polish follow-up: saved filter views and keyboard shortcuts for tool/session navigation.

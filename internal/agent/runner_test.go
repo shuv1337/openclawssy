@@ -98,9 +98,15 @@ func TestRunnerToolIterationCap(t *testing.T) {
 	}
 	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 1}
 
-	_, err := runner.Run(context.Background(), RunInput{Message: "loop"})
-	if !errors.Is(err, ErrToolIterationCapExceeded) {
-		t.Fatalf("expected ErrToolIterationCapExceeded, got %v", err)
+	out, err := runner.Run(context.Background(), RunInput{Message: "loop"})
+	if err != nil {
+		t.Fatalf("expected graceful fallback, got %v", err)
+	}
+	if out.FinalText == "" {
+		t.Fatal("expected fallback final text when cap reached after tool results")
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected first tool call record retained, got %d", len(out.ToolCalls))
 	}
 }
 
