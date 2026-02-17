@@ -1,6 +1,11 @@
 package policy
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+
+	"openclawssy/internal/toolparse"
+)
 
 type CapabilityError struct {
 	AgentID string
@@ -30,7 +35,11 @@ func NewEnforcer(workspace string, grants map[string][]string) *Enforcer {
 	for agent, tools := range grants {
 		set := make(map[string]bool, len(tools))
 		for _, tool := range tools {
-			set[tool] = true
+			canonical := canonicalCapabilityTool(tool)
+			if canonical == "" {
+				continue
+			}
+			set[canonical] = true
 		}
 		m[agent] = set
 	}
@@ -39,12 +48,24 @@ func NewEnforcer(workspace string, grants map[string][]string) *Enforcer {
 }
 
 func (e *Enforcer) CheckTool(agentID, tool string) error {
+	canonical := canonicalCapabilityTool(tool)
 	agentCaps, ok := e.Capabilities[agentID]
 	if !ok {
-		return &CapabilityError{AgentID: agentID, Tool: tool}
+		return &CapabilityError{AgentID: agentID, Tool: canonical}
 	}
-	if !agentCaps[tool] {
-		return &CapabilityError{AgentID: agentID, Tool: tool}
+	if !agentCaps[canonical] {
+		return &CapabilityError{AgentID: agentID, Tool: canonical}
 	}
 	return nil
+}
+
+func canonicalCapabilityTool(tool string) string {
+	candidate := strings.TrimSpace(tool)
+	if candidate == "" {
+		return ""
+	}
+	if canonical, ok := toolparse.CanonicalToolName(candidate); ok {
+		return canonical
+	}
+	return strings.ToLower(candidate)
 }

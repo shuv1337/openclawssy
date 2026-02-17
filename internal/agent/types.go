@@ -28,21 +28,27 @@ type RunInput struct {
 
 // RunOutput is the finalized output contract for a run.
 type RunOutput struct {
-	Prompt      string           `json:"prompt"`
-	FinalText   string           `json:"final_text"`
-	ToolCalls   []ToolCallRecord `json:"tool_calls"`
-	StartedAt   time.Time        `json:"started_at"`
-	CompletedAt time.Time        `json:"completed_at"`
+	Prompt           string           `json:"prompt"`
+	FinalText        string           `json:"final_text"`
+	Thinking         string           `json:"thinking,omitempty"`
+	ThinkingPresent  bool             `json:"thinking_present,omitempty"`
+	ToolParseFailure bool             `json:"tool_parse_failure,omitempty"`
+	ToolCalls        []ToolCallRecord `json:"tool_calls"`
+	StartedAt        time.Time        `json:"started_at"`
+	CompletedAt      time.Time        `json:"completed_at"`
 }
 
 // ModelRequest is sent to the model on each loop iteration.
 type ModelRequest struct {
-	SystemPrompt string           `json:"system_prompt,omitempty"`
-	Messages     []ChatMessage    `json:"messages,omitempty"`
-	AllowedTools []string         `json:"allowed_tools,omitempty"`
-	Prompt       string           `json:"prompt,omitempty"`
-	Message      string           `json:"message,omitempty"`
-	ToolResults  []ToolCallResult `json:"tool_results"`
+	AgentID       string           `json:"agent_id,omitempty"`
+	RunID         string           `json:"run_id,omitempty"`
+	SystemPrompt  string           `json:"system_prompt,omitempty"`
+	Messages      []ChatMessage    `json:"messages,omitempty"`
+	AllowedTools  []string         `json:"allowed_tools,omitempty"`
+	ToolTimeoutMS int              `json:"tool_timeout_ms,omitempty"`
+	Prompt        string           `json:"prompt,omitempty"`
+	Message       string           `json:"message,omitempty"`
+	ToolResults   []ToolCallResult `json:"tool_results"`
 }
 
 // ChatMessage is a role-tagged conversational turn passed to the model.
@@ -63,8 +69,11 @@ type ToolCallRequest struct {
 
 // ModelResponse returns final text and optional tool calls.
 type ModelResponse struct {
-	FinalText string            `json:"final_text"`
-	ToolCalls []ToolCallRequest `json:"tool_calls"`
+	FinalText        string            `json:"final_text"`
+	Thinking         string            `json:"thinking,omitempty"`
+	ThinkingPresent  bool              `json:"thinking_present,omitempty"`
+	ToolParseFailure bool              `json:"tool_parse_failure,omitempty"`
+	ToolCalls        []ToolCallRequest `json:"tool_calls"`
 }
 
 // ToolCallResult is the result returned by a tool executor.
@@ -78,6 +87,7 @@ type ToolCallResult struct {
 type ToolCallRecord struct {
 	Request     ToolCallRequest `json:"request"`
 	Result      ToolCallResult  `json:"result"`
+	CallbackErr string          `json:"callback_error,omitempty"`
 	StartedAt   time.Time       `json:"started_at"`
 	CompletedAt time.Time       `json:"completed_at"`
 }

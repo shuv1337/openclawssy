@@ -75,6 +75,9 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		toolTimeout = DefaultToolTimeout
 	}
 	noProgressIterations := 0
+	latestThinking := ""
+	thinkingPresent := false
+	toolParseFailure := false
 
 	registerToolOutcome := func(errText string) {
 		if strings.TrimSpace(errText) == "" {
@@ -101,6 +104,15 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 	}
 
+	notifyToolCall := func(record *ToolCallRecord) {
+		if input.OnToolCall == nil || record == nil {
+			return
+		}
+		if err := input.OnToolCall(*record); err != nil {
+			record.CallbackErr = strings.TrimSpace(err.Error())
+		}
+	}
+
 	for {
 		systemPrompt := out.Prompt
 		if failureRecoveryActive {
@@ -108,14 +120,29 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 
 		resp, err := r.Model.Generate(ctx, ModelRequest{
-			SystemPrompt: systemPrompt,
-			Messages:     append([]ChatMessage(nil), messages...),
-			AllowedTools: append([]string(nil), input.AllowedTools...),
-			Prompt:       systemPrompt,
-			Message:      input.Message,
-			ToolResults:  append([]ToolCallResult(nil), toolResults...),
+			AgentID:       input.AgentID,
+			RunID:         input.RunID,
+			SystemPrompt:  systemPrompt,
+			Messages:      append([]ChatMessage(nil), messages...),
+			AllowedTools:  append([]string(nil), input.AllowedTools...),
+			ToolTimeoutMS: input.ToolTimeoutMS,
+			Prompt:        systemPrompt,
+			Message:       input.Message,
+			ToolResults:   append([]ToolCallResult(nil), toolResults...),
 		})
+		if resp.ThinkingPresent {
+			thinkingPresent = true
+			if strings.TrimSpace(resp.Thinking) != "" {
+				latestThinking = strings.TrimSpace(resp.Thinking)
+			}
+		}
+		if resp.ToolParseFailure {
+			toolParseFailure = true
+		}
 		if err != nil {
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
 			if len(toolResults) > 0 {
 				out.FinalText = recoverFromModelError(err, toolResults, toolCap)
 				out.CompletedAt = time.Now().UTC()
@@ -127,18 +154,27 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 		if len(resp.ToolCalls) == 0 {
 			out.FinalText = resp.FinalText
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
 			out.CompletedAt = time.Now().UTC()
 			return out, nil
 		}
 
 		if r.ToolExecutor == nil {
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
 			out.CompletedAt = time.Now().UTC()
 			return out, ErrToolExecutorRequired
 		}
 
 		if toolIterations >= toolCap {
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
 			if len(toolResults) > 0 {
-				if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults, ""); finalized != "" {
+				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, ""); finalized != "" {
 					out.FinalText = finalized
 					out.CompletedAt = time.Now().UTC()
 					return out, nil
@@ -167,15 +203,10 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					if strings.TrimSpace(record.Result.Error) == "" && errText != "" {
 						record.Result.Error = errText
 					}
+					notifyToolCall(&record)
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
 					registerToolOutcome(record.Result.Error)
-					if input.OnToolCall != nil {
-						if err := input.OnToolCall(record); err != nil {
-							out.CompletedAt = time.Now().UTC()
-							return out, err
-						}
-					}
 					continue
 				}
 				if cached, ok := cachedFailedToolResults[callKey]; ok {
@@ -186,15 +217,10 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					if strings.TrimSpace(record.Result.Error) == "" && errText != "" {
 						record.Result.Error = errText
 					}
+					notifyToolCall(&record)
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
 					registerToolOutcome(record.Result.Error)
-					if input.OnToolCall != nil {
-						if err := input.OnToolCall(record); err != nil {
-							out.CompletedAt = time.Now().UTC()
-							return out, err
-						}
-					}
 					continue
 				}
 			}
@@ -244,14 +270,9 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 				}
 			}
 
+			notifyToolCall(&record)
 			out.ToolCalls = append(out.ToolCalls, record)
 			toolResults = append(toolResults, result)
-			if input.OnToolCall != nil {
-				if err := input.OnToolCall(record); err != nil {
-					out.CompletedAt = time.Now().UTC()
-					return out, err
-				}
-			}
 		}
 
 		if hadFreshExecution {
@@ -262,16 +283,22 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 		if failureRecoveryActive && failuresSinceRecovery >= failureGuidanceEscalation && len(out.ToolCalls) > 0 {
 			out.FinalText = requestUserGuidanceFromFailures(input.Message, out.ToolCalls)
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
 			out.CompletedAt = time.Now().UTC()
 			return out, nil
 		}
 
 		if noProgressIterations >= repeatedNoProgressLoopCapTrigger && len(toolResults) > 0 {
-			if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults, ""); finalized != "" {
+			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, ""); finalized != "" {
 				out.FinalText = finalized
 			} else {
 				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
 			}
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
 			out.CompletedAt = time.Now().UTC()
 			return out, nil
 		}
@@ -280,7 +307,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	}
 }
 
-func finalizeFromToolResults(ctx context.Context, model Model, prompt string, messages []ChatMessage, message string, toolResults []ToolCallResult, extraDirective string) string {
+func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extraDirective string) string {
 	if model == nil || len(toolResults) == 0 {
 		return ""
 	}
@@ -295,12 +322,15 @@ func finalizeFromToolResults(ctx context.Context, model Model, prompt string, me
 	}
 
 	resp, err := model.Generate(ctx, ModelRequest{
-		SystemPrompt: finalPrompt,
-		Messages:     append([]ChatMessage(nil), messages...),
-		AllowedTools: nil,
-		Prompt:       finalPrompt,
-		Message:      message,
-		ToolResults:  append([]ToolCallResult(nil), toolResults...),
+		AgentID:       agentID,
+		RunID:         runID,
+		SystemPrompt:  finalPrompt,
+		Messages:      append([]ChatMessage(nil), messages...),
+		AllowedTools:  nil,
+		ToolTimeoutMS: toolTimeoutMS,
+		Prompt:        finalPrompt,
+		Message:       message,
+		ToolResults:   append([]ToolCallResult(nil), toolResults...),
 	})
 	if err != nil {
 		return ""

@@ -70,3 +70,26 @@ func TestValidateRejectsOutOfRangeMaxTokens(t *testing.T) {
 		t.Fatal("expected validation error for max_tokens > 20000")
 	}
 }
+
+func TestDefaultConfigSetsThinkingModeOnError(t *testing.T) {
+	cfg := Default()
+	if cfg.Output.ThinkingMode != ThinkingModeOnError {
+		t.Fatalf("expected default output.thinking_mode=%q, got %q", ThinkingModeOnError, cfg.Output.ThinkingMode)
+	}
+}
+
+func TestApplyDefaultsSetsThinkingModeOnError(t *testing.T) {
+	cfg := Config{}
+	cfg.ApplyDefaults()
+	if cfg.Output.ThinkingMode != ThinkingModeOnError {
+		t.Fatalf("expected thinking_mode default %q, got %q", ThinkingModeOnError, cfg.Output.ThinkingMode)
+	}
+}
+
+func TestValidateRejectsInvalidThinkingMode(t *testing.T) {
+	cfg := Default()
+	cfg.Output.ThinkingMode = "sometimes"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid thinking_mode")
+	}
+}

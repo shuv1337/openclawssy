@@ -1,365 +1,487 @@
-# Openclawssy DevPlan (Codex-ready, Parallel-Agent Build)
-Version: v0.1 (2026-02-15)
-Goal: Ship a lightweight, secure-by-default, self-hostable “agent gateway + runner” with **no bloat**, designed for easy deployment and easy agent building.
+Openclawssy DevPlan v0.2
 
----
+Theme: Make chat reliable and transparent (better parsing, better tool calls, optional “thinking” visibility), then harden the rest of the prototype.
 
-## 1) Mission
-Openclawssy is a small, auditable, self-hosted **agent runtime + gateway** that:
-- Receives messages (CLI first; HTTP + 1 chat channel later)
-- Runs an agent loop with **capability-gated tools**
-- Writes all state as **portable Markdown artifacts**
-- Supports scheduling (cron-like) without becoming a giant platform
+How to use this plan
 
-**Core vibe constraints**
-- Plans before code (spec/plan artifacts drive execution)
-- Everything important is an artifact (markdown + jsonl logs)
-- Minimal dependencies, minimal tools, minimal attack surface
-- Default: small box (restricted capabilities unless explicitly enabled)
+Treat each numbered item as a small PR (ideally one concern per PR).
 
----
+Every PR must include:
 
-## 2) Non-goals (Hard “No” List)
-These are explicitly out-of-scope for v0.x:
-- Any public “skills marketplace” or auto-install from registries
-- Any runtime persona swapping hooks (no hidden instruction mutation)
-- Any tool that allows the agent to modify its own permissions/config
-- Any default binding to 0.0.0.0 without explicit opt-in + auth
-- Any UI-first dashboard (CLI + logs first)
+✅ tests (unit/integration as appropriate)
 
----
+✅ a short entry in Progress Log
 
-## 3) Success Criteria (What “Best Possible” Means)
-### Functional
-- Users can install and run Openclawssy in <10 minutes (single binary preferred).
-- Users can define agents with:
-  - instructions (read-only)
-  - tool capabilities
-  - workspace root
-  - optional schedule
-- Agent can do real work:
-  - read/write/edit workspace files
-  - run shell commands (only if sandboxed + enabled)
-  - search code
-- Scheduling can trigger runs and optionally deliver outputs.
+✅ updates to this checklist (mark [x])
 
-### Non-functional
-- Secure defaults (deny-by-default capability model).
-- Reproducible behavior (deterministic prompt assembly; audit logs).
-- Easy upgrades and low config-corruption risk (schema + atomic writes).
+Prefer contract-first changes: update docs/specs/CONTRACTS.md when interfaces change.
 
----
+Progress Log
 
-## 4) Security Invariants (Never Break These)
-1) **Config & permissions are human-controlled only**
-   - Agent cannot edit config, capability grants, or identity files.
-2) **Workspace is the only writable area (by policy)**
-   - Writes outside workspace are denied at the policy layer.
-3) **Shell exec is OFF unless sandbox is ON**
-   - If no sandbox provider is active, `shell.exec` tool must be disabled.
-4) **Network is OFF by default**
-   - If enabled, must be allowlisted (domains) or proxied.
-5) **All tool calls are logged**
-   - Append-only JSONL audit trail, with redaction rules for secrets.
+(Append one entry per merged PR)
 
-Threat model to explicitly mitigate:
-- Prompt injection → tool misuse
-- Persistence via instruction/config mutation
-- Path traversal / symlink escape
-- Supply-chain “skills” abuse
-- Remote abuse via unauthenticated HTTP endpoints
+2026-02-17 — PR###: Completed M1.1 by wiring RunInput metadata/history/allowed-tools/timeout into all Runner model requests (including finalize-from-tool-results) and added unit tests asserting request passthrough.
 
----
+2026-02-17 — PR###: Completed M1.2 by making OnToolCall callback errors deterministic log+continue, capturing callback failures on tool-call records, and surfacing them in run trace + audit events with tests proving callback failures do not abort runs.
 
-## 5) Product Shape (MVP Surface Area)
-### Channels (in order)
-1) CLI (`openclawssy run`, `openclawssy ask`)
-2) Local HTTP API (loopback-only by default)
-3) ONE chat connector (Discord OR Telegram) with allowlists
+2026-02-17 — PR###: Completed M1.3 by tightening tool allowlist enforcement at parse-time and exec-time (including alias canonicalization like bash.exec -> shell.exec), improving disallowed-tool diagnostics, and adding tests for parser/runtime/policy rejection behavior.
 
-### Core tools (keep ≤ 8 in MVP)
-- fs.read
-- fs.list
-- fs.write (workspace-only)
-- fs.edit (workspace-only; patch-based)
-- code.search (ripgrep)
-- shell.exec (sandbox-required)
-- time.now (utility)
-- (optional) http.fetch (off by default; allowlist-only)
+2026-02-17 — PR###: Completed M2.1 by adding a unified `ParseToolCalls` entrypoint with candidate/rejection diagnostics (fenced + inline + array support), routing runtime model parsing through that parser, forwarding diagnostics into trace extraction records, and adding parser/runtime tests for aliasing and max-call capping.
 
----
+2026-02-17 — PR###: Completed M2.2 by adding minimal safe JSON repair in the unified tool parser (trailing-comma stripping, fence/commentary tolerance), preserving strict allowlist/schema enforcement, and improving invalid-JSON diagnostics with tests for repaired and unrepaired cases.
 
-## 6) Architecture (Modules + Ownership Boundaries)
-Language target: Go (single binary, small runtime surface)
+2026-02-17 — PR###: Completed M2.3 by enforcing strict tool-call object schema (`tool_name` string + `arguments` object), rejecting missing/non-object arguments with explicit reasons, and asserting deterministic generated IDs for calls missing `id`.
 
-### Packages
-- `cmd/openclawssy/` — CLI entrypoints
-- `internal/config/` — config schema, validation, atomic write
-- `internal/agent/` — prompt assembly, run loop, state machine
-- `internal/tools/` — tool registry + implementations
-- `internal/policy/` — capability checks, path guards, redaction rules
-- `internal/sandbox/` — sandbox providers (none/local + roadmap providers)
-- `internal/scheduler/` — cron-like scheduler + persistence
-- `internal/channels/` — cli/http/(discord|telegram)
-- `internal/audit/` — jsonl event log writer, session/run ids, redaction
-- `internal/artifacts/` — markdown artifact writers/readers
+2026-02-17 — PR###: Completed M3.1 by replacing blind think-tag stripping with runtime `ExtractThinking` extraction (`<think>`, `<analysis>`, `<!-- THINK -->`), integrating provider fallback tool-call parsing through extracted visible text, and adding graceful ambiguity handling + unit tests.
 
-### Artifact-first workspace layout
-In repo root (or user-specified workspace):
-- `.openclawssy/agents/<agentId>/`
-  - `SOUL.md` (read-only instructions)
-  - `RULES.md` (read-only guardrails)
-  - `TOOLS.md` (tool notes)
-  - `SPECPLAN.md` (read-only plan)
-  - `DEVPLAN.md` (editable checklist for execution loop)
-  - `HANDOFF.md` (agent-updated status + next steps)
-  - `memory/` (optional, untrusted)
-  - `audit/` (jsonl logs)
-  - `runs/` (per-run bundles: inputs/outputs)
-- `workspace/` (project files; writable root)
+2026-02-17 — PR###: Completed M3.2/M3.3 by adding `output.thinking_mode` config defaulting to `on_error`, wiring `ask --thinking=` override through runtime output formatting, and persisting redacted/truncated thinking metadata into run trace/bundles/audit with tests for success, parse-failure, always-mode, and persistence behavior.
 
----
+2026-02-17 — PR###: Completed M4.1 by adopting role=`tool` session replay in model context, normalizing stored tool payloads into truncated context-safe tool messages, enforcing per-message and total-history truncation caps, updating session policy in `docs/specs/CONTRACTS.md`, and adding runtime tests for inclusion/truncation behavior.
 
-## 7) Parallel Agent Operating Model (How Codex Agents Collaborate)
-You are building this with **multiple parallel agents**. Use this operating model:
+2026-02-17 — PR###: Completed M4.2 by adding cross-process chatstore file locking for session/message writes and active-pointer updates, plus a contention test that writes from multiple store instances and validates `messages.jsonl` remains fully valid JSONL.
 
-### 7.1 Roles (Create one Codex agent per role)
-- **A0 Architect**: writes specs, module boundaries, interfaces, acceptance tests
-- **A1 Core Runner**: run loop + prompt assembly + run state machine
-- **A2 Tools/Policy**: tool registry + fs tools + path/symlink guards + redaction
-- **A3 Sandbox**: sandbox providers + “exec only if sandbox” enforcement
-- **A4 Scheduler**: cron-like scheduler + persistence + tests
-- **A5 Channels**: CLI UX + local HTTP API + one chat connector
-- **A6 Release/CI**: build, lint, test, release packaging, docs
-- **A7 Security**: threat model checks, secure defaults, abuse test cases
+YYYY-MM-DD — PR###: …
 
-### 7.2 Workstream boundaries (avoid merge hell)
-Each agent **owns** specific folders and must not touch others unless required:
-- A1 owns `internal/agent/`, `internal/artifacts/`
-- A2 owns `internal/tools/`, `internal/policy/`, `internal/audit/`
-- A3 owns `internal/sandbox/`
-- A4 owns `internal/scheduler/`
-- A5 owns `internal/channels/`, CLI UX in `cmd/`
-- A6 owns `.github/`, `Makefile`, `docs/`, release scripts
-- A0 owns `docs/specs/`, contracts, and integration checklists
-- A7 owns `docs/security/`, abuse tests, config hardening checks
+YYYY-MM-DD — PR###: …
 
-### 7.3 Contracts first
-Before implementing, A0 must create:
-- `docs/specs/CONTRACTS.md`:
-  - tool interface types
-  - run lifecycle events
-  - audit event schema
-  - scheduler job schema
-  - HTTP endpoint shapes (if any)
-- `docs/specs/ACCEPTANCE.md`:
-  - phase-by-phase acceptance tests
+Milestone 1 — Chat correctness: wire the runner properly (highest priority)
 
-Workers implement against contracts; integrator merges only when contract tests pass.
+Goal: The “chat” system must actually use conversation history, allowed tools, tool timeouts, and tool-call hooks (some of these are currently present in structs but not wired through).
 
-### 7.4 Branching + PR rules
-- Each agent works on a branch: `agent/<role>/<feature>`
-- Every PR must include:
-  - tests for new behavior
-  - updated docs/spec if interface changes
-  - “security impact” note (yes/no)
-- Small PRs preferred (≤ ~500 LOC net when possible)
+- [x] M1.1 Wire RunInput → ModelRequest completely
 
-### 7.5 Integration cadence
-- A0 (or A6) runs daily integration:
-  - merges green PRs
-  - resolves conflicts
-  - updates `HANDOFF.md` with repo status
-- No two agents implement the same interface at once.
-  - If conflict: A0 updates contract; all agents rebase.
+Problem this fixes: Chat/session history + allowed tools may be loaded but not actually used by the model loop.
 
----
+Implementation tasks
 
-## 8) Development Phases (7–10 phases; 3–5 tasks each)
-Each phase ends with:
-- tests passing (`make test`)
-- acceptance checklist updated
-- artifacts updated (`SPECPLAN/DEVPLAN/HANDOFF`)
+ Update internal/agent/runner.go so Model.Generate() receives all required fields, not just Prompt/Message/ToolResults.
 
-### Phase 1 — Repo Bootstrap + Contracts (Owner: A0 + A6)
-1. Create repo skeleton + go module + base Makefile targets:
-   - `make fmt`, `make lint`, `make test`, `make build`
-2. Add initial docs:
-   - `docs/specs/CONTRACTS.md`
-   - `docs/specs/ACCEPTANCE.md`
-   - `docs/security/THREAT_MODEL.md`
-3. Add config schema draft:
-   - `docs/specs/CONFIG.md` (fields, defaults, safety invariants)
+Pass through (at minimum):
 
-**Acceptance**
-- `make test` runs (even if minimal)
-- Contracts exist for tools, runs, audit events, scheduler jobs
+AgentID, RunID
 
----
+Messages (history)
 
-### Phase 2 — Config + Atomic Persistence (Owner: A6 + A2)
-1. Implement config loader:
-   - parse + validate schema
-   - explicit defaults (secure-by-default)
-2. Implement atomic writes:
-   - write temp → fsync → rename
-   - keep last-known-good backup
-3. Add corruption tests:
-   - interrupted write simulation
-   - invalid config error messaging
+SystemPrompt / Prompt (whichever your design uses)
 
-**Acceptance**
-- Config round-trip is stable
-- Corruption tests prove recoverability
+AllowedTools
 
----
+ToolTimeoutMS
 
-### Phase 3 — Core Runner (Owner: A1)
-1. Implement run state machine:
-   - input → assemble prompt → model call → tool calls → finalize
-2. Implement prompt assembly:
-   - deterministic ordering of bootstrap files
-   - size limits per file
-3. Implement run output bundle:
-   - store input, tool calls, final output, timing, token usage (if available)
+ Ensure the model layer (internal/runtime/model.go) actually respects:
 
-**Acceptance**
-- `openclawssy ask "hello"` works (mock provider ok)
-- Run artifacts written to `runs/<runId>/`
+AllowedTools (tool parsing and validation)
 
----
+Messages (conversation)
 
-### Phase 4 — Tool System + Policy Layer (Owner: A2)
-1. Implement tool registry:
-   - tool schema, validation, standardized errors
-2. Implement policy gates:
-   - capabilities per agent
-   - workspace-only write rules
-   - absolute path rules
-   - symlink escape detection
-3. Implement core tools:
-   - fs.read, fs.list, fs.write, fs.edit, code.search
+ Update/confirm tool loop behavior: tool calls should be generated from the model response based on the current prompt + message history, not only the latest user message.
 
-**Acceptance**
-- Path traversal attempts fail
-- Symlink escape attempts fail
-- Tool calls are audited (jsonl)
+Acceptance
 
----
+ Add a test using a mock agent.Model that asserts it received:
 
-### Phase 5 — Audit Logging + Redaction (Owner: A2 + A7)
-1. Implement audit event schema:
-   - run.start, run.end, tool.call, tool.result, policy.denied
-2. Implement secret redaction rules:
-   - env var patterns, token-like strings (configurable)
-3. Add “abuse tests”:
-   - prompt injection tries to exfiltrate → logs show denial and redaction
+the history messages
 
-**Acceptance**
-- Audit logs are append-only JSONL
-- Secrets not printed in cleartext in logs
+the allowed tools list
 
----
+run metadata (agent/run IDs)
 
-### Phase 6 — Sandbox Providers + Exec Gating (Owner: A3 + A7)
-1. Implement sandbox interface:
-   - `Start(runCtx)`, `Exec(cmd)`, `Stop()`
-2. Implement at least two modes:
-   - `none` (no exec allowed)
-   - `local` (exec allowed inside workspace policy boundaries)
-3. Add post-v0.1 provider roadmap items:
-   - `podman`
-   - `gvisor`
-   - `nsjail`
-   - `firecracker`
-4. Enforce invariant:
-   - if sandbox is not active, `shell.exec` tool is disabled
+ Manual: Start a chat session, ask a follow-up question that requires context; verify the model sees prior context.
 
-**Acceptance**
-- With sandbox=none → exec tool unavailable
-- With sandbox=local → exec works, confined to workspace policy boundaries
+- [x] M1.2 Wire OnToolCall so chat can stream tool activity (or record it reliably)
 
----
+Problem this fixes: The runtime prepares an OnToolCall callback, but tool calls may only be appended after the run, meaning chat can’t show incremental progress and some intended behavior is unwired.
 
-### Phase 7 — Scheduler (Cron-lite) (Owner: A4)
-1. Implement job schema:
-   - schedule, agentId, message, mode (isolated/main-like), notify target
-2. Implement persistence:
-   - stable storage (json + atomic writes OR sqlite)
-3. Implement executor:
-   - triggers run at times
-   - writes job-run artifacts + audit events
+Implementation tasks
 
-**Acceptance**
-- Add/list/remove jobs works
-- Scheduler survives restart
-- Missed-job behavior documented and tested
+ In internal/agent/runner.go, invoke input.OnToolCall(record) after each tool execution record is created (or at least after result is known).
 
----
+ Ensure this callback error is handled deterministically:
 
-### Phase 8 — Channels (Owner: A5)
-1. CLI UX polish:
-   - `init`, `ask`, `run`, `serve`, `cron`, `doctor`
-2. HTTP API (minimal):
-   - POST message → starts run
-   - GET run status → returns output + artifacts pointers
-   - auth token required
-   - bind loopback by default
-3. Add ONE chat connector:
-   - allowlist user/room ids
-   - map to agentId
-   - safe rate limiting
+If OnToolCall fails, decide: fail the run vs. log and continue.
 
-**Acceptance**
-- Local HTTP requires token
-- Chat connector ignores non-allowlisted senders
-- End-to-end: message → run → response
+Recommendation: log + continue, but record the failure in run trace/audit.
 
----
+Acceptance
 
-### Phase 9 — Hardening + Packaging + Docs (Owner: A6 + A7)
-1. Add CI:
-   - lint, test, build
-   - minimal SAST checks if available
-2. Produce quickstart:
-   - install, init, first agent, first run, first schedule
-3. Add security docs:
-   - safe deployment notes
-   - “how to run in a small box”
-4. Release artifacts:
-   - binaries (or container), versioning, changelog
+ Unit test: OnToolCall is invoked exactly once per tool call.
 
-**Acceptance**
-- New user can install + run in <10 minutes
-- Security defaults clearly documented
-- Reproducible builds (at least via CI)
+ Manual: In chat mode, trigger a tool call and confirm the session store shows tool events during the run (or immediately after each tool call).
 
----
+- [x] M1.3 Make tool-allowlisting real (and test it)
 
-## 9) Definition of Done (v0.1)
-- CLI works: init/run/ask/serve/cron/doctor
-- Tool system works with policy + audit
-- Sandbox-gated exec works (local provider ok)
-- Scheduler works and survives restart
-- One additional channel works (HTTP or Discord)
-- No marketplace; no agent-controlled config mutation
-- Tests cover policy boundaries and basic workflows
+Problem this fixes: “Allowed tools” should be enforced at two layers:
 
----
+tool parsing (don’t accept calls to tools not allowed)
 
-## 10) “Do Not Bloat” Guardrails (Enforced During Build)
-- Max MVP tools: 8 (new tools require an ADR in `docs/adr/`)
-- Max direct dependencies: keep small; justify each new dep
-- No framework creep: prefer stdlib unless a real need is proven
-- Every feature must ship with:
-  - tests
-  - audit behavior
-  - security consideration note
+tool execution (policy enforcer denies execution)
 
----
+Implementation tasks
 
-## 11) Immediate Next Actions (Kickoff Checklist)
-1) A0: write `docs/specs/CONTRACTS.md` + `docs/specs/ACCEPTANCE.md`
-2) A6: bootstrap repo + Makefile + CI scaffold
-3) A1/A2/A3/A4/A5 start implementation ONLY after contracts land
-4) A7 writes abuse tests in parallel as contracts stabilize
+ In tool parsing, reject tool calls not in AllowedTools (after alias canonicalization).
+
+ Add a clear “tool not allowed” diagnostic (for trace + user-visible error mode).
+
+Acceptance
+
+ Unit test: model output containing shell.exec is rejected when not allowed.
+
+ Manual: Disable exec; attempt to get model to run exec; verify refusal + helpful message.
+
+Milestone 2 — Tool call parsing that doesn’t break under real chat output (highest priority)
+
+Goal: Robustly parse tool calls from model output and make failures debuggable.
+
+- [x] M2.1 Consolidate tool parsing into one module + add diagnostics
+
+Implementation tasks
+
+ Create (or expand) a single entrypoint in internal/toolparse/:
+
+ParseToolCalls(text string, allowedTools []string) (calls []agent.ToolCall, diag ParseDiagnostics)
+
+ Ensure diag includes:
+
+candidate blocks found
+
+rejected blocks with reasons (invalid JSON, missing fields, tool not allowed, etc.)
+
+ Update internal/runtime/model.go to use this single parser (remove/avoid duplicate parsing implementations).
+
+Acceptance
+
+ Unit tests covering:
+
+fenced ```json blocks
+
+inline JSON objects
+
+arrays of tool calls
+
+“almost JSON” cases (see M2.2)
+
+tool aliasing (e.g., bash.exec → shell.exec)
+
+max tool calls per reply cap
+
+- [x] M2.2 Add a “JSON repair” strategy (minimal + safe)
+
+Goal: Recover from common LLM formatting mistakes without accepting dangerous garbage.
+
+Implementation tasks
+
+ Implement small repairs only (do not build a permissive parser that can misinterpret):
+
+strip trailing commas
+
+tolerate code-fence wrappers
+
+trim leading/trailing commentary around a JSON object
+
+ Never “guess” tool names or invent arguments.
+
+ If repair fails, surface a debuggable parse failure:
+
+store diagnostics in trace/artifacts
+
+optionally show a user-facing message: “Tool call malformed; please retry.”
+
+Acceptance
+
+ Tests: trailing comma JSON gets repaired; truly invalid JSON fails with good diagnostics.
+
+- [x] M2.3 Validate tool call schema strictly before execution
+
+Implementation tasks
+
+ Require shape: {"tool_name": "...", "arguments": {...}}
+
+ Ensure arguments is an object (not string).
+
+ If tool call id is missing, generate one deterministically (e.g., call_<runSeq>_<n>).
+
+Acceptance
+
+ Tests: missing args / wrong types are rejected with clear error.
+
+Milestone 3 — “Thinking” visibility when pertinent (highest priority)
+
+Goal: Don’t always strip thinking. Capture it reliably and optionally show it when it helps (e.g., on errors), without cluttering normal output.
+
+- [x] M3.1 Extract thinking instead of blindly stripping it
+
+Implementation tasks
+
+ Replace stripThinkingTags() with an extractor:
+
+ExtractThinking(text) -> { visibleText, thinkingText }
+
+ Support common patterns:
+
+<think>...</think>
+
+<analysis>...</analysis>
+
+(Optional) <!-- THINK --> ... <!-- /THINK -->
+
+ Never delete content you can’t confidently classify; fall back to leaving text intact if parsing is ambiguous.
+
+Acceptance
+
+ Unit tests with:
+
+nested tags (should not crash)
+
+missing closing tags (should degrade gracefully)
+
+mixed content where visible text must remain correct
+
+- [x] M3.2 Add thinking_mode configuration and CLI flags
+
+Recommended behavior: default to on_error.
+
+Implementation tasks
+
+ Add config setting (choose location consistent with your config schema), e.g.:
+
+output.thinking_mode: "never" | "on_error" | "always"
+
+ Add CLI override flag(s):
+
+openclawssy ask --thinking=always
+
+openclawssy serve respects config default
+
+ Update HTTP/Discord/channel formatting to include thinking when enabled.
+
+Acceptance
+
+ Manual:
+
+normal successful run: no thinking shown (default)
+
+tool parse failure: thinking shown (default on_error)
+
+always: thinking always shown
+
+- [x] M3.3 Persist thinking in artifacts + trace
+
+Implementation tasks
+
+ Add fields to run trace snapshot and bundle metadata:
+
+thinking (may be truncated)
+
+thinking_present: true/false
+
+ Ensure secrets redaction is applied to thinking before writing audit/log artifacts.
+
+Acceptance
+
+ Verify run bundles include thinking in the configured mode.
+
+ Verify thinking is redacted.
+
+Milestone 4 — Chat session quality improvements (still high priority)
+
+Goal: Sessions feel coherent, tool results are represented correctly, and storage is resilient.
+
+- [x] M4.1 Decide how tool results appear in conversation history
+
+You have two good options:
+
+Option A (recommended): Store tool results as role="tool" messages and include them in model context (with truncation).
+
+Pros: structured; closer to modern tool-calling semantics
+
+Cons: providers vary in “tool role” support
+
+Option B: Convert tool events into short assistant summaries.
+
+Pros: universal
+
+Cons: less structured
+
+Implementation tasks
+
+ Pick A or B and document it in docs/specs/CONTRACTS.md.
+
+ Ensure Engine.loadSessionMessages() includes the right message types for your choice.
+
+ Add truncation limits (per-message and per-history) so tool output doesn’t explode context.
+
+Acceptance
+
+ Manual: Ask the agent to do a multi-step task; confirm it remembers tool outputs appropriately.
+
+- [x] M4.2 Make chatstore safe across processes
+
+Problem: Current chatstore uses a process-local mutex; multi-process writes can corrupt JSONL.
+
+Implementation tasks
+
+ Add a cross-process lock (directory/file lock) around:
+
+appending to messages.jsonl
+
+writing meta.json
+
+writing _active pointers
+
+ Keep dependencies minimal:
+
+either implement flock with build tags
+
+or use a tiny lock dependency (if acceptable)
+
+Acceptance
+
+ Add an integration test that spawns concurrent writers (or simulates contention) and verifies JSONL remains valid.
+
+Milestone 5 — Tool execution reliability & UX (important, after chat correctness)
+
+Goal: When tools fail, users get actionable output, and the system avoids runaway resource usage.
+
+M5.1 Respect ToolTimeoutMS
+
+Implementation tasks
+
+ Wrap tool execution in context.WithTimeout using ToolTimeoutMS.
+
+ Ensure timeout becomes a structured tool error (and is audited).
+
+Acceptance
+
+ Test: a tool that sleeps past timeout is cancelled and returns a timeout error.
+
+M5.2 Improve tool error reporting + schema consistency
+
+Implementation tasks
+
+ Align tool errors with your documented canonical codes (and keep mapping stable).
+
+ Ensure tool result payloads are machine-readable for chat rendering (especially the tool summaries).
+
+Acceptance
+
+ Tests: invalid input → tool.input_invalid (or your canonical equivalent)
+
+ Manual: tool error shows a short summary + details in debug mode.
+
+M5.3 Fix small correctness bugs in trace summarization
+
+Implementation tasks
+
+ Fix duplicated conditions in summarizeToolExecution() / intValue() logic.
+
+ Add tests for summarization output format.
+
+Acceptance
+
+ Unit test: shell.exec fallback summarization works.
+
+ Unit test: intValue() parses numbers correctly.
+
+Milestone 6 — Security & sandboxing (important, but after chat/tool stability)
+
+Goal: Don’t claim sandboxing that isn’t real; make “safe defaults” actually safe.
+
+M6.1 Resolve Docker sandbox stub (implement or remove)
+
+Implementation tasks
+
+ Choose one:
+
+Implement docker provider minimally (mount workspace, run command, capture stdout/stderr, apply resource limits)
+
+Or remove docker from config defaults/docs until implemented
+
+ Ensure shell.exec behavior is consistent:
+
+if sandbox provider requested but unavailable → error clearly (sandbox.unavailable)
+
+never silently fall back to unsafe execution
+
+Acceptance
+
+ Manual: sandbox=docker with docker missing yields a clear error and shell.exec remains disabled.
+
+M6.2 Align server bind defaults with secure posture
+
+Implementation tasks
+
+ Ensure default bind is loopback unless explicitly overridden.
+
+ Ensure dashboard/admin endpoints are clearly protected by token and disabled if desired.
+
+Acceptance
+
+ Manual: default config binds to 127.0.0.1 only.
+
+Milestone 7 — Scheduler correctness vs. spec (later)
+
+Goal: Match spec expectations (cron-like scheduling, persistence, restart behavior).
+
+M7.1 Add cron expression support (or update spec to match reality)
+
+Implementation tasks
+
+ Either:
+
+implement cron parsing (library or minimal parser)
+
+or update docs/specs to explicitly state only @every + one-shot are supported
+
+ Add persistence and restart correctness tests.
+
+Milestone 8 — Performance & observability (later)
+
+Goal: Make it easier to debug and cheaper to run.
+
+M8.1 Improve audit logger performance safely
+
+Implementation tasks
+
+ Avoid open/close/fsync on every single event (buffer with periodic flush).
+
+ Preserve durability requirements (flush on run end; bounded buffering).
+
+“Done” Definition for v0.2
+
+Mark v0.2 complete when all are true:
+
+ Chat sessions actually influence model output (history is wired end-to-end).
+
+ Tool call parsing is robust, tested, and diagnostics are stored in trace/artifacts.
+
+ Tool allowlist is enforced at parse-time and exec-time.
+
+ “Thinking” can be captured and shown in on_error mode (default) + optionally always.
+
+ Tool calls can be streamed/recorded via OnToolCall.
+
+ Chatstore is safe against cross-process corruption (locking + tests).
+
+ Docker sandbox situation is resolved (implemented or removed), no misleading config.
+
+Suggested PR Order (so progress stays visible)
+
+PR1: Runner wiring (M1.1) + tests
+
+PR2: OnToolCall wiring (M1.2) + tests
+
+PR3: Consolidated tool parser + diagnostics scaffold (M2.1) + tests
+
+PR4: Strict schema validation + allowlist enforcement (M2.3/M1.3)
+
+PR5: Thinking extraction + thinking_mode (M3.1/M3.2)
+
+PR6: Persist thinking in artifacts/trace + redaction (M3.3)
+
+PR7: Session history tool message policy + truncation (M4.1)
+
+PR8: Chatstore cross-process locking + tests (M4.2)
+
+PR9+: Tool timeout enforcement + tool error shaping (M5.1/M5.2)
+
+PR10+: Docker sandbox decision (M6.1) + secure defaults (M6.2)

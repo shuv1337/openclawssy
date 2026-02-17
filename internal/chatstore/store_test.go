@@ -1,9 +1,12 @@
 package chatstore
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -168,6 +171,83 @@ func TestAppendMessageConcurrent(t *testing.T) {
 	}
 	if len(msgs) != n {
 		t.Fatalf("expected %d messages, got %d", n, len(msgs))
+	}
+}
+
+func TestAppendMessageConcurrentAcrossStoreInstancesKeepsJSONLValid(t *testing.T) {
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	const (
+		writers   = 10
+		perWriter = 25
+	)
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, writers)
+	for writer := 0; writer < writers; writer++ {
+		writer := writer
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			writerStore, err := NewStore(agentsRoot)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			for i := 0; i < perWriter; i++ {
+				msg := Message{Role: "user", Content: fmt.Sprintf("writer-%d-message-%d", writer, i)}
+				if err := writerStore.AppendMessage(session.SessionID, msg); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Fatalf("concurrent append failed: %v", err)
+	}
+
+	expected := writers * perWriter
+	msgPath := filepath.Join(agentsRoot, "default", "memory", "chats", session.SessionID, "messages.jsonl")
+	raw, err := os.ReadFile(msgPath)
+	if err != nil {
+		t.Fatalf("read messages file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != expected {
+		t.Fatalf("expected %d jsonl lines, got %d", expected, len(lines))
+	}
+	for i, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			t.Fatalf("unexpected empty line at %d", i)
+		}
+		var msg Message
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			t.Fatalf("invalid jsonl line %d: %v", i, err)
+		}
+		if strings.TrimSpace(msg.Content) == "" {
+			t.Fatalf("missing message content at line %d", i)
+		}
+	}
+
+	recent, err := store.ReadRecentMessages(session.SessionID, expected)
+	if err != nil {
+		t.Fatalf("read recent messages: %v", err)
+	}
+	if len(recent) != DefaultMaxHistoryCount {
+		t.Fatalf("expected clamped readable messages count %d, got %d", DefaultMaxHistoryCount, len(recent))
 	}
 }
 

@@ -91,6 +91,53 @@ func TestRunnerBasicLoopWithTools(t *testing.T) {
 	}
 }
 
+func TestRunnerPassesRunMetadataAndContextToModelRequests(t *testing.T) {
+	history := []ChatMessage{
+		{Role: "user", Content: "first question"},
+		{Role: "assistant", Content: "first answer"},
+		{Role: "user", Content: "follow-up"},
+	}
+	allowedTools := []string{"fs.list", "fs.read"}
+
+	model := &mockModel{responses: []ModelResponse{{FinalText: "done"}}}
+	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 2}
+
+	input := RunInput{
+		AgentID:       "agent-chat",
+		RunID:         "run-42",
+		Message:       "latest user message",
+		Messages:      history,
+		AllowedTools:  allowedTools,
+		ToolTimeoutMS: 7777,
+	}
+	out, err := runner.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(model.reqs) != 1 {
+		t.Fatalf("expected one model request, got %d", len(model.reqs))
+	}
+	req := model.reqs[0]
+	if req.AgentID != input.AgentID || req.RunID != input.RunID {
+		t.Fatalf("expected run metadata to pass through, got agent=%q run=%q", req.AgentID, req.RunID)
+	}
+	if req.ToolTimeoutMS != input.ToolTimeoutMS {
+		t.Fatalf("expected tool timeout to pass through, got %d", req.ToolTimeoutMS)
+	}
+	if len(req.Messages) != len(history) {
+		t.Fatalf("expected %d history messages, got %d", len(history), len(req.Messages))
+	}
+	if req.Messages[0].Content != history[0].Content || req.Messages[2].Content != history[2].Content {
+		t.Fatalf("expected history messages to be forwarded unchanged, got %+v", req.Messages)
+	}
+	if len(req.AllowedTools) != len(allowedTools) || req.AllowedTools[0] != allowedTools[0] || req.AllowedTools[1] != allowedTools[1] {
+		t.Fatalf("expected allowed tools to pass through, got %#v", req.AllowedTools)
+	}
+}
+
 func TestRunnerToolIterationCap(t *testing.T) {
 	model := &mockModel{
 		responses: []ModelResponse{
@@ -243,7 +290,14 @@ func TestRunnerFinalizesWithModelWhenToolCapReached(t *testing.T) {
 	}}
 
 	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 1}
-	out, err := runner.Run(context.Background(), RunInput{Message: "run nmap on localhost"})
+	out, err := runner.Run(context.Background(), RunInput{
+		AgentID:       "agent-red",
+		RunID:         "run-cap-1",
+		Message:       "run nmap on localhost",
+		Messages:      []ChatMessage{{Role: "user", Content: "scan localhost"}},
+		AllowedTools:  []string{"shell.exec", "fs.read"},
+		ToolTimeoutMS: 2500,
+	})
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
@@ -255,6 +309,15 @@ func TestRunnerFinalizesWithModelWhenToolCapReached(t *testing.T) {
 	}
 	if len(model.reqs[2].AllowedTools) != 0 {
 		t.Fatalf("expected finalize request to disable tools, got %#v", model.reqs[2].AllowedTools)
+	}
+	if model.reqs[2].AgentID != "agent-red" || model.reqs[2].RunID != "run-cap-1" {
+		t.Fatalf("expected finalize request to preserve run metadata, got agent=%q run=%q", model.reqs[2].AgentID, model.reqs[2].RunID)
+	}
+	if model.reqs[2].ToolTimeoutMS != 2500 {
+		t.Fatalf("expected finalize request timeout passthrough, got %d", model.reqs[2].ToolTimeoutMS)
+	}
+	if len(model.reqs[2].Messages) != 1 || model.reqs[2].Messages[0].Content != "scan localhost" {
+		t.Fatalf("expected finalize request to include message history, got %+v", model.reqs[2].Messages)
 	}
 }
 
@@ -353,6 +416,41 @@ func TestRunnerInvokesOnToolCallForEachRecord(t *testing.T) {
 	}
 	if notifications[0].Request.Name != "fs.list" || notifications[1].Request.Name != "fs.read" {
 		t.Fatalf("unexpected notification order: %+v", notifications)
+	}
+}
+
+func TestRunnerContinuesWhenOnToolCallReturnsError(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "tool-1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "tool-2", Name: "fs.read", Arguments: []byte(`{"path":"README.md"}`)}}},
+		{FinalText: "done"},
+	}}
+	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 8}
+
+	callbackCalls := 0
+	out, err := runner.Run(context.Background(), RunInput{
+		Message: "inspect project",
+		OnToolCall: func(rec ToolCallRecord) error {
+			callbackCalls++
+			return errors.New("chatstore append failed for " + rec.Request.ID)
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected callback failures to be non-fatal, got %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected two tool calls, got %d", len(out.ToolCalls))
+	}
+	if callbackCalls != 2 {
+		t.Fatalf("expected callback invoked once per record, got %d", callbackCalls)
+	}
+	for _, rec := range out.ToolCalls {
+		if !strings.Contains(rec.CallbackErr, "chatstore append failed") {
+			t.Fatalf("expected callback error captured in record, got %+v", rec)
+		}
 	}
 }
 

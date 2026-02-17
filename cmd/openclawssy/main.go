@@ -196,7 +196,7 @@ func (s askService) Ask(ctx context.Context, input cli.AskInput) (string, error)
 	if s.engine == nil {
 		return "", errors.New("runtime engine is not configured")
 	}
-	res, err := s.engine.Execute(ctx, input.AgentID, input.Message)
+	res, err := s.engine.ExecuteWithInput(ctx, runtime.ExecuteInput{AgentID: input.AgentID, Message: input.Message, ThinkingMode: input.ThinkingMode})
 	if err != nil {
 		return "", err
 	}

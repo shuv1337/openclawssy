@@ -231,6 +231,22 @@ Notes:
 - `session_id` is included when the request is associated with a persisted chat session.
 - Command-style chat requests (for example `/new`, `/resume`) may return `200` with an immediate `response` message and optional `session_id` instead of queueing a run.
 
+## 6) Chat Session Context Policy
+
+For model context reconstruction from persisted chat history, v0.2 uses **Option A**:
+- Tool executions are stored and replayed as `role="tool"` messages.
+- Tool messages are normalized into concise context text (`tool <name> result (<id>)` + summary/error/output excerpt).
+- Tool payloads are never passed back verbatim at full size.
+
+Session truncation rules before model invocation:
+- Per-message cap: `1400` characters.
+- Tool-specific caps inside a tool message:
+  - `summary`: `220` chars
+  - `error`: `320` chars
+  - `output` excerpt: `1000` chars
+- Total session-context cap (sum of message content): `12000` characters.
+- When over budget, oldest messages are dropped first so the latest turns (including recent tool results) are retained.
+
 ### Dashboard Admin APIs (token-auth)
 - `GET /api/admin/status` -> run list + selected model/provider status
 - `GET /api/admin/config` -> config with sensitive value fields blanked

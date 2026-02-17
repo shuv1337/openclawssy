@@ -41,9 +41,44 @@ func TestRecordToolExecutionAddsSummaryToTrace(t *testing.T) {
 	}
 }
 
+func TestRecordToolExecutionIncludesCallbackErrorInTrace(t *testing.T) {
+	collector := newRunTraceCollector("run_2", "session_2", "dashboard", "list files")
+	collector.RecordToolExecution([]agent.ToolCallRecord{{
+		Request:     agent.ToolCallRequest{ID: "tool-json-2", Name: "fs.list", Arguments: []byte(`{"path":"."}`)},
+		Result:      agent.ToolCallResult{ID: "tool-json-2", Output: `{"entries":["README.md"]}`},
+		CallbackErr: "runtime: append tool message: permission denied",
+	}})
+
+	snapshot := collector.Snapshot()
+	items, ok := snapshot["tool_execution_results"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one tool trace item, got %#v", snapshot["tool_execution_results"])
+	}
+	entry, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected trace entry shape: %#v", items[0])
+	}
+	if entry["callback_error"] != "runtime: append tool message: permission denied" {
+		t.Fatalf("expected callback_error in trace entry, got %#v", entry)
+	}
+}
+
 func TestSummarizeToolExecutionShellFallback(t *testing.T) {
 	summary := summarizeToolExecution("shell.exec", `{"stdout":"ok","stderr":"","exit_code":0,"shell_fallback":"sh"}`, "")
 	if summary != "shell command completed via sh fallback (exit 0)" {
 		t.Fatalf("unexpected summary: %q", summary)
+	}
+}
+
+func TestRecordThinkingPersistsThinkingFields(t *testing.T) {
+	collector := newRunTraceCollector("run_3", "session_3", "dashboard", "hello")
+	collector.RecordThinking("redacted notes", true)
+
+	snapshot := collector.Snapshot()
+	if snapshot["thinking"] != "redacted notes" {
+		t.Fatalf("expected thinking in trace snapshot, got %#v", snapshot["thinking"])
+	}
+	if snapshot["thinking_present"] != true {
+		t.Fatalf("expected thinking_present=true, got %#v", snapshot["thinking_present"])
 	}
 }

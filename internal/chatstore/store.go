@@ -19,6 +19,8 @@ var ErrSessionNotFound = errors.New("chatstore: session not found")
 
 const DefaultMaxHistoryCount = 200
 
+const lockAcquireTimeout = 5 * time.Second
+
 type Store struct {
 	agentsRoot string
 
@@ -109,14 +111,20 @@ func (s *Store) CreateSession(in CreateSessionInput) (Session, error) {
 	defer s.mu.Unlock()
 
 	dir := s.sessionDir(in.AgentID, sessionID)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return Session{}, fmt.Errorf("chatstore: create session dir: %w", err)
-	}
-	if err := writeJSONFile(filepath.Join(dir, "meta.json"), session); err != nil {
+	lockPath := filepath.Join(s.chatRoot(in.AgentID), ".chatstore.lock")
+	if err := withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("chatstore: create session dir: %w", err)
+		}
+		if err := writeJSONFile(filepath.Join(dir, "meta.json"), session); err != nil {
+			return err
+		}
+		if err := ensureFile(filepath.Join(dir, "messages.jsonl"), 0o600); err != nil {
+			return fmt.Errorf("chatstore: init messages file: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return Session{}, err
-	}
-	if err := ensureFile(filepath.Join(dir, "messages.jsonl"), 0o600); err != nil {
-		return Session{}, fmt.Errorf("chatstore: init messages file: %w", err)
 	}
 	s.index[sessionID] = dir
 	return session, nil
@@ -201,35 +209,38 @@ func (s *Store) AppendMessage(sessionID string, msg Message) error {
 		return err
 	}
 
-	line, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("chatstore: marshal message: %w", err)
-	}
+	lockPath := filepath.Join(dir, ".chatstore.lock")
+	return withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		line, err := json.Marshal(msg)
+		if err != nil {
+			return fmt.Errorf("chatstore: marshal message: %w", err)
+		}
 
-	msgPath := filepath.Join(dir, "messages.jsonl")
-	f, err := os.OpenFile(msgPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("chatstore: open messages file: %w", err)
-	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("chatstore: append message: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("chatstore: close messages file: %w", err)
-	}
+		msgPath := filepath.Join(dir, "messages.jsonl")
+		f, err := os.OpenFile(msgPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("chatstore: open messages file: %w", err)
+		}
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("chatstore: append message: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("chatstore: close messages file: %w", err)
+		}
 
-	metaPath := filepath.Join(dir, "meta.json")
-	session, err := readSessionMeta(metaPath)
-	if err != nil {
-		return err
-	}
-	if msg.TS.After(session.UpdatedAt) {
-		session.UpdatedAt = msg.TS
-	} else {
-		session.UpdatedAt = time.Now().UTC()
-	}
-	return writeJSONFile(metaPath, session)
+		metaPath := filepath.Join(dir, "meta.json")
+		session, err := readSessionMeta(metaPath)
+		if err != nil {
+			return err
+		}
+		if msg.TS.After(session.UpdatedAt) {
+			session.UpdatedAt = msg.TS
+		} else {
+			session.UpdatedAt = time.Now().UTC()
+		}
+		return writeJSONFile(metaPath, session)
+	})
 }
 
 func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, error) {
@@ -327,7 +338,9 @@ func (s *Store) SetActiveSessionPointer(agentID, channel, userID, roomID, sessio
 
 	path := s.activePointerPath(agentID, channel, userID, roomID)
 	payload := map[string]string{"session_id": sessionID}
-	return writeJSONFile(path, payload)
+	return withCrossProcessLock(path+".lock", lockAcquireTimeout, func() error {
+		return writeJSONFile(path, payload)
+	})
 }
 
 func (s *Store) GetActiveSessionPointer(agentID, channel, userID, roomID string) (string, error) {

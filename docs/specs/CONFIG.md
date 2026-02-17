@@ -51,6 +51,9 @@ Provider API key env defaults:
     "tls_key_file": ".openclawssy/certs/server.key",
     "dashboard_enabled": true
   },
+  "output": {
+    "thinking_mode": "on_error"
+  },
   "workspace": {
     "root": "./workspace"
   },
@@ -120,3 +123,8 @@ Provider API key env defaults:
 - `model.max_tokens` is validated in the range `1..20000`.
 - Runtime enforces this cap on provider requests.
 - Long chat history is compacted by runtime before context exhaustion.
+
+## Output Notes
+- `output.thinking_mode` supports: `never`, `on_error`, `always`.
+- Default is `on_error`.
+- CLI `ask` supports per-call override: `openclawssy ask --thinking=always ...`.

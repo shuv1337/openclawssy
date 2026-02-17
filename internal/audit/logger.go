@@ -10,14 +10,15 @@ import (
 )
 
 const (
-	EventRunStart    = "run.start"
-	EventRunEnd      = "run.end"
-	EventToolCall    = "tool.call"
-	EventToolResult  = "tool.result"
-	EventPolicyDeny  = "policy.denied"
-	defaultFileMode  = 0o600
-	defaultDirMode   = 0o755
-	defaultLineBreak = '\n'
+	EventRunStart          = "run.start"
+	EventRunEnd            = "run.end"
+	EventToolCall          = "tool.call"
+	EventToolResult        = "tool.result"
+	EventToolCallbackError = "tool.callback_error"
+	EventPolicyDeny        = "policy.denied"
+	defaultFileMode        = 0o600
+	defaultDirMode         = 0o755
+	defaultLineBreak       = '\n'
 )
 
 type Event struct {

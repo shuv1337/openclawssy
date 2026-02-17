@@ -15,12 +15,40 @@ type Config struct {
 	Shell     ShellConfig     `json:"shell"`
 	Sandbox   SandboxConfig   `json:"sandbox"`
 	Server    ServerConfig    `json:"server"`
+	Output    OutputConfig    `json:"output"`
 	Workspace WorkspaceConfig `json:"workspace"`
 	Model     ModelConfig     `json:"model"`
 	Providers ProvidersConfig `json:"providers"`
 	Chat      ChatConfig      `json:"chat"`
 	Discord   DiscordConfig   `json:"discord"`
 	Secrets   SecretsConfig   `json:"secrets"`
+}
+
+const (
+	ThinkingModeNever   = "never"
+	ThinkingModeOnError = "on_error"
+	ThinkingModeAlways  = "always"
+)
+
+type OutputConfig struct {
+	ThinkingMode string `json:"thinking_mode"`
+}
+
+func NormalizeThinkingMode(mode string) string {
+	value := strings.ToLower(strings.TrimSpace(mode))
+	if value == "" {
+		return ThinkingModeOnError
+	}
+	return value
+}
+
+func IsValidThinkingMode(mode string) bool {
+	switch NormalizeThinkingMode(mode) {
+	case ThinkingModeNever, ThinkingModeOnError, ThinkingModeAlways:
+		return true
+	default:
+		return false
+	}
 }
 
 type NetworkConfig struct {
@@ -118,6 +146,9 @@ func Default() Config {
 			TLSKeyFile:  ".openclawssy/certs/server.key",
 			Dashboard:   true,
 		},
+		Output: OutputConfig{
+			ThinkingMode: ThinkingModeOnError,
+		},
 		Workspace: WorkspaceConfig{
 			Root: "./workspace",
 		},
@@ -181,6 +212,11 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Workspace.Root == "" {
 		c.Workspace.Root = d.Workspace.Root
+	}
+	if strings.TrimSpace(c.Output.ThinkingMode) == "" {
+		c.Output.ThinkingMode = d.Output.ThinkingMode
+	} else {
+		c.Output.ThinkingMode = NormalizeThinkingMode(c.Output.ThinkingMode)
 	}
 	if c.Server.TLSCertFile == "" {
 		c.Server.TLSCertFile = d.Server.TLSCertFile
@@ -264,6 +300,10 @@ func (c Config) Validate() error {
 
 	if strings.TrimSpace(c.Workspace.Root) == "" {
 		return errors.New("workspace.root cannot be empty")
+	}
+
+	if !IsValidThinkingMode(c.Output.ThinkingMode) {
+		return fmt.Errorf("output.thinking_mode must be one of never|on_error|always")
 	}
 
 	for _, d := range c.Network.AllowedDomains {

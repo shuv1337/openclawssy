@@ -191,24 +191,29 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 
 	content := strings.TrimSpace(payload.Choices[0].Message.Content)
 	trace := runTraceCollectorFromContext(ctx)
+	visibleText, thinkingText, thinkingPresent := ExtractThinking(content)
 
-	// Check if the model's response contains tool calls in JSON blocks.
-	toolCalls := parseToolCallsFromResponse(content, req.AllowedTools, trace)
-	if len(toolCalls) == 0 {
-		toolCalls = parseLooseJSONToolCalls(content, req.AllowedTools, trace)
-	}
-	if len(toolCalls) == 0 {
-		stripped := stripThinkingTags(content)
-		toolCalls = parseToolCallsFromResponse(stripped, req.AllowedTools, trace)
-		if len(toolCalls) == 0 {
-			toolCalls = parseLooseJSONToolCalls(stripped, req.AllowedTools, trace)
-		}
+	// Check if the model's response contains tool calls.
+	toolCalls, parseFailure := parseToolCallsFromResponse(content, req.AllowedTools, trace)
+	if len(toolCalls) == 0 && thinkingPresent {
+		var visibleParseFailure bool
+		toolCalls, visibleParseFailure = parseToolCallsFromResponse(visibleText, req.AllowedTools, trace)
+		parseFailure = parseFailure || visibleParseFailure
 	}
 	if len(toolCalls) > 0 {
-		return agent.ModelResponse{ToolCalls: toolCalls}, nil
+		return agent.ModelResponse{
+			ToolCalls:       toolCalls,
+			Thinking:        thinkingText,
+			ThinkingPresent: thinkingPresent,
+		}, nil
 	}
 
-	return agent.ModelResponse{FinalText: stripThinkingTags(content)}, nil
+	return agent.ModelResponse{
+		FinalText:        visibleText,
+		Thinking:         thinkingText,
+		ThinkingPresent:  thinkingPresent,
+		ToolParseFailure: parseFailure,
+	}, nil
 }
 
 func (m *ProviderModel) doChatCompletionWithRetry(ctx context.Context, raw []byte, payload any) (int, error) {
@@ -559,12 +564,110 @@ func toolResultsText(results []agent.ToolCallResult) string {
 	return strings.TrimSpace(b.String())
 }
 
-func stripThinkingTags(s string) string {
-	block := regexp.MustCompile(`(?is)<think>.*?</think>`)
-	s = block.ReplaceAllString(s, "")
-	marker := regexp.MustCompile(`(?i)</?think>`)
-	s = marker.ReplaceAllString(s, "")
-	return strings.TrimSpace(s)
+func ExtractThinking(text string) (visibleText, thinkingText string, thinkingPresent bool) {
+	type markerPair struct {
+		open  string
+		close string
+	}
+
+	markerPairs := []markerPair{
+		{open: "<think>", close: "</think>"},
+		{open: "<analysis>", close: "</analysis>"},
+		{open: "<!-- think -->", close: "<!-- /think -->"},
+	}
+
+	lower := strings.ToLower(text)
+	for _, pair := range markerPairs {
+		if strings.Contains(lower, pair.open) || strings.Contains(lower, pair.close) {
+			thinkingPresent = true
+			break
+		}
+	}
+
+	if text == "" {
+		return "", "", thinkingPresent
+	}
+
+	var visible strings.Builder
+	segments := make([]string, 0, 2)
+	pos := 0
+
+	for pos < len(text) {
+		nextStart := -1
+		nextOpen := ""
+		nextClose := ""
+
+		for _, pair := range markerPairs {
+			idx := strings.Index(lower[pos:], pair.open)
+			if idx < 0 {
+				continue
+			}
+			abs := pos + idx
+			if nextStart == -1 || abs < nextStart {
+				nextStart = abs
+				nextOpen = pair.open
+				nextClose = pair.close
+			}
+		}
+
+		if nextStart < 0 {
+			visible.WriteString(text[pos:])
+			break
+		}
+
+		visible.WriteString(text[pos:nextStart])
+		innerStart := nextStart + len(nextOpen)
+		cursor := innerStart
+		depth := 1
+
+		for cursor <= len(text) {
+			openIdx := strings.Index(lower[cursor:], nextOpen)
+			closeIdx := strings.Index(lower[cursor:], nextClose)
+
+			if closeIdx < 0 {
+				depth = -1
+				break
+			}
+
+			openAbs := -1
+			if openIdx >= 0 {
+				openAbs = cursor + openIdx
+			}
+			closeAbs := cursor + closeIdx
+
+			if openAbs >= 0 && openAbs < closeAbs {
+				depth++
+				cursor = openAbs + len(nextOpen)
+				continue
+			}
+
+			depth--
+			if depth == 0 {
+				segment := strings.TrimSpace(text[innerStart:closeAbs])
+				if segment != "" {
+					segments = append(segments, segment)
+				}
+				pos = closeAbs + len(nextClose)
+				break
+			}
+			cursor = closeAbs + len(nextClose)
+		}
+
+		if depth != 0 {
+			visible.WriteString(text[nextStart:])
+			break
+		}
+	}
+
+	cleanVisible := visible.String()
+	marker := regexp.MustCompile(`(?is)</?think>|</?analysis>|<!--\s*/?\s*think\s*-->`)
+	cleanVisible = marker.ReplaceAllString(cleanVisible, "")
+
+	if len(segments) > 0 {
+		thinkingText = strings.Join(segments, "\n\n")
+	}
+
+	return strings.TrimSpace(cleanVisible), strings.TrimSpace(thinkingText), thinkingPresent
 }
 
 func parseToolDirective(message string, allowedTools []string) (agent.ModelResponse, error) {
@@ -590,14 +693,18 @@ func parseToolDirective(message string, allowedTools []string) (agent.ModelRespo
 	return agent.ModelResponse{ToolCalls: []agent.ToolCallRequest{{ID: "tool-1", Name: toolName, Arguments: argBytes}}}, nil
 }
 
-func parseToolCallsFromResponse(content string, allowedTools []string, trace *runTraceCollector) []agent.ToolCallRequest {
-	parsed := toolparse.ParseStrict(content, allowedTools, maxToolCallsPerReply)
+func parseToolCallsFromResponse(content string, allowedTools []string, trace *runTraceCollector) ([]agent.ToolCallRequest, bool) {
+	parsedCalls, diag := toolparse.ParseToolCalls(content, allowedTools)
+	if len(parsedCalls) > maxToolCallsPerReply {
+		parsedCalls = parsedCalls[:maxToolCallsPerReply]
+	}
 	if trace != nil {
-		for _, extraction := range parsed.Extractions {
+		for _, extraction := range diag.Candidates {
 			trace.RecordToolExtraction(extraction.RawSnippet, extraction.ParsedToolName, extraction.ParsedArguments, extraction.Accepted, extraction.Reason)
 		}
 	}
-	return parsed.Calls
+	parseFailure := len(parsedCalls) == 0 && len(diag.Rejected) > 0
+	return parsedCalls, parseFailure
 }
 
 func parseLooseJSONToolCalls(content string, allowedTools []string, trace *runTraceCollector) []agent.ToolCallRequest {

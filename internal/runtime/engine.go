@@ -41,11 +41,22 @@ type RunResult struct {
 }
 
 type ExecuteInput struct {
-	AgentID   string
-	Message   string
-	Source    string
-	SessionID string
+	AgentID      string
+	Message      string
+	Source       string
+	SessionID    string
+	ThinkingMode string
 }
+
+const (
+	maxPersistedThinkingChars   = 700
+	maxSessionContextChars      = 12000
+	maxSessionMessageChars      = 1400
+	maxSessionToolSummaryChars  = 220
+	maxSessionToolOutputChars   = 1000
+	maxSessionToolErrorChars    = 320
+	maxSessionContextMessageCap = 200
+)
 
 func NewEngine(rootDir string) (*Engine, error) {
 	if rootDir == "" {
@@ -134,6 +145,13 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	cfg, err := config.LoadOrDefault(filepath.Join(e.rootDir, ".openclawssy", "config.json"))
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runtime: load config: %w", err)
+	}
+	thinkingMode := config.NormalizeThinkingMode(cfg.Output.ThinkingMode)
+	if strings.TrimSpace(in.ThinkingMode) != "" {
+		if !config.IsValidThinkingMode(in.ThinkingMode) {
+			return RunResult{}, fmt.Errorf("runtime: invalid thinking mode %q", in.ThinkingMode)
+		}
+		thinkingMode = config.NormalizeThinkingMode(in.ThinkingMode)
 	}
 
 	runID := fmt.Sprintf("run_%d", time.Now().UTC().UnixNano())
@@ -245,6 +263,8 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	})
 
 	artifactPath := ""
+	persistedThinking, thinkingPresent := sanitizedPersistedThinking(out.Thinking, out.ThinkingPresent)
+	includeThinking := shouldIncludeThinking(thinkingMode, runErr != nil, out.ToolParseFailure, thinkingPresent)
 	if runErr == nil {
 		durationMS := time.Since(start).Milliseconds()
 		toolCount := len(out.ToolCalls)
@@ -258,21 +278,28 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 			toolLines = append(toolLines, string(b))
 		}
 		if runErr == nil {
+			finalOutput := out.FinalText
+			if includeThinking {
+				finalOutput = formatFinalOutputWithThinking(finalOutput, persistedThinking)
+			}
 			artifactPath, err = artifacts.WriteRunBundleV1(e.rootDir, agentID, runID, artifacts.BundleV1Input{
 				Input:     map[string]any{"agent_id": agentID, "message": message},
 				PromptMD:  out.Prompt,
 				ToolCalls: toolLines,
-				OutputMD:  out.FinalText,
+				OutputMD:  finalOutput,
 				Meta: map[string]any{
-					"started_at":      out.StartedAt,
-					"completed_at":    out.CompletedAt,
-					"duration_ms":     durationMS,
-					"tool_call_count": toolCount,
-					"provider":        model.ProviderName(),
-					"model":           model.ModelName(),
+					"started_at":       out.StartedAt,
+					"completed_at":     out.CompletedAt,
+					"duration_ms":      durationMS,
+					"tool_call_count":  toolCount,
+					"provider":         model.ProviderName(),
+					"model":            model.ModelName(),
+					"thinking":         persistedThinking,
+					"thinking_present": thinkingPresent,
 				},
 				MirrorJSON: true,
 			})
+			out.FinalText = finalOutput
 		}
 		if err != nil {
 			runErr = err
@@ -283,6 +310,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 			}
 		}
 	}
+	logToolCallbackFailures(ctx, aud, runID, agentID, out.ToolCalls, source, sessionID)
 
 	fields := map[string]any{"run_id": runID, "agent_id": agentID}
 	if source != "" {
@@ -296,12 +324,18 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	} else {
 		fields["artifact_path"] = artifactPath
 	}
+	fields["thinking"] = persistedThinking
+	fields["thinking_present"] = thinkingPresent
 	_ = aud.LogEvent(ctx, audit.EventRunEnd, fields)
 
+	traceCollector.RecordThinking(persistedThinking, thinkingPresent)
 	traceCollector.RecordToolExecution(out.ToolCalls)
 	traceSnapshot := traceCollector.Snapshot()
 
 	if runErr != nil {
+		if includeThinking {
+			runErr = fmt.Errorf("%w\n\nThinking:\n%s", runErr, persistedThinking)
+		}
 		return RunResult{
 			RunID:        runID,
 			ArtifactPath: artifactPath,
@@ -325,25 +359,82 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	}, nil
 }
 
+func shouldIncludeThinking(mode string, runError bool, parseFailure bool, thinkingPresent bool) bool {
+	if !thinkingPresent {
+		return false
+	}
+	switch config.NormalizeThinkingMode(mode) {
+	case config.ThinkingModeAlways:
+		return true
+	case config.ThinkingModeOnError:
+		return runError || parseFailure
+	default:
+		return false
+	}
+}
+
+func sanitizedPersistedThinking(thinking string, present bool) (string, bool) {
+	present = present || strings.TrimSpace(thinking) != ""
+	if !present {
+		return "", false
+	}
+	redacted := policy.RedactString(strings.TrimSpace(thinking))
+	if len(redacted) > maxPersistedThinkingChars {
+		redacted = strings.TrimSpace(redacted[:maxPersistedThinkingChars]) + "..."
+	}
+	return redacted, true
+}
+
+func formatFinalOutputWithThinking(finalText, thinking string) string {
+	if strings.TrimSpace(thinking) == "" {
+		return strings.TrimSpace(finalText)
+	}
+	visible := strings.TrimSpace(finalText)
+	if visible == "" {
+		return "Thinking:\n" + thinking
+	}
+	return visible + "\n\nThinking:\n" + thinking
+}
+
+func logToolCallbackFailures(ctx context.Context, aud *audit.Logger, runID, agentID string, records []agent.ToolCallRecord, source, sessionID string) {
+	if aud == nil || len(records) == 0 {
+		return
+	}
+	for _, rec := range records {
+		callbackErr := strings.TrimSpace(rec.CallbackErr)
+		if callbackErr == "" {
+			continue
+		}
+		fields := map[string]any{
+			"run_id":    runID,
+			"agent_id":  agentID,
+			"tool":      strings.TrimSpace(rec.Request.Name),
+			"tool_call": strings.TrimSpace(rec.Request.ID),
+			"error":     callbackErr,
+		}
+		if source != "" {
+			fields["source"] = source
+		}
+		if sessionID != "" {
+			fields["session_id"] = sessionID
+		}
+		_ = aud.LogEvent(ctx, audit.EventToolCallbackError, fields)
+	}
+}
+
 func (e *Engine) loadSessionMessages(sessionID string, limit int) ([]agent.ChatMessage, error) {
 	store, err := chatstore.NewStore(e.agentsDir)
 	if err != nil {
 		return nil, fmt.Errorf("runtime: init chat store: %w", err)
 	}
-	history, err := store.ReadRecentMessages(sessionID, chatstore.ClampHistoryCount(limit, 200))
+	history, err := store.ReadRecentMessages(sessionID, chatstore.ClampHistoryCount(limit, maxSessionContextMessageCap))
 	if err != nil {
 		return nil, fmt.Errorf("runtime: read chat history: %w", err)
 	}
 	out := make([]agent.ChatMessage, 0, len(history))
 	for _, msg := range history {
-		role := strings.ToLower(strings.TrimSpace(msg.Role))
-		if role == "" {
-			role = "user"
-		}
-		if role == "tool" {
-			continue
-		}
-		content := strings.TrimSpace(msg.Content)
+		role := normalizeSessionRole(msg.Role)
+		content := buildSessionMessageContent(role, msg)
 		if content == "" {
 			continue
 		}
@@ -355,7 +446,119 @@ func (e *Engine) loadSessionMessages(sessionID string, limit int) ([]agent.ChatM
 			TS:         msg.TS,
 		})
 	}
-	return out, nil
+	return clampSessionContext(out, chatstore.ClampHistoryCount(limit, maxSessionContextMessageCap), maxSessionContextChars), nil
+}
+
+func normalizeSessionRole(role string) string {
+	clean := strings.ToLower(strings.TrimSpace(role))
+	switch clean {
+	case "system", "assistant", "tool", "user":
+		return clean
+	default:
+		return "user"
+	}
+}
+
+func buildSessionMessageContent(role string, msg chatstore.Message) string {
+	if role == "tool" {
+		return buildToolContextMessage(msg)
+	}
+	return truncateRunes(strings.TrimSpace(msg.Content), maxSessionMessageChars)
+}
+
+func buildToolContextMessage(msg chatstore.Message) string {
+	toolName := strings.TrimSpace(msg.ToolName)
+	toolCallID := strings.TrimSpace(msg.ToolCallID)
+	summary := ""
+	output := ""
+	errText := ""
+
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(msg.Content), &payload); err == nil {
+		if v := fieldString(payload, "tool"); v != "" {
+			toolName = v
+		}
+		if v := fieldString(payload, "id"); v != "" {
+			toolCallID = v
+		}
+		summary = fieldString(payload, "summary")
+		output = fieldString(payload, "output")
+		errText = fieldString(payload, "error")
+	} else {
+		output = strings.TrimSpace(msg.Content)
+	}
+
+	summary = truncateRunes(summary, maxSessionToolSummaryChars)
+	errText = truncateRunes(errText, maxSessionToolErrorChars)
+	output = truncateRunes(output, maxSessionToolOutputChars)
+
+	if summary == "" {
+		summary = truncateRunes(summarizeToolExecution(toolName, output, errText), maxSessionToolSummaryChars)
+	}
+
+	header := "tool result"
+	if toolName != "" {
+		header = "tool " + toolName + " result"
+	}
+	if toolCallID != "" {
+		header += " (" + toolCallID + ")"
+	}
+
+	lines := []string{header}
+	if summary != "" {
+		lines = append(lines, "summary: "+summary)
+	}
+	if errText != "" {
+		lines = append(lines, "error: "+errText)
+	}
+	if output != "" {
+		lines = append(lines, "output: "+output)
+	}
+
+	return truncateRunes(strings.Join(lines, "\n"), maxSessionMessageChars)
+}
+
+func fieldString(payload map[string]any, key string) string {
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprintf("%v", value))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
+}
+
+func clampSessionContext(messages []agent.ChatMessage, maxMessages, maxChars int) []agent.ChatMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+	if maxMessages <= 0 {
+		maxMessages = maxSessionContextMessageCap
+	}
+	out := append([]agent.ChatMessage(nil), messages...)
+	if len(out) > maxMessages {
+		out = out[len(out)-maxMessages:]
+	}
+	if maxChars <= 0 {
+		return out
+	}
+	for len(out) > 1 && totalSessionContextChars(out) > maxChars {
+		out = out[1:]
+	}
+	if len(out) == 1 && totalSessionContextChars(out) > maxChars {
+		out[0].Content = truncateRunes(out[0].Content, maxChars)
+	}
+	return out
+}
+
+func totalSessionContextChars(messages []agent.ChatMessage) int {
+	total := 0
+	for _, msg := range messages {
+		total += len([]rune(strings.TrimSpace(msg.Content)))
+	}
+	return total
 }
 
 func hasTrailingUserMessage(messages []agent.ChatMessage, currentMessage string) bool {

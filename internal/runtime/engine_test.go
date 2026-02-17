@@ -250,7 +250,7 @@ func TestExecuteWithInputUsesStructuredHistoryForSession(t *testing.T) {
 	}
 }
 
-func TestExecuteWithInputSkipsHistoricalToolMessagesInModelContext(t *testing.T) {
+func TestExecuteWithInputIncludesHistoricalToolMessagesInModelContext(t *testing.T) {
 	root := t.TempDir()
 	e, err := NewEngine(root)
 	if err != nil {
@@ -312,22 +312,108 @@ func TestExecuteWithInputSkipsHistoricalToolMessagesInModelContext(t *testing.T)
 		t.Fatalf("execute with input: %v", err)
 	}
 
-	for _, msg := range captured.Messages {
-		if msg.Role == "tool" {
-			t.Fatalf("expected tool role to be excluded from model history, got %+v", captured.Messages)
-		}
-	}
-	if len(captured.Messages) < 4 {
-		t.Fatalf("expected system + user/assistant/history + current user, got %d", len(captured.Messages))
+	if len(captured.Messages) < 5 {
+		t.Fatalf("expected system + user/tool/assistant history + current user, got %d", len(captured.Messages))
 	}
 	if captured.Messages[1].Role != "user" || captured.Messages[1].Content != "list files in ." {
 		t.Fatalf("unexpected first history message: %+v", captured.Messages[1])
 	}
-	if captured.Messages[2].Role != "assistant" || captured.Messages[2].Content != "Found one file." {
-		t.Fatalf("unexpected assistant history message: %+v", captured.Messages[2])
+	if captured.Messages[2].Role != "tool" {
+		t.Fatalf("expected tool history message in context, got %+v", captured.Messages[2])
+	}
+	if !strings.Contains(captured.Messages[2].Content, "tool fs.list result") || !strings.Contains(captured.Messages[2].Content, "README.md") {
+		t.Fatalf("unexpected tool history message content: %q", captured.Messages[2].Content)
+	}
+	if captured.Messages[3].Role != "assistant" || captured.Messages[3].Content != "Found one file." {
+		t.Fatalf("unexpected assistant history message: %+v", captured.Messages[3])
 	}
 	if captured.Messages[len(captured.Messages)-1].Role != "user" || captured.Messages[len(captured.Messages)-1].Content != "create file foo.txt" {
 		t.Fatalf("expected current user message to remain final turn, got %+v", captured.Messages[len(captured.Messages)-1])
+	}
+}
+
+func TestLoadSessionMessagesAppliesToolAndHistoryTruncation(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	chat, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := chat.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	for i := 0; i < 16; i++ {
+		content := strings.Repeat("history-window-content-", 60) + " marker-" + strconv.Itoa(i)
+		if err := chat.AppendMessage(session.SessionID, chatstore.Message{Role: "assistant", Content: content}); err != nil {
+			t.Fatalf("append history message %d: %v", i, err)
+		}
+	}
+
+	toolPayload, err := json.Marshal(map[string]any{
+		"tool":    "fs.read",
+		"id":      "tool-json-1",
+		"summary": "read large diagnostics file",
+		"output":  strings.Repeat("x", 9000),
+	})
+	if err != nil {
+		t.Fatalf("marshal tool payload: %v", err)
+	}
+	if err := chat.AppendMessage(session.SessionID, chatstore.Message{Role: "tool", Content: string(toolPayload), ToolName: "fs.read", ToolCallID: "tool-json-1"}); err != nil {
+		t.Fatalf("append tool message: %v", err)
+	}
+
+	messages, err := e.loadSessionMessages(session.SessionID, 200)
+	if err != nil {
+		t.Fatalf("load session messages: %v", err)
+	}
+	if len(messages) == 0 {
+		t.Fatalf("expected loaded session messages")
+	}
+
+	totalChars := 0
+	foundTool := false
+	for _, msg := range messages {
+		totalChars += len([]rune(strings.TrimSpace(msg.Content)))
+		if msg.Role != "tool" {
+			continue
+		}
+		foundTool = true
+		if !strings.Contains(msg.Content, "tool fs.read result") {
+			t.Fatalf("expected normalized tool header in context, got %q", msg.Content)
+		}
+		if len([]rune(msg.Content)) > maxSessionMessageChars {
+			t.Fatalf("expected tool context message to be truncated to %d chars, got %d", maxSessionMessageChars, len([]rune(msg.Content)))
+		}
+		if strings.Contains(msg.Content, strings.Repeat("x", 1400)) {
+			t.Fatalf("expected long tool output to be truncated, got %q", msg.Content)
+		}
+	}
+	if !foundTool {
+		t.Fatalf("expected at least one tool message in loaded context: %+v", messages)
+	}
+	if totalChars > maxSessionContextChars {
+		t.Fatalf("expected total session context <= %d chars, got %d", maxSessionContextChars, totalChars)
+	}
+
+	combined := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		combined = append(combined, msg.Content)
+	}
+	joined := strings.Join(combined, "\n")
+	if strings.Contains(joined, "marker-0") {
+		t.Fatalf("expected oldest messages to be truncated by history budget")
+	}
+	if !strings.Contains(joined, "marker-15") {
+		t.Fatalf("expected latest messages to remain after truncation")
 	}
 }
 
@@ -514,7 +600,7 @@ func TestExecuteWithInputPersistsMultiToolChatFlow(t *testing.T) {
 	}
 }
 
-func TestExecuteWithInputCompactsLongHistoryAndKeepsLatestTurn(t *testing.T) {
+func TestExecuteWithInputTruncatesLongHistoryAndKeepsLatestTurn(t *testing.T) {
 	root := t.TempDir()
 	e, err := NewEngine(root)
 	if err != nil {
@@ -538,7 +624,7 @@ func TestExecuteWithInputCompactsLongHistoryAndKeepsLatestTurn(t *testing.T) {
 		if i%2 == 0 {
 			role = "user"
 		}
-		content := strings.Repeat("history-window-content-", 180) + " marker-" + strconv.Itoa(i)
+		content := "marker-" + strconv.Itoa(i) + " " + strings.Repeat("history-window-content-", 180)
 		if err := chat.AppendMessage(session.SessionID, chatstore.Message{Role: role, Content: content}); err != nil {
 			t.Fatalf("append history message %d: %v", i, err)
 		}
@@ -580,10 +666,20 @@ func TestExecuteWithInputCompactsLongHistoryAndKeepsLatestTurn(t *testing.T) {
 	}
 
 	if len(captured.Messages) < 3 {
-		t.Fatalf("expected compacted model request with multiple messages, got %d", len(captured.Messages))
+		t.Fatalf("expected truncated model request with multiple messages, got %d", len(captured.Messages))
 	}
-	if captured.Messages[1].Role != "system" || !strings.Contains(captured.Messages[1].Content, "Conversation compaction summary") {
-		t.Fatalf("expected compaction summary in request, got %+v", captured.Messages[1])
+	joinedHistory := ""
+	for i := 1; i < len(captured.Messages); i++ {
+		if captured.Messages[i].Role != "system" && len([]rune(captured.Messages[i].Content)) > maxSessionMessageChars {
+			t.Fatalf("expected non-system message content <= %d chars, got %d", maxSessionMessageChars, len([]rune(captured.Messages[i].Content)))
+		}
+		joinedHistory += captured.Messages[i].Content
+	}
+	if strings.Contains(joinedHistory, "marker-0") {
+		t.Fatalf("expected oldest history to be omitted from model request")
+	}
+	if !strings.Contains(joinedHistory, "marker-219") {
+		t.Fatalf("expected latest history marker to remain in model request")
 	}
 	last := captured.Messages[len(captured.Messages)-1]
 	if last.Role != "user" || last.Content != "latest-user-message-marker" {
@@ -721,5 +817,297 @@ func TestExecuteWithInputPersistsToolMessageEvenWhenRunFailsLater(t *testing.T) 
 	}
 	if !foundTool {
 		t.Fatalf("expected at least one persisted tool message after partial failure, got %+v", msgs)
+	}
+}
+
+func TestExecuteWithInputLogsAndTracesOnToolCallCallbackFailures(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	chat, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := chat.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := chat.AppendMessage(session.SessionID, chatstore.Message{Role: "user", Content: "show files"}); err != nil {
+		t.Fatalf("append user message: %v", err)
+	}
+
+	messagesPath := filepath.Join(root, ".openclawssy", "agents", "default", "memory", "chats", session.SessionID, "messages.jsonl")
+	if err := os.Chmod(messagesPath, 0o400); err != nil {
+		t.Fatalf("chmod messages file read-only: %v", err)
+	}
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```"}}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": ""}}}})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "list files", Source: "dashboard", SessionID: session.SessionID})
+	if err != nil {
+		t.Fatalf("expected callback failures to be non-fatal, got %v", err)
+	}
+	if res.ToolCalls != 1 {
+		t.Fatalf("expected one tool call, got %d", res.ToolCalls)
+	}
+
+	traceItems, ok := res.Trace["tool_execution_results"].([]any)
+	if !ok || len(traceItems) != 1 {
+		t.Fatalf("expected one tool trace entry, got %#v", res.Trace["tool_execution_results"])
+	}
+	entry, ok := traceItems[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected trace entry: %#v", traceItems[0])
+	}
+	callbackError, _ := entry["callback_error"].(string)
+	if strings.TrimSpace(callbackError) == "" {
+		t.Fatalf("expected callback_error in trace entry, got %#v", entry)
+	}
+
+	auditPath := filepath.Join(root, ".openclawssy", "agents", "default", "audit", "events.jsonl")
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	found := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var evt map[string]any
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			t.Fatalf("decode audit event: %v", err)
+		}
+		if evt["type"] == "tool.callback_error" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected tool.callback_error event in audit log, got %q", string(raw))
+	}
+}
+
+func TestExecuteDefaultOnErrorDoesNotShowThinkingOnSuccessfulRun(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<think>private plan</think>visible answer"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if strings.Contains(res.FinalText, "Thinking:") {
+		t.Fatalf("expected thinking hidden in default successful output, got %q", res.FinalText)
+	}
+}
+
+func TestExecuteDefaultOnErrorShowsThinkingOnParseFailure(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<think>parse diagnostics</think>```json\n{invalid}\n```"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res.FinalText, "Thinking:\nparse diagnostics") {
+		t.Fatalf("expected thinking shown for parse failure, got %q", res.FinalText)
+	}
+}
+
+func TestExecuteAlwaysThinkingModeAlwaysShowsThinking(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<think>detailed notes</think>visible answer"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi", ThinkingMode: "always"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res.FinalText, "Thinking:\ndetailed notes") {
+		t.Fatalf("expected thinking shown in always mode, got %q", res.FinalText)
+	}
+}
+
+func TestExecutePersistsRedactedThinkingInTraceArtifactAndAudit(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<think>api_key=super-secret-value-1234567890abcdefghijklmnopqrstuvwxyz</think>ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi", ThinkingMode: "always"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	traceThinking, _ := res.Trace["thinking"].(string)
+	if !strings.Contains(traceThinking, "[REDACTED]") {
+		t.Fatalf("expected redacted thinking in trace, got %q", traceThinking)
+	}
+	if present, ok := res.Trace["thinking_present"].(bool); !ok || !present {
+		t.Fatalf("expected thinking_present=true in trace, got %#v", res.Trace["thinking_present"])
+	}
+
+	metaRaw, err := os.ReadFile(filepath.Join(res.ArtifactPath, "meta.json"))
+	if err != nil {
+		t.Fatalf("read meta.json: %v", err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal(metaRaw, &meta); err != nil {
+		t.Fatalf("unmarshal meta.json: %v", err)
+	}
+	metaThinking, _ := meta["thinking"].(string)
+	if !strings.Contains(metaThinking, "[REDACTED]") {
+		t.Fatalf("expected redacted thinking in artifact meta, got %q", metaThinking)
+	}
+	if present, ok := meta["thinking_present"].(bool); !ok || !present {
+		t.Fatalf("expected thinking_present=true in artifact meta, got %#v", meta["thinking_present"])
+	}
+
+	auditRaw, err := os.ReadFile(filepath.Join(root, ".openclawssy", "agents", "default", "audit", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if !strings.Contains(string(auditRaw), "\"thinking\":\"[REDACTED]\"") {
+		t.Fatalf("expected redacted thinking in audit log, got %q", string(auditRaw))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"openclawssy/internal/config"
 	"strings"
 )
 
@@ -16,8 +17,9 @@ type InitInput struct {
 }
 
 type AskInput struct {
-	AgentID string
-	Message string
+	AgentID      string
+	Message      string
+	ThinkingMode string
 }
 
 type RunInput struct {
@@ -106,6 +108,7 @@ func (h Handlers) HandleAsk(ctx context.Context, args []string) int {
 	fs.SetOutput(h.errorWriter())
 	fs.StringVar(&input.AgentID, "agent", "default", "agent id")
 	fs.StringVar(&input.Message, "message", "", "message to send")
+	fs.StringVar(&input.ThinkingMode, "thinking", "", "thinking mode override (never|on_error|always)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -113,6 +116,10 @@ func (h Handlers) HandleAsk(ctx context.Context, args []string) int {
 	if input.Message == "" {
 		return h.fail(errors.New("-message is required"))
 	}
+	if strings.TrimSpace(input.ThinkingMode) != "" && !config.IsValidThinkingMode(input.ThinkingMode) {
+		return h.fail(errors.New("-thinking must be one of never|on_error|always"))
+	}
+	input.ThinkingMode = config.NormalizeThinkingMode(input.ThinkingMode)
 
 	output, err := h.Ask.Ask(ctx, input)
 	if err != nil {

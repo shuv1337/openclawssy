@@ -115,3 +115,17 @@ func TestProtectedPathDeniedViaSymlink(t *testing.T) {
 		t.Fatalf("expected symlink protected path denial")
 	}
 }
+
+func TestCheckToolCanonicalizesGrantAlias(t *testing.T) {
+	enf := NewEnforcer(t.TempDir(), map[string][]string{"agent": {"bash.exec"}})
+	if err := enf.CheckTool("agent", "shell.exec"); err != nil {
+		t.Fatalf("expected shell.exec allowed via bash.exec alias grant, got %v", err)
+	}
+}
+
+func TestCheckToolCanonicalizesRequestAlias(t *testing.T) {
+	enf := NewEnforcer(t.TempDir(), map[string][]string{"agent": {"shell.exec"}})
+	if err := enf.CheckTool("agent", "bash.exec"); err != nil {
+		t.Fatalf("expected bash.exec allowed via shell.exec grant, got %v", err)
+	}
+}

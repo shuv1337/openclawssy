@@ -296,6 +296,89 @@ func TestProviderModelStripsThinkTagsFromFinalText(t *testing.T) {
 	}
 }
 
+func TestProviderModelCapturesThinkingInResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "<think>secret plan</think>Hello there",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "hi"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if !resp.ThinkingPresent {
+		t.Fatal("expected thinking_present=true")
+	}
+	if resp.Thinking != "secret plan" {
+		t.Fatalf("unexpected thinking text: %q", resp.Thinking)
+	}
+	if resp.FinalText != "Hello there" {
+		t.Fatalf("unexpected visible text: %q", resp.FinalText)
+	}
+}
+
+func TestExtractThinkingNestedTagsDoesNotCrash(t *testing.T) {
+	visible, thinking, present := ExtractThinking("before <think>outer <think>inner</think> tail</think> after")
+	if !present {
+		t.Fatal("expected thinkingPresent=true")
+	}
+	if visible != "before  after" {
+		t.Fatalf("unexpected visible text: %q", visible)
+	}
+	if thinking != "outer <think>inner</think> tail" {
+		t.Fatalf("unexpected thinking text: %q", thinking)
+	}
+}
+
+func TestExtractThinkingMissingClosingTagGraceful(t *testing.T) {
+	input := "Hello <analysis>internal plan"
+	visible, thinking, present := ExtractThinking(input)
+	if !present {
+		t.Fatal("expected thinkingPresent=true")
+	}
+	if visible != "Hello internal plan" {
+		t.Fatalf("expected content to remain intact, got %q", visible)
+	}
+	if thinking != "" {
+		t.Fatalf("expected no extracted thinking for ambiguous block, got %q", thinking)
+	}
+}
+
+func TestExtractThinkingMixedVisibleAndThinkingContent(t *testing.T) {
+	input := "start <analysis>plan A</analysis> mid <!-- THINK -->plan B<!-- /THINK --> end"
+	visible, thinking, present := ExtractThinking(input)
+	if !present {
+		t.Fatal("expected thinkingPresent=true")
+	}
+	if visible != "start  mid  end" {
+		t.Fatalf("unexpected visible text: %q", visible)
+	}
+	if thinking != "plan A\n\nplan B" {
+		t.Fatalf("unexpected thinking text: %q", thinking)
+	}
+}
+
+func TestExtractThinkingPreservesExistingThinkTagStrippingSemantics(t *testing.T) {
+	visible, thinking, present := ExtractThinking("<think>internal</think>Hello there</think><think>")
+	if !present {
+		t.Fatal("expected thinkingPresent=true")
+	}
+	if visible != "Hello there" {
+		t.Fatalf("unexpected visible text: %q", visible)
+	}
+	if thinking != "internal" {
+		t.Fatalf("unexpected thinking text: %q", thinking)
+	}
+}
+
 func TestProviderModelParsesToolCallsAfterThinkTagStripping(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -604,6 +687,29 @@ func TestProviderModelRejectsToolCallsNotInAllowlist(t *testing.T) {
 	}
 }
 
+func TestProviderModelRejectsShellExecWhenNotAllowed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{\"tool_name\":\"shell.exec\",\"arguments\":{\"command\":\"pwd\"}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "run pwd", AllowedTools: []string{"fs.list"}})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %d", len(resp.ToolCalls))
+	}
+}
+
 func TestProviderModelRejectsToolResultAsCallableTool(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -849,8 +955,82 @@ func TestProviderModelParsesLooseJSONObjectToolCall(t *testing.T) {
 	if resp.ToolCalls[0].Name != "shell.exec" {
 		t.Fatalf("expected shell.exec tool, got %q", resp.ToolCalls[0].Name)
 	}
-	if !strings.HasPrefix(resp.ToolCalls[0].ID, "tool-json-loose-") {
-		t.Fatalf("expected loose-json tool call id, got %q", resp.ToolCalls[0].ID)
+	if !strings.HasPrefix(resp.ToolCalls[0].ID, "tool-json-") {
+		t.Fatalf("expected tool-json id, got %q", resp.ToolCalls[0].ID)
+	}
+}
+
+func TestProviderModelParsesToolCallArrayFromResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": `[{"tool_name":"fs.list","arguments":{"path":"."}},{"tool_name":"fs.read","arguments":{"path":"README.md"}}]`,
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{
+		Prompt:       "system",
+		Message:      "inspect files",
+		AllowedTools: []string{"fs.list", "fs.read"},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("expected two tool calls, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "fs.list" || resp.ToolCalls[1].Name != "fs.read" {
+		t.Fatalf("unexpected parsed tools: %+v", resp.ToolCalls)
+	}
+}
+
+func TestProviderModelTraceIncludesRejectedParseDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{invalid}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	collector := newRunTraceCollector("run_2", "chat_2", "dashboard", "list files")
+	ctx := withRunTraceCollector(context.Background(), collector)
+
+	_, err := model.Generate(ctx, agent.ModelRequest{
+		SystemPrompt: "system",
+		Messages:     []agent.ChatMessage{{Role: "user", Content: "list files"}},
+		AllowedTools: []string{"fs.list"},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+
+	trace := collector.Snapshot()
+	extractions, ok := trace["extracted_tool_calls"].([]any)
+	if !ok || len(extractions) == 0 {
+		t.Fatalf("expected extraction trace entries, got %#v", trace["extracted_tool_calls"])
+	}
+	entry, ok := extractions[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected extraction entry shape: %#v", extractions[0])
+	}
+	if entry["accepted"] != false {
+		t.Fatalf("expected rejected extraction, got %#v", entry["accepted"])
+	}
+	reason := strings.ToLower(strings.TrimSpace(entry["reason"].(string)))
+	if !strings.Contains(reason, "invalid json") {
+		t.Fatalf("expected invalid json reason, got %q", reason)
 	}
 }
 
