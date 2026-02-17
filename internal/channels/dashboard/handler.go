@@ -447,8 +447,25 @@ summary{cursor:pointer;color:#9db2d4}
 <div class="toggles">
 <label class="toggle"><input id="cfgChatEnabled" type="checkbox"/>Chat enabled</label>
 <label class="toggle"><input id="cfgDiscordEnabled" type="checkbox"/>Discord enabled</label>
-<label class="toggle"><input id="cfgSandboxActive" type="checkbox"/>Sandbox active</label>
+<label class="toggle"><input id="cfgSandboxActive" type="checkbox" onchange="onSandboxActiveChange()"/>Sandbox active</label>
 <label class="toggle"><input id="cfgShellExecEnabled" type="checkbox"/>Shell exec enabled</label>
+</div>
+
+<div class="form-grid">
+<div class="field">
+<label for="cfgSandboxProvider">Sandbox provider</label>
+<select id="cfgSandboxProvider" onchange="updateRawPreview()">
+<option value="local">local</option>
+<option value="none">none</option>
+</select>
+</div>
+<div class="field full">
+<label>Sandbox notes</label>
+<div style="font-size:0.85em;color:#9db2d4;line-height:1.4">
+Use <code>local</code> for shell access in this machine environment (including tools like <code>docker</code> if they are installed).<br/>
+Use <code>none</code> to disable sandbox execution tools.
+</div>
+</div>
 </div>
 
 <div class="section-title">Allowlists</div>
@@ -664,6 +681,14 @@ updateProviderSecretName();
 updateRawPreview();
 }
 
+function onSandboxActiveChange(){
+const isActive=!!byId('cfgSandboxActive').checked;
+const providerInput=byId('cfgSandboxProvider');
+if(!providerInput)return;
+if(isActive&&providerInput.value==='none')providerInput.value='local';
+updateRawPreview();
+}
+
 function ensureConfigShape(cfg){
 if(!cfg.model)cfg.model={};
 if(!cfg.providers)cfg.providers={};
@@ -672,6 +697,7 @@ if(!cfg.chat)cfg.chat={};
 if(!cfg.discord)cfg.discord={};
 if(!cfg.sandbox)cfg.sandbox={};
 if(!cfg.shell)cfg.shell={};
+if(!cfg.sandbox.provider)cfg.sandbox.provider='none';
 }
 
 function populateForm(cfg){
@@ -683,6 +709,12 @@ byId('cfgGenericBaseURL').value=(cfg.providers.generic&&cfg.providers.generic.ba
 byId('cfgChatEnabled').checked=!!cfg.chat.enabled;
 byId('cfgDiscordEnabled').checked=!!cfg.discord.enabled;
 byId('cfgSandboxActive').checked=!!cfg.sandbox.active;
+const sandboxProvider=(cfg.sandbox.provider||'none').toLowerCase();
+if(sandboxProvider==='local'||sandboxProvider==='none'){
+byId('cfgSandboxProvider').value=sandboxProvider;
+}else{
+byId('cfgSandboxProvider').value='local';
+}
 byId('cfgShellExecEnabled').checked=!!cfg.shell.enable_exec;
 byId('cfgChatUsers').value=listToText(cfg.chat.allow_users);
 byId('cfgChatRooms').value=listToText(cfg.chat.allow_rooms);
@@ -712,6 +744,7 @@ cfg.model.temperature=Number(tempRaw);
 cfg.chat.enabled=byId('cfgChatEnabled').checked;
 cfg.discord.enabled=byId('cfgDiscordEnabled').checked;
 cfg.sandbox.active=byId('cfgSandboxActive').checked;
+cfg.sandbox.provider=byId('cfgSandboxProvider').value.trim().toLowerCase();
 cfg.shell.enable_exec=byId('cfgShellExecEnabled').checked;
 cfg.chat.allow_users=textToList(byId('cfgChatUsers').value);
 cfg.chat.allow_rooms=textToList(byId('cfgChatRooms').value);
@@ -731,6 +764,9 @@ const tempRaw=byId('cfgTemperature').value.trim();
 if(!provider)return 'provider is required';
 if(!modelName)return 'model name is required';
 if(tempRaw!==''&&Number.isNaN(Number(tempRaw)))return 'temperature must be numeric';
+const sandboxProvider=byId('cfgSandboxProvider').value.trim().toLowerCase();
+if(sandboxProvider!=='local'&&sandboxProvider!=='none')return 'sandbox provider must be local or none';
+if(byId('cfgSandboxActive').checked&&sandboxProvider==='none')return 'sandbox provider must be local when sandbox is active';
 if(provider==='generic'&&!byId('cfgGenericBaseURL').value.trim())return 'generic base_url is required';
 return '';
 }

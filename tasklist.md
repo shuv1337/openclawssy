@@ -47,7 +47,7 @@ Parallel safety: A0/A7 stay in docs paths; A6 stays infra paths.
 - [ ] A2: Config loader validation + secure defaults + atomic writes + corruption recovery tests. (G2)
 - [ ] A1: Run state machine + deterministic prompt assembly + run artifact bundle writer (mock model allowed). (needs G1)
 - [ ] A2: Tool registry + policy checks (capabilities, workspace-only writes, path and symlink guards). (needs G1)
-- [ ] A3: Sandbox interface + `none` mode + provider skeleton for `docker`. (needs G1)
+- [ ] A3: Sandbox interface + `none`/`local` modes + roadmap specs for additional providers. (needs G1)
 - [ ] A4: Scheduler schema + persistence engine + clock/executor skeleton. (needs G1)
 - [ ] A5: CLI command scaffolds (`init/ask/run/serve/cron/doctor`) with stubs bound to contracts. (needs G1)
 - [ ] A7: Abuse test harness for prompt injection/path traversal/config mutation attempts. (needs G1)
@@ -92,7 +92,8 @@ Parallel safety: docs and pipeline tasks mostly isolated; no core runtime churn 
 
 ### A3 Sandbox
 - [ ] Define sandbox provider interface and lifecycle.
-- [ ] Implement `none` and `docker` modes.
+- [ ] Implement `none` and `local` modes.
+- [ ] Add provider roadmap design notes for `podman`, `gvisor`, `nsjail`, and `firecracker`.
 - [ ] Workspace confinement checks.
 
 ### A4 Scheduler

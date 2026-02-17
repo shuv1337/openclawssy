@@ -17,12 +17,34 @@ COPY . .
 RUN make build
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.22
 
 WORKDIR /app
 
-# Install ca-certificates and openssl for secret management
-RUN apk add --no-cache ca-certificates openssl
+# Install runtime dependencies for shell-heavy agent workflows.
+RUN apk add --no-cache \
+    bash \
+    ca-certificates \
+    coreutils \
+    curl \
+    docker-cli \
+    findutils \
+    gawk \
+    git \
+    grep \
+    jq \
+    make \
+    nodejs \
+    npm \
+    openssh-client \
+    openssl \
+    py3-pip \
+    py3-virtualenv \
+    python3 \
+    sed \
+    wget \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && ln -sf /usr/bin/pip3 /usr/local/bin/pip
 
 # Copy binary from builder
 COPY --from=builder /app/bin/openclawssy /usr/local/bin/openclawssy

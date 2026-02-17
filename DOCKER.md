@@ -39,6 +39,7 @@ Openclawssy is now pre-configured to use **ZAI's GLM-4.7 Coding Plan** as the de
 - **ZAI Integration**: Pre-configured for GLM-4.7 Coding Plan
 - **Secure Setup**: API key validation on startup
 - **Persistent Storage**: Configuration and workspace are saved locally
+- **Shell-ready runtime image**: Includes `bash`, `python3`/`pip`, `node`/`npm`, `git`, `curl`, `wget`, `jq`, and common GNU utilities
 
 ### Environment Variables
 
@@ -58,6 +59,12 @@ docker run -p 8081:8080 \
   -v $(pwd)/workspace:/app/workspace \
   -v $(pwd)/.openclawssy:/app/.openclawssy \
   openclawssy
+```
+
+If you want the bot to run Docker commands against your host daemon, add the Docker socket mount:
+
+```bash
+-v /var/run/docker.sock:/var/run/docker.sock
 ```
 
 **Note**: The container exposes port 8080 internally. Map it to any available port on your host (e.g., 8081 to avoid conflicts).
@@ -109,3 +116,8 @@ Openclawssy is configured to be accessible over Tailscale for secure remote acce
 **API errors:**
 - Verify your ZAI API key is valid at https://z.ai
 - Check network connectivity: `docker-compose exec openclawssy ping api.z.ai`
+
+**Shell commands fail with `bash`/`python` not found:**
+- Rebuild with the updated image: `docker-compose build --no-cache openclawssy`
+- Restart the service: `docker-compose up -d`
+- Verify tools are present: `docker-compose exec openclawssy sh -lc 'bash --version && python3 --version && node --version'`

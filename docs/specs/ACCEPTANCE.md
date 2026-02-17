@@ -41,7 +41,8 @@ Source of truth: `devplan.md` phases 1-9.
 ## Phase 6 - Sandbox Providers + Exec Gating
 - [ ] Sandbox interface implemented with lifecycle methods.
 - [ ] `none` mode blocks `shell.exec`.
-- [ ] `docker` (or equivalent) confines execution to workspace.
+- [ ] `local` mode allows `shell.exec` within workspace policy constraints.
+- [ ] Roadmap providers documented: `podman`, `gvisor`, `nsjail`, `firecracker`.
 - [ ] Invariant enforced: no sandbox, no shell execution.
 
 ## Phase 7 - Scheduler (Cron-lite)

@@ -98,7 +98,7 @@ Language target: Go (single binary, small runtime surface)
 - `internal/agent/` — prompt assembly, run loop, state machine
 - `internal/tools/` — tool registry + implementations
 - `internal/policy/` — capability checks, path guards, redaction rules
-- `internal/sandbox/` — sandbox providers (none/docker/bwrap/etc.)
+- `internal/sandbox/` — sandbox providers (none/local + roadmap providers)
 - `internal/scheduler/` — cron-like scheduler + persistence
 - `internal/channels/` — cli/http/(discord|telegram)
 - `internal/audit/` — jsonl event log writer, session/run ids, redaction
@@ -266,13 +266,18 @@ Each phase ends with:
    - `Start(runCtx)`, `Exec(cmd)`, `Stop()`
 2. Implement at least two modes:
    - `none` (no exec allowed)
-   - `docker` (or other container-based provider)
-3. Enforce invariant:
+   - `local` (exec allowed inside workspace policy boundaries)
+3. Add post-v0.1 provider roadmap items:
+   - `podman`
+   - `gvisor`
+   - `nsjail`
+   - `firecracker`
+4. Enforce invariant:
    - if sandbox is not active, `shell.exec` tool is disabled
 
 **Acceptance**
 - With sandbox=none → exec tool unavailable
-- With sandbox=docker → exec works, confined to workspace mount
+- With sandbox=local → exec works, confined to workspace policy boundaries
 
 ---
 
@@ -334,7 +339,7 @@ Each phase ends with:
 ## 9) Definition of Done (v0.1)
 - CLI works: init/run/ask/serve/cron/doctor
 - Tool system works with policy + audit
-- Sandbox-gated exec works (docker provider ok)
+- Sandbox-gated exec works (local provider ok)
 - Scheduler works and survives restart
 - One additional channel works (HTTP or Discord)
 - No marketplace; no agent-controlled config mutation

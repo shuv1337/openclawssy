@@ -189,11 +189,19 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 	}
 
 	content := strings.TrimSpace(payload.Choices[0].Message.Content)
+	trace := runTraceCollectorFromContext(ctx)
 
 	// Check if the model's response contains tool calls in JSON blocks.
-	toolCalls := parseToolCallsFromResponse(content, req.AllowedTools, runTraceCollectorFromContext(ctx))
+	toolCalls := parseToolCallsFromResponse(content, req.AllowedTools, trace)
 	if len(toolCalls) == 0 {
-		toolCalls = parseToolCallsFromResponse(stripThinkingTags(content), req.AllowedTools, runTraceCollectorFromContext(ctx))
+		toolCalls = parseLooseJSONToolCalls(content, req.AllowedTools, trace)
+	}
+	if len(toolCalls) == 0 {
+		stripped := stripThinkingTags(content)
+		toolCalls = parseToolCallsFromResponse(stripped, req.AllowedTools, trace)
+		if len(toolCalls) == 0 {
+			toolCalls = parseLooseJSONToolCalls(stripped, req.AllowedTools, trace)
+		}
 	}
 	if len(toolCalls) > 0 {
 		return agent.ModelResponse{ToolCalls: toolCalls}, nil
@@ -541,6 +549,37 @@ func parseToolCallsFromResponse(content string, allowedTools []string, trace *ru
 		}
 	}
 	return parsed.Calls
+}
+
+func parseLooseJSONToolCalls(content string, allowedTools []string, trace *runTraceCollector) []agent.ToolCallRequest {
+	candidates := extractJSONObjectCandidates(content)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	calls := make([]agent.ToolCallRequest, 0, len(candidates))
+	for _, raw := range candidates {
+		wrapped := "```json\n" + strings.TrimSpace(raw) + "\n```"
+		parsed := toolparse.ParseStrict(wrapped, allowedTools, 1)
+		if trace != nil {
+			if len(parsed.Extractions) == 0 {
+				trace.RecordToolExtraction(raw, "", nil, false, "invalid json object candidate")
+			} else {
+				extraction := parsed.Extractions[0]
+				trace.RecordToolExtraction(raw, extraction.ParsedToolName, extraction.ParsedArguments, extraction.Accepted, "loose-json: "+extraction.Reason)
+			}
+		}
+		if len(parsed.Calls) == 0 {
+			continue
+		}
+		call := parsed.Calls[0]
+		call.ID = fmt.Sprintf("tool-json-loose-%d", len(calls)+1)
+		calls = append(calls, call)
+		if len(calls) >= maxToolCallsPerReply {
+			break
+		}
+	}
+	return dedupeToolCalls(calls)
 }
 
 func synthesizeWriteCallFromResponse(content, userMessage string, ordinal int) (agent.ToolCallRequest, bool) {

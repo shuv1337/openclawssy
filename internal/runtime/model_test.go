@@ -711,6 +711,40 @@ func TestProviderModelParsesMultipleToolCallsFromSingleResponse(t *testing.T) {
 	}
 }
 
+func TestProviderModelParsesLooseJSONObjectToolCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "Let me check that now.\n" +
+						`{"tool_name":"shell.exec","arguments":{"command":"bash","args":["-lc","python3 --version"]}}`,
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{
+		Prompt:       "system",
+		Message:      "what version of python is installed?",
+		AllowedTools: []string{"shell.exec"},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one parsed tool call, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "shell.exec" {
+		t.Fatalf("expected shell.exec tool, got %q", resp.ToolCalls[0].Name)
+	}
+	if !strings.HasPrefix(resp.ToolCalls[0].ID, "tool-json-loose-") {
+		t.Fatalf("expected loose-json tool call id, got %q", resp.ToolCalls[0].ID)
+	}
+}
+
 func TestProviderModelUsesCurrentMessageForToolDirectiveDetection(t *testing.T) {
 	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
