@@ -12,13 +12,11 @@ var (
 	ErrModelRequired            = errors.New("agent runner requires model")
 	ErrToolExecutorRequired     = errors.New("agent runner requires tool executor for tool calls")
 	ErrToolIterationCapExceeded = errors.New("agent runner tool iteration cap exceeded")
-	ErrRepeatedToolCall         = errors.New("agent runner blocked repeated tool call")
 )
 
 const (
 	DefaultToolIterationCap = 8
 	DefaultToolTimeout      = 45 * time.Second
-	RepeatedToolFailAfter   = 3
 )
 
 // Runner executes the model/tool loop for a single run.
@@ -60,9 +58,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	toolIterations := 0
 	toolCallOrdinal := 0
 	usedToolCallIDs := make(map[string]struct{})
-	lastToolCallKey := ""
-	lastToolCallHadError := false
-	repeatedToolBlocks := 0
+	cachedToolResults := make(map[string]ToolCallResult)
 	toolTimeout := time.Duration(input.ToolTimeoutMS) * time.Millisecond
 	if toolTimeout <= 0 {
 		toolTimeout = DefaultToolTimeout
@@ -109,25 +105,22 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			call.ID = uniqueToolCallID(call.ID, toolCallOrdinal, usedToolCallIDs)
 
 			callKey := call.Name + "|" + string(call.Arguments)
-			if callKey != "|" && callKey == lastToolCallKey && !lastToolCallHadError {
-				repeatedToolBlocks++
-				reason := fmt.Sprintf("repeated tool call blocked (%d/%d): same tool+arguments as previous successful call", repeatedToolBlocks, RepeatedToolFailAfter)
-				record := ToolCallRecord{
-					Request: call,
-					Result:  ToolCallResult{ID: call.ID, Error: reason},
+			if callKey != "|" {
+				if cached, ok := cachedToolResults[callKey]; ok {
+					now := time.Now().UTC()
+					cached.ID = call.ID
+					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
+					out.ToolCalls = append(out.ToolCalls, record)
+					toolResults = append(toolResults, record.Result)
+					if input.OnToolCall != nil {
+						if err := input.OnToolCall(record); err != nil {
+							out.CompletedAt = time.Now().UTC()
+							return out, err
+						}
+					}
+					continue
 				}
-				now := time.Now().UTC()
-				record.StartedAt = now
-				record.CompletedAt = now
-				out.ToolCalls = append(out.ToolCalls, record)
-				toolResults = append(toolResults, record.Result)
-				if repeatedToolBlocks >= RepeatedToolFailAfter {
-					out.CompletedAt = time.Now().UTC()
-					return out, ErrRepeatedToolCall
-				}
-				continue
 			}
-			repeatedToolBlocks = 0
 
 			record := ToolCallRecord{
 				Request:   call,
@@ -147,10 +140,18 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			record.Result = result
 			record.CompletedAt = time.Now().UTC()
 
+			if callKey != "|" && strings.TrimSpace(result.Error) == "" {
+				cachedToolResults[callKey] = ToolCallResult{Output: result.Output}
+			}
+
 			out.ToolCalls = append(out.ToolCalls, record)
 			toolResults = append(toolResults, result)
-			lastToolCallKey = callKey
-			lastToolCallHadError = strings.TrimSpace(result.Error) != ""
+			if input.OnToolCall != nil {
+				if err := input.OnToolCall(record); err != nil {
+					out.CompletedAt = time.Now().UTC()
+					return out, err
+				}
+			}
 		}
 
 		toolIterations++

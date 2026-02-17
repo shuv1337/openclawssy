@@ -93,7 +93,7 @@ func TestFormatToolActivity(t *testing.T) {
 	t.Run("renders tool summary", func(t *testing.T) {
 		trace := map[string]any{
 			"tool_execution_results": []any{
-				map[string]any{"tool": "fs.list", "tool_call_id": "tool-1", "output": `{"entries":["a.txt"]}`},
+				map[string]any{"tool": "fs.list", "tool_call_id": "tool-1", "summary": "listed 1 entries in .", "output": `{"entries":["a.txt"]}`},
 				map[string]any{"tool": "fs.read", "tool_call_id": "tool-2", "error": "not found"},
 			},
 		}
@@ -103,6 +103,9 @@ func TestFormatToolActivity(t *testing.T) {
 		}
 		if !strings.Contains(out, "1) fs.list [tool-1]") {
 			t.Fatalf("missing first tool line: %q", out)
+		}
+		if !strings.Contains(out, "1) fs.list [tool-1] -> listed 1 entries in .") {
+			t.Fatalf("expected summary-preferred tool line: %q", out)
 		}
 		if !strings.Contains(out, "2) fs.read [tool-2] -> error: not found") {
 			t.Fatalf("missing error line: %q", out)

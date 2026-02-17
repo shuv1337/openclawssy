@@ -128,6 +128,9 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(doc.Content, "Do not invent tool names") {
 			t.Fatalf("tool best practices missing invalid tool warning: %q", doc.Content)
 		}
+		if !strings.Contains(doc.Content, "chain tool calls until the task is complete") {
+			t.Fatalf("tool best practices missing multi-step chaining guidance: %q", doc.Content)
+		}
 	}
 	if !bestFound {
 		t.Fatal("expected TOOL_CALLING_BEST_PRACTICES.md prompt doc")
@@ -504,6 +507,10 @@ func TestExecuteWithInputPersistsMultiToolChatFlow(t *testing.T) {
 		if payload["id"] != msg.ToolCallID {
 			t.Fatalf("expected payload id %q to match metadata %q", payload["id"], msg.ToolCallID)
 		}
+		summary, _ := payload["summary"].(string)
+		if strings.TrimSpace(summary) == "" {
+			t.Fatalf("expected non-empty tool summary in persisted payload, got %#v", payload)
+		}
 	}
 }
 
@@ -581,5 +588,135 @@ func TestExecuteWithInputCompactsLongHistoryAndKeepsLatestTurn(t *testing.T) {
 	last := captured.Messages[len(captured.Messages)-1]
 	if last.Role != "user" || last.Content != "latest-user-message-marker" {
 		t.Fatalf("expected latest user turn at tail, got %+v", last)
+	}
+}
+
+func TestExecuteWithInputRepeatedToolCallIsHandledWithoutFailure(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```"}}}})
+		case 2:
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```"}}}})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "done"}}}})
+		}
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "list files", Source: "dashboard"})
+	if err != nil {
+		t.Fatalf("execute with input: %v", err)
+	}
+	if strings.TrimSpace(res.FinalText) != "done" {
+		t.Fatalf("unexpected final text: %q", res.FinalText)
+	}
+	if res.ToolCalls != 2 {
+		t.Fatalf("expected two recorded tool calls, got %d", res.ToolCalls)
+	}
+	if calls != 3 {
+		t.Fatalf("expected three provider calls, got %d", calls)
+	}
+}
+
+func TestExecuteWithInputPersistsToolMessageEvenWhenRunFailsLater(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	chat, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := chat.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```"}}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{}})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "list files then continue", Source: "dashboard", SessionID: session.SessionID})
+	if err == nil {
+		t.Fatal("expected run to fail after second provider response")
+	}
+
+	msgs, err := chat.ReadRecentMessages(session.SessionID, 20)
+	if err != nil {
+		t.Fatalf("read recent messages: %v", err)
+	}
+	if len(msgs) < 1 {
+		t.Fatalf("expected at least one persisted message, got %+v", msgs)
+	}
+	foundTool := false
+	for _, msg := range msgs {
+		if msg.Role == "tool" {
+			foundTool = true
+			payload := map[string]any{}
+			if err := json.Unmarshal([]byte(msg.Content), &payload); err != nil {
+				t.Fatalf("decode tool payload: %v", err)
+			}
+			summary, _ := payload["summary"].(string)
+			if strings.TrimSpace(summary) == "" {
+				t.Fatalf("expected summary in persisted tool payload, got %#v", payload)
+			}
+		}
+	}
+	if !foundTool {
+		t.Fatalf("expected at least one persisted tool message after partial failure, got %+v", msgs)
 	}
 }

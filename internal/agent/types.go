@@ -14,15 +14,16 @@ type ArtifactDoc struct {
 
 // RunInput is the input contract for a single runner invocation.
 type RunInput struct {
-	AgentID           string        `json:"agent_id"`
-	RunID             string        `json:"run_id"`
-	Message           string        `json:"message"`
-	Messages          []ChatMessage `json:"messages,omitempty"`
-	ArtifactDocs      []ArtifactDoc `json:"artifact_docs"`
-	PerFileByteLimit  int           `json:"per_file_byte_limit"`
-	MaxToolIterations int           `json:"max_tool_iterations"`
-	ToolTimeoutMS     int           `json:"tool_timeout_ms,omitempty"`
-	AllowedTools      []string      `json:"allowed_tools,omitempty"`
+	AgentID           string                     `json:"agent_id"`
+	RunID             string                     `json:"run_id"`
+	Message           string                     `json:"message"`
+	Messages          []ChatMessage              `json:"messages,omitempty"`
+	ArtifactDocs      []ArtifactDoc              `json:"artifact_docs"`
+	PerFileByteLimit  int                        `json:"per_file_byte_limit"`
+	MaxToolIterations int                        `json:"max_tool_iterations"`
+	ToolTimeoutMS     int                        `json:"tool_timeout_ms,omitempty"`
+	AllowedTools      []string                   `json:"allowed_tools,omitempty"`
+	OnToolCall        func(ToolCallRecord) error `json:"-"`
 }
 
 // RunOutput is the finalized output contract for a run.

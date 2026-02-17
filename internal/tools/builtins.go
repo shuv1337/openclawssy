@@ -141,7 +141,16 @@ func fsWrite(_ context.Context, req Request) (map[string]any, error) {
 	if err := os.WriteFile(resolved, []byte(content), 0o600); err != nil {
 		return nil, err
 	}
-	return map[string]any{"path": path, "bytes": len(content)}, nil
+	lines := 0
+	if content != "" {
+		lines = strings.Count(content, "\n") + 1
+	}
+	return map[string]any{
+		"path":    path,
+		"bytes":   len(content),
+		"lines":   lines,
+		"summary": fmt.Sprintf("wrote %d line(s) to %s", lines, path),
+	}, nil
 }
 
 type lineEdit struct {

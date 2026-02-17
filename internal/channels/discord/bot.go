@@ -226,7 +226,9 @@ func formatToolActivity(runID string, trace map[string]any) string {
 		if callID != "" && callID != "<nil>" {
 			summary += " [" + callID + "]"
 		}
-		if errText := strings.TrimSpace(fmt.Sprintf("%v", entry["error"])); errText != "" && errText != "<nil>" {
+		if short := strings.TrimSpace(fmt.Sprintf("%v", entry["summary"])); short != "" && short != "<nil>" {
+			summary += " -> " + short
+		} else if errText := strings.TrimSpace(fmt.Sprintf("%v", entry["error"])); errText != "" && errText != "<nil>" {
 			summary += " -> error: " + errText
 		} else if outText := strings.TrimSpace(fmt.Sprintf("%v", entry["output"])); outText != "" && outText != "<nil>" {
 			if len(outText) > 180 {

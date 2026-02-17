@@ -97,12 +97,18 @@ func TestCoreFsTools(t *testing.T) {
 		t.Fatalf("register core: %v", err)
 	}
 
-	_, err := reg.Execute(context.Background(), "agent", "fs.write", ws, map[string]any{
+	writeRes, err := reg.Execute(context.Background(), "agent", "fs.write", ws, map[string]any{
 		"path":    "hello.txt",
 		"content": "hello world",
 	})
 	if err != nil {
 		t.Fatalf("fs.write: %v", err)
+	}
+	if got := writeRes["lines"]; got != 1 {
+		t.Fatalf("expected fs.write lines=1, got %#v", got)
+	}
+	if got := writeRes["summary"]; got != "wrote 1 line(s) to hello.txt" {
+		t.Fatalf("unexpected fs.write summary: %#v", got)
 	}
 
 	readRes, err := reg.Execute(context.Background(), "agent", "fs.read", ws, map[string]any{"path": "hello.txt"})

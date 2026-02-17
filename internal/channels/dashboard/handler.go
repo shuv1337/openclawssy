@@ -281,7 +281,7 @@ body{font-family:ui-monospace,Menlo,monospace;background:#0b1020;color:#e8eefc;m
 .header h1{margin:0;font-size:1.2em}
 .main-content{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .chat-section{flex:1;display:flex;flex-direction:column;padding:20px;min-height:0}
-.chat-container{flex:1;border:1px solid #333;padding:15px;overflow-y:auto;background:#0d1325;border-radius:8px;margin-bottom:10px;scroll-behavior:smooth}
+.chat-container{flex:0 0 auto;height:42vh;min-height:220px;max-height:80vh;border:1px solid #333;padding:15px;overflow-y:auto;background:#0d1325;border-radius:8px;margin-bottom:10px;scroll-behavior:smooth;resize:vertical}
 .chat-message{margin:8px 0;padding:12px;border-radius:8px;max-width:85%;word-wrap:break-word}
 .chat-user{background:#1a3a5c;margin-left:auto;margin-right:0}
 .chat-assistant{background:#1a2e1a;margin-left:0;margin-right:auto;border-left:3px solid #4a9}
@@ -294,6 +294,9 @@ body{font-family:ui-monospace,Menlo,monospace;background:#0b1020;color:#e8eefc;m
 .chat-controls{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 10px 0}
 .chat-controls button{padding:8px 12px;background:#355d7f;color:#fff;border:none;border-radius:6px;cursor:pointer}
 .chat-controls input{padding:8px 10px;border:1px solid #333;background:#151b2e;color:#e8eefc;border-radius:6px;min-width:250px}
+.chat-size-control{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #2b3a52;background:#10182b;border-radius:6px;font-size:0.8em;color:#aac3de}
+.chat-size-control input{min-width:140px;padding:0;border:none;background:transparent}
+.chat-size-value{min-width:40px;text-align:right;color:#dbe7f4}
 .tool-pane{border:1px solid #2a3447;background:#111a2e;border-radius:8px;padding:10px;margin:0 0 10px 0;max-height:160px;overflow-y:auto}
 .tool-pane h4{margin:0;color:#8fb8dc;font-size:0.85em}
 .tool-item{font-size:0.8em;line-height:1.4;padding:6px 0;border-top:1px solid #22324a}
@@ -313,12 +316,20 @@ body{font-family:ui-monospace,Menlo,monospace;background:#0b1020;color:#e8eefc;m
 .pane-search{min-width:150px;max-width:240px;flex:1}
 .pane-search input{width:100%;padding:6px 8px;border:1px solid #2c3b55;background:#0b1020;color:#dbe7f4;border-radius:4px;font-size:0.78em}
 .pane-select select{padding:6px 8px;border:1px solid #2c3b55;background:#0b1020;color:#dbe7f4;border-radius:4px;font-size:0.76em}
+.pane-toggle{padding:5px 10px;background:#2b4763;color:#e8eefc;border:none;border-radius:4px;cursor:pointer;font-size:0.74em;line-height:1}
+.pane-toggle:hover{background:#3a5f81}
+.collapsible-body{display:block}
+.is-collapsed .collapsible-body{display:none}
+.is-collapsed{max-height:none;overflow:hidden}
 .session-active-tag{display:inline-block;margin-left:6px;padding:2px 6px;background:#204966;border:1px solid #356a91;border-radius:10px;color:#d9ecff;font-size:0.72em}
 .status-section{background:#151b2e;padding:15px 20px;border-top:1px solid #2a3447;max-height:200px;overflow-y:auto}
 .status-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
 .status-header h3{margin:0;font-size:0.9em;color:#8a9}
+.status-actions{display:flex;gap:8px;align-items:center}
 .status-content{font-size:0.85em;background:#0b1020;padding:10px;border-radius:4px;max-height:120px;overflow-y:auto}
 .admin-section{background:#0d1325;padding:20px;border-top:1px solid #2a3447;max-height:420px;overflow-y:auto}
+.admin-header{display:flex;justify-content:space-between;align-items:center;margin:0 0 12px 0}
+.admin-header h3{margin:0;font-size:0.95em;color:#9db2d4}
 .admin-tabs{display:flex;gap:10px;margin-bottom:15px}
 .admin-tab{padding:8px 16px;background:#151b2e;border:1px solid #333;border-radius:4px;cursor:pointer;color:#8a9}
 .admin-tab.active{background:#1a3a5c;color:#e8eefc}
@@ -348,10 +359,12 @@ pre{background:#0b1020;padding:10px;border-radius:4px;overflow-x:auto;font-size:
 details{margin-top:8px}
 summary{cursor:pointer;color:#9db2d4}
 @media (max-width:900px){
+  .chat-container{height:45vh;max-height:70vh}
   .admin-section{max-height:none}
   .form-grid,.toggles{grid-template-columns:1fr}
   .chat-input{flex-wrap:wrap}
   .chat-input button{padding:10px 14px}
+  .chat-size-control{width:100%}
 }
 </style>
 </head><body>
@@ -363,12 +376,15 @@ summary{cursor:pointer;color:#9db2d4}
 <div class="main-content">
 <div class="chat-section">
 <div class="chat-container" id="chatHistory"></div>
-<div class="tool-pane" id="toolPane"><div class="pane-header"><h4>Tool Activity</h4><div class="pane-controls"><div class="pane-select"><select id="toolStatusFilter" onchange="renderToolActivity()"><option value="all">All</option><option value="errors">Errors</option><option value="output">Output</option></select></div><div class="pane-search"><input id="toolFilter" placeholder="Filter tool activity" oninput="renderToolActivity()"/></div></div></div><div id="toolHistory" class="tool-empty">No tool activity yet.</div></div>
-<div class="session-pane"><div class="pane-header"><h4>Recent Sessions</h4><div class="pane-controls"><div class="pane-select"><select id="sessionSortMode" onchange="renderSessionList()"><option value="recent">Recent</option><option value="oldest">Oldest</option><option value="active">Active First</option></select></div><div class="pane-search"><input id="sessionFilter" placeholder="Filter sessions" oninput="renderSessionList()"/></div></div></div><div id="sessionList" class="tool-empty">No sessions yet.</div></div>
+<div class="tool-pane" id="toolPane"><div class="pane-header"><h4>Tool Activity</h4><button class="pane-toggle" id="toggleToolPane" onclick="toggleSection('toolPane')">Collapse</button></div><div class="collapsible-body"><div class="pane-controls" style="margin-bottom:8px"><div class="pane-select"><select id="toolStatusFilter" onchange="renderToolActivity()"><option value="all">All</option><option value="errors">Errors</option><option value="output">Output</option></select></div><div class="pane-search"><input id="toolFilter" placeholder="Filter tool activity" oninput="renderToolActivity()"/></div></div><div id="toolHistory" class="tool-empty">No tool activity yet.</div></div></div>
+<div class="session-pane" id="sessionPane"><div class="pane-header"><h4>Recent Sessions</h4><button class="pane-toggle" id="toggleSessionPane" onclick="toggleSection('sessionPane')">Collapse</button></div><div class="collapsible-body"><div class="pane-controls" style="margin-bottom:8px"><div class="pane-select"><select id="sessionSortMode" onchange="renderSessionList()"><option value="recent">Recent</option><option value="oldest">Oldest</option><option value="active">Active First</option></select></div><div class="pane-search"><input id="sessionFilter" placeholder="Filter sessions" oninput="renderSessionList()"/></div></div><div id="sessionList" class="tool-empty">No sessions yet.</div></div></div>
 <div class="chat-controls">
 <button onclick="startNewChat()">New chat</button>
 <button onclick="listChats()">List chats</button>
 <button onclick="refreshSessions()">Refresh sessions</button>
+<button onclick="focusChat()">Focus chat</button>
+<button onclick="resetLayout()">Reset layout</button>
+<label class="chat-size-control">Chat height<input id="chatHeightRange" type="range" min="220" max="1000" step="20" oninput="setChatHeight(this.value,true)"/><span id="chatHeightValue" class="chat-size-value">0px</span></label>
 <input id="resumeSessionID" placeholder="session id for /resume"/>
 <button onclick="resumeChat()">Resume</button>
 </div>
@@ -378,15 +394,19 @@ summary{cursor:pointer;color:#9db2d4}
 </div>
 </div>
 
-<div class="status-section">
+<div class="status-section" id="statusSection">
 <div class="status-header">
 <h3>Status & Recent Runs</h3>
-<button onclick="loadStatus()" style="padding:4px 12px;font-size:0.8em">Refresh</button>
+<div class="status-actions"><button onclick="loadStatus()" style="padding:4px 12px;font-size:0.8em">Refresh</button><button class="pane-toggle" id="toggleStatusSection" onclick="toggleSection('statusSection')">Collapse</button></div>
 </div>
+<div class="collapsible-body">
 <div class="status-content" id="status">Loading...</div>
 </div>
+</div>
 
-<div class="admin-section">
+<div class="admin-section" id="adminSection">
+<div class="admin-header"><h3>Admin Controls</h3><button class="pane-toggle" id="toggleAdminSection" onclick="toggleSection('adminSection')">Collapse</button></div>
+<div class="collapsible-body">
 <div class="admin-tabs">
 <div class="admin-tab active" onclick="showTab(event,'config')">Config</div>
 <div class="admin-tab" onclick="showTab(event,'secrets')">Secrets</div>
@@ -492,6 +512,7 @@ summary{cursor:pointer;color:#9db2d4}
 </div>
 </div>
 </div>
+</div>
 
 <script>
 let chatMessages=[];
@@ -499,8 +520,80 @@ let toolActivity=[];
 let knownSessions=[];
 let currentActiveSessionID='';
 let currentConfig=null;
+const layoutStoragePrefix='dashboard.layout.';
 
 function byId(id){return document.getElementById(id);}
+
+function setChatHeight(value,persist){
+const chat=byId('chatHistory');
+const slider=byId('chatHeightRange');
+const label=byId('chatHeightValue');
+if(!chat)return;
+let px=Number(value);
+if(Number.isNaN(px)||px<220)px=220;
+if(px>1000)px=1000;
+chat.style.height=px+'px';
+if(slider&&Number(slider.value)!==px)slider.value=String(px);
+if(label)label.textContent=px+'px';
+if(persist)localStorage.setItem(layoutStoragePrefix+'chatHeight',String(px));
+}
+
+function setSectionCollapsed(sectionID,collapsed,persist){
+const section=byId(sectionID);
+if(!section)return;
+section.classList.toggle('is-collapsed',!!collapsed);
+const toggle=section.querySelector('.pane-toggle');
+if(toggle)toggle.textContent=collapsed?'Expand':'Collapse';
+if(persist)localStorage.setItem(layoutStoragePrefix+sectionID,collapsed?'1':'0');
+}
+
+function toggleSection(sectionID){
+const section=byId(sectionID);
+if(!section)return;
+setSectionCollapsed(sectionID,!section.classList.contains('is-collapsed'),true);
+}
+
+function focusChat(){
+setSectionCollapsed('toolPane',true,true);
+setSectionCollapsed('sessionPane',true,true);
+setSectionCollapsed('statusSection',true,true);
+setSectionCollapsed('adminSection',true,true);
+setChatHeight(Math.max(420,Math.floor(window.innerHeight*0.62)),true);
+}
+
+function resetLayout(){
+['toolPane','sessionPane','statusSection','adminSection'].forEach(function(id){setSectionCollapsed(id,false,true);});
+setChatHeight(Math.max(320,Math.floor(window.innerHeight*0.42)),true);
+}
+
+function applyLayoutPreferences(){
+const savedHeight=Number(localStorage.getItem(layoutStoragePrefix+'chatHeight'));
+if(savedHeight>0){
+setChatHeight(savedHeight,false);
+}else{
+setChatHeight(Math.max(320,Math.floor(window.innerHeight*0.42)),false);
+}
+['toolPane','sessionPane','statusSection','adminSection'].forEach(function(id){
+setSectionCollapsed(id,localStorage.getItem(layoutStoragePrefix+id)==='1',false);
+});
+}
+
+function bindChatResizePersistence(){
+const chat=byId('chatHistory');
+const slider=byId('chatHeightRange');
+const saveCurrentHeight=function(){
+if(!chat)return;
+const px=Math.round(chat.getBoundingClientRect().height);
+setChatHeight(px,true);
+};
+if(chat){
+chat.addEventListener('mouseup',saveCurrentHeight);
+chat.addEventListener('touchend',saveCurrentHeight);
+}
+if(slider){
+slider.addEventListener('change',function(){setChatHeight(slider.value,true);});
+}
+}
 
 function showTab(evt,tab){
 document.querySelectorAll('.admin-tab').forEach(function(t){t.classList.remove('active');});
@@ -771,7 +864,7 @@ const filtered=toolActivity.filter(function(item){
 if(statusMode==='errors' && !(item&&item.error))return false;
 if(statusMode==='output' && (item&&item.error))return false;
 if(!query)return true;
-const blob=normalizeForSearch((item&&item.tool)||'')+' '+normalizeForSearch((item&&item.callID)||'')+' '+normalizeForSearch((item&&item.output)||'')+' '+normalizeForSearch((item&&item.error)||'');
+const blob=normalizeForSearch((item&&item.tool)||'')+' '+normalizeForSearch((item&&item.callID)||'')+' '+normalizeForSearch((item&&item.summary)||'')+' '+normalizeForSearch((item&&item.output)||'')+' '+normalizeForSearch((item&&item.error)||'');
 return blob.indexOf(query)!==-1;
 });
 if(filtered.length===0){
@@ -785,6 +878,10 @@ const tool=item.tool||'unknown.tool';
 const callID=item.callID?(' ['+item.callID+']'):'';
 const label=item.error?'error':'output';
 const payload=item.error?item.error:item.output;
+const summary=item.summary?formatContent(item.summary):'';
+if(summary){
+return '<div class="tool-item"><strong>'+tool+callID+'</strong><br><span class="tool-preview">'+summary+'</span></div>';
+}
 return '<div class="tool-item"><strong>'+tool+callID+'</strong><br>'+renderToolPayload(label,payload)+'</div>';
 }).join('');
 }
@@ -807,15 +904,47 @@ if(v.length<=maxLen)return v;
 return v.slice(0,maxLen)+'...';
 }
 
+function parseToolOutputJSON(output){
+if(!output)return null;
+try{return JSON.parse(String(output));}catch(e){return null;}
+}
+
+function deriveToolSummary(tool,output,error,fallbackSummary){
+if(fallbackSummary&&String(fallbackSummary).trim())return String(fallbackSummary).trim();
+if(error&&String(error).trim())return 'error: '+compactToolText(String(error),180);
+const parsed=parseToolOutputJSON(output);
+if(!parsed||typeof parsed!=='object')return '';
+if(tool==='fs.write'){
+const path=parsed.path?String(parsed.path).trim():'';
+const lines=Number(parsed.lines);
+if(path&&!Number.isNaN(lines))return 'wrote '+lines+' line(s) to '+path;
+}
+if(tool==='fs.edit'){
+const path=parsed.path?String(parsed.path).trim():'';
+const applied=Number(parsed.applied_edits);
+if(path&&!Number.isNaN(applied))return 'applied '+applied+' edit(s) to '+path;
+}
+if(tool==='fs.list'){
+const path=parsed.path?String(parsed.path).trim():'';
+const entries=Array.isArray(parsed.entries)?parsed.entries.length:0;
+if(path)return 'listed '+entries+' entries in '+path;
+}
+return '';
+}
+
 function appendToolActivityFromRun(run){
 if(!run||!run.trace||!Array.isArray(run.trace.tool_execution_results))return;
 run.trace.tool_execution_results.forEach(function(item){
 if(!item||typeof item!=='object')return;
+const tool=item.tool||'unknown.tool';
+const output=compactToolText(item.output||'',5000);
+const error=compactToolText(item.error||'',5000);
 toolActivity.push({
-tool:item.tool||'unknown.tool',
+tool:tool,
 callID:item.tool_call_id||'',
-output:compactToolText(item.output||'',5000),
-error:compactToolText(item.error||'',5000)
+summary:deriveToolSummary(tool,output,error,item.summary||''),
+output:output,
+error:error
 });
 });
 renderToolActivity();
@@ -903,11 +1032,15 @@ if(!msg||typeof msg!=='object')return;
 if(msg.role==='tool'){
 let parsed={};
 try{parsed=JSON.parse(msg.content||'{}');}catch(e){parsed={};}
+const toolName=msg.tool_name||parsed.tool||'unknown.tool';
+const output=compactToolText(parsed.output||msg.content||'',5000);
+const error=compactToolText(parsed.error||'',5000);
 toolActivity.push({
-tool:msg.tool_name||parsed.tool||'unknown.tool',
+tool:toolName,
 callID:msg.tool_call_id||parsed.id||'',
-output:compactToolText(parsed.output||msg.content||'',5000),
-error:compactToolText(parsed.error||'',5000)
+summary:deriveToolSummary(toolName,output,error,parsed.summary||''),
+output:output,
+error:error
 });
 return;
 }
@@ -1035,6 +1168,8 @@ el.addEventListener('change',updateRawPreview);
 }
 
 wireFormPreviewUpdates();
+applyLayoutPreferences();
+bindChatResizePersistence();
 renderToolActivity();
 refreshSessions();
 loadStatus();

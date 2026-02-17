@@ -203,7 +203,12 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	}
 
 	modelMessages := []agent.ChatMessage{{Role: "user", Content: message}}
+	var conversationStore *chatstore.Store
 	if sessionID != "" {
+		conversationStore, err = chatstore.NewStore(e.agentsDir)
+		if err != nil {
+			return RunResult{}, fmt.Errorf("runtime: init chat store: %w", err)
+		}
 		history, historyErr := e.loadSessionMessages(sessionID, 200)
 		if historyErr != nil {
 			return RunResult{}, historyErr
@@ -214,6 +219,15 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	}
 	if len(modelMessages) == 0 || !hasTrailingUserMessage(modelMessages, message) {
 		modelMessages = append(modelMessages, agent.ChatMessage{Role: "user", Content: message})
+	}
+
+	appendToolsAfterRun := true
+	onToolCall := func(rec agent.ToolCallRecord) error { return nil }
+	if conversationStore != nil {
+		appendToolsAfterRun = false
+		onToolCall = func(rec agent.ToolCallRecord) error {
+			return appendToolCallMessage(conversationStore, sessionID, runID, rec)
+		}
 	}
 
 	start := time.Now().UTC()
@@ -227,6 +241,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		MaxToolIterations: 8,
 		ToolTimeoutMS:     int((45 * time.Second) / time.Millisecond),
 		AllowedTools:      allowedTools,
+		OnToolCall:        onToolCall,
 	})
 
 	artifactPath := ""
@@ -263,7 +278,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 			runErr = err
 		}
 		if runErr == nil && sessionID != "" {
-			if err := e.appendRunConversation(sessionID, runID, out); err != nil {
+			if err := e.appendRunConversation(sessionID, runID, out, appendToolsAfterRun); err != nil {
 				runErr = err
 			}
 		}
@@ -355,34 +370,16 @@ func hasTrailingUserMessage(messages []agent.ChatMessage, currentMessage string)
 	return strings.TrimSpace(last.Content) == strings.TrimSpace(currentMessage)
 }
 
-func (e *Engine) appendRunConversation(sessionID, runID string, out agent.RunOutput) error {
+func (e *Engine) appendRunConversation(sessionID, runID string, out agent.RunOutput, includeToolMessages bool) error {
 	store, err := chatstore.NewStore(e.agentsDir)
 	if err != nil {
 		return fmt.Errorf("runtime: init chat store: %w", err)
 	}
-	for _, rec := range out.ToolCalls {
-		payload, marshalErr := json.Marshal(map[string]any{
-			"tool":   rec.Request.Name,
-			"id":     rec.Request.ID,
-			"output": rec.Result.Output,
-			"error":  rec.Result.Error,
-		})
-		if marshalErr != nil {
-			return fmt.Errorf("runtime: marshal tool result: %w", marshalErr)
-		}
-		ts := rec.CompletedAt
-		if ts.IsZero() {
-			ts = time.Now().UTC()
-		}
-		if err := store.AppendMessage(sessionID, chatstore.Message{
-			Role:       "tool",
-			Content:    string(payload),
-			TS:         ts,
-			RunID:      runID,
-			ToolCallID: rec.Request.ID,
-			ToolName:   rec.Request.Name,
-		}); err != nil {
-			return fmt.Errorf("runtime: append tool message: %w", err)
+	if includeToolMessages {
+		for _, rec := range out.ToolCalls {
+			if err := appendToolCallMessage(store, sessionID, runID, rec); err != nil {
+				return err
+			}
 		}
 	}
 	if strings.TrimSpace(out.FinalText) != "" {
@@ -393,6 +390,38 @@ func (e *Engine) appendRunConversation(sessionID, runID string, out agent.RunOut
 		if err := store.AppendMessage(sessionID, chatstore.Message{Role: "assistant", Content: out.FinalText, TS: ts, RunID: runID}); err != nil {
 			return fmt.Errorf("runtime: append assistant message: %w", err)
 		}
+	}
+	return nil
+}
+
+func appendToolCallMessage(store *chatstore.Store, sessionID, runID string, rec agent.ToolCallRecord) error {
+	if store == nil {
+		return fmt.Errorf("runtime: chat store is not configured")
+	}
+	summary := summarizeToolExecution(rec.Request.Name, rec.Result.Output, rec.Result.Error)
+	payload, marshalErr := json.Marshal(map[string]any{
+		"tool":    rec.Request.Name,
+		"id":      rec.Request.ID,
+		"summary": summary,
+		"output":  rec.Result.Output,
+		"error":   rec.Result.Error,
+	})
+	if marshalErr != nil {
+		return fmt.Errorf("runtime: marshal tool result: %w", marshalErr)
+	}
+	ts := rec.CompletedAt
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	if err := store.AppendMessage(sessionID, chatstore.Message{
+		Role:       "tool",
+		Content:    string(payload),
+		TS:         ts,
+		RunID:      runID,
+		ToolCallID: rec.Request.ID,
+		ToolName:   rec.Request.Name,
+	}); err != nil {
+		return fmt.Errorf("runtime: append tool message: %w", err)
 	}
 	return nil
 }
@@ -424,7 +453,7 @@ func runtimeContextDoc(workspaceDir string) string {
 }
 
 func toolCallingBestPracticesDoc() string {
-	return "# TOOL_CALLING_BEST_PRACTICES\n\n- Use only registered tool names: fs.read, fs.list, fs.write, fs.edit, code.search, time.now, shell.exec.\n- Preferred format for tool calls is a fenced JSON object with tool_name and arguments.\n- Example:\n```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```\n- For bash commands use shell.exec with command=`bash` and args=[\"-lc\", \"<script>\"].\n- Do not invent tool names (for example time.sleep is invalid).\n- Do not claim file edits or command results until a matching tool.result is observed.\n- Keep one clear tool call at a time, then continue after reading the result.\n"
+	return "# TOOL_CALLING_BEST_PRACTICES\n\n- Use only registered tool names: fs.read, fs.list, fs.write, fs.edit, code.search, time.now, shell.exec.\n- Preferred format for tool calls is a fenced JSON object with tool_name and arguments.\n- Example:\n```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```\n- For bash commands use shell.exec with command=`bash` and args=[\"-lc\", \"<script>\"].\n- Do not invent tool names (for example time.sleep is invalid).\n- Do not claim file edits or command results until a matching tool.result is observed.\n- For multi-step requests, chain tool calls until the task is complete instead of stopping after the first step.\n- After each tool result, send a short progress update before issuing the next tool call when possible.\n"
 }
 
 type RegistryExecutor struct {

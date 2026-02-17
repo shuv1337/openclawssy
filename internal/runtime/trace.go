@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -41,6 +42,7 @@ type toolExecutionResultLog struct {
 	Tool       string `json:"tool"`
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	Arguments  string `json:"arguments,omitempty"`
+	Summary    string `json:"summary,omitempty"`
 	Output     string `json:"output,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -106,6 +108,7 @@ func (c *runTraceCollector) RecordToolExecution(records []agent.ToolCallRecord) 
 		item := toolExecutionResultLog{
 			Tool:       strings.TrimSpace(rec.Request.Name),
 			ToolCallID: strings.TrimSpace(rec.Request.ID),
+			Summary:    summarizeToolExecution(rec.Request.Name, rec.Result.Output, rec.Result.Error),
 			Output:     strings.TrimSpace(rec.Result.Output),
 			Error:      strings.TrimSpace(rec.Result.Error),
 		}
@@ -117,6 +120,78 @@ func (c *runTraceCollector) RecordToolExecution(records []agent.ToolCallRecord) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.env.ToolExecutionResults = append(c.env.ToolExecutionResults, items...)
+}
+
+func summarizeToolExecution(toolName, output, errText string) string {
+	errText = strings.TrimSpace(errText)
+	if errText != "" {
+		return "error: " + truncateSummary(errText, 180)
+	}
+
+	toolName = strings.TrimSpace(toolName)
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+
+	parsed := map[string]any{}
+	_ = json.Unmarshal([]byte(output), &parsed)
+
+	switch toolName {
+	case "fs.write":
+		path := strings.TrimSpace(fmt.Sprintf("%v", parsed["path"]))
+		lines := intValue(parsed["lines"])
+		if path != "" && lines >= 0 {
+			return fmt.Sprintf("wrote %d line(s) to %s", lines, path)
+		}
+	case "fs.edit":
+		path := strings.TrimSpace(fmt.Sprintf("%v", parsed["path"]))
+		edits := intValue(parsed["applied_edits"])
+		if path != "" && edits > 0 {
+			return fmt.Sprintf("applied %d edit(s) to %s", edits, path)
+		}
+	case "fs.list":
+		path := strings.TrimSpace(fmt.Sprintf("%v", parsed["path"]))
+		entries := 0
+		if list, ok := parsed["entries"].([]any); ok {
+			entries = len(list)
+		}
+		if path != "" {
+			return fmt.Sprintf("listed %d entries in %s", entries, path)
+		}
+	case "fs.read":
+		path := strings.TrimSpace(fmt.Sprintf("%v", parsed["path"]))
+		content := strings.TrimSpace(fmt.Sprintf("%v", parsed["content"]))
+		if path != "" {
+			if content == "" {
+				return fmt.Sprintf("read %s (empty)", path)
+			}
+			return fmt.Sprintf("read %s", path)
+		}
+	}
+
+	return truncateSummary(output, 180)
+}
+
+func truncateSummary(value string, max int) string {
+	value = strings.TrimSpace(value)
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	if max <= 3 {
+		return value[:max]
+	}
+	return strings.TrimSpace(value[:max-3]) + "..."
+}
+
+func intValue(v any) int {
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s == "" || s == "<nil>" {
+		return 0
+	}
+	n := 0
+	_, _ = fmt.Sscanf(s, "%d", &n)
+	return n
 }
 
 func (c *runTraceCollector) Snapshot() map[string]any {

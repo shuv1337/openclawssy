@@ -111,37 +111,51 @@ func TestRunnerToolIterationCap(t *testing.T) {
 	}
 }
 
-func TestRunnerBlocksRepeatedToolCallAfterThreshold(t *testing.T) {
+func TestRunnerCachesRepeatedToolCallResult(t *testing.T) {
 	model := &mockModel{
 		responses: []ModelResponse{
 			{ToolCalls: []ToolCallRequest{{ID: "1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
 			{ToolCalls: []ToolCallRequest{{ID: "2", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
 			{ToolCalls: []ToolCallRequest{{ID: "3", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
 			{ToolCalls: []ToolCallRequest{{ID: "4", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
+			{FinalText: "done"},
 		},
 	}
-	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 8}
+	tools := &mockTools{results: map[string]ToolCallResult{"1": {ID: "1", Output: `{"entries":["a.txt"]}`}}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 8}
 
 	out, err := runner.Run(context.Background(), RunInput{Message: "loop"})
-	if !errors.Is(err, ErrRepeatedToolCall) {
-		t.Fatalf("expected ErrRepeatedToolCall, got %v", err)
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
 	}
 	if len(out.ToolCalls) != 4 {
 		t.Fatalf("expected four tool call records, got %d", len(out.ToolCalls))
 	}
-	if out.ToolCalls[1].Result.Error == "" || out.ToolCalls[2].Result.Error == "" || out.ToolCalls[3].Result.Error == "" {
-		t.Fatalf("expected repeated-call guard errors in records: %+v", out.ToolCalls)
+	if len(tools.calls) != 1 {
+		t.Fatalf("expected tool executor to run once and reuse cached result, got %d calls", len(tools.calls))
+	}
+	for i, rec := range out.ToolCalls {
+		if rec.Result.Error != "" {
+			t.Fatalf("expected no repeated-call guard errors, got record %d: %+v", i, rec)
+		}
+		if rec.Result.Output != `{"entries":["a.txt"]}` {
+			t.Fatalf("expected cached output for record %d, got %q", i, rec.Result.Output)
+		}
 	}
 }
 
-func TestRunnerInjectsGuardErrorAndLetsModelRecover(t *testing.T) {
+func TestRunnerAllowsRepeatedCallAndLetsModelRecover(t *testing.T) {
 	model := &mockModel{responses: []ModelResponse{
 		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
 		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
 		{FinalText: "done"},
 	}}
 
-	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 8}
+	tools := &mockTools{results: map[string]ToolCallResult{"1": {ID: "1", Output: "ok"}}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 8}
 	out, err := runner.Run(context.Background(), RunInput{Message: "loop"})
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
@@ -152,8 +166,11 @@ func TestRunnerInjectsGuardErrorAndLetsModelRecover(t *testing.T) {
 	if len(out.ToolCalls) != 2 {
 		t.Fatalf("expected two tool call records, got %d", len(out.ToolCalls))
 	}
-	if out.ToolCalls[1].Result.Error == "" {
-		t.Fatal("expected repeated tool call guard error in second record")
+	if len(tools.calls) != 1 {
+		t.Fatalf("expected repeated call to be served from cache, got %d tool executions", len(tools.calls))
+	}
+	if out.ToolCalls[0].Result.Output != out.ToolCalls[1].Result.Output {
+		t.Fatalf("expected repeated call output to be reused, got %+v", out.ToolCalls)
 	}
 }
 
@@ -243,5 +260,38 @@ func TestRunnerNormalizesDuplicateToolCallIDs(t *testing.T) {
 	}
 	if model.reqs[1].ToolResults[0].ID != firstID || model.reqs[1].ToolResults[1].ID != secondID {
 		t.Fatalf("unexpected tool result IDs passed to model: %+v", model.reqs[1].ToolResults)
+	}
+}
+
+func TestRunnerInvokesOnToolCallForEachRecord(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "tool-1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "tool-2", Name: "fs.read", Arguments: []byte(`{"path":"README.md"}`)}}},
+		{FinalText: "done"},
+	}}
+	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 8}
+
+	notifications := make([]ToolCallRecord, 0, 2)
+	out, err := runner.Run(context.Background(), RunInput{
+		Message: "inspect project",
+		OnToolCall: func(rec ToolCallRecord) error {
+			notifications = append(notifications, rec)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected two tool calls, got %d", len(out.ToolCalls))
+	}
+	if len(notifications) != 2 {
+		t.Fatalf("expected two tool notifications, got %d", len(notifications))
+	}
+	if notifications[0].Request.Name != "fs.list" || notifications[1].Request.Name != "fs.read" {
+		t.Fatalf("unexpected notification order: %+v", notifications)
 	}
 }
