@@ -18,6 +18,8 @@ const (
 	DefaultToolIterationCap          = 120
 	DefaultToolTimeout               = 900 * time.Second
 	repeatedNoProgressLoopCapTrigger = 6
+	failureRecoveryTrigger           = 2
+	failureGuidanceEscalation        = 3
 )
 
 // Runner executes the model/tool loop for a single run.
@@ -63,18 +65,44 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	cachedFailedToolResults := make(map[string]ToolCallResult)
 	failedToolCallCounts := make(map[string]int)
 	failedToolCallErrors := make(map[string]string)
+	consecutiveToolFailures := 0
+	failureRecoveryActive := false
+	failuresSinceRecovery := 0
 	toolTimeout := time.Duration(input.ToolTimeoutMS) * time.Millisecond
 	if toolTimeout <= 0 {
 		toolTimeout = DefaultToolTimeout
 	}
 	noProgressIterations := 0
 
+	registerToolOutcome := func(errText string) {
+		if strings.TrimSpace(errText) == "" {
+			consecutiveToolFailures = 0
+			failureRecoveryActive = false
+			failuresSinceRecovery = 0
+			return
+		}
+		consecutiveToolFailures++
+		if !failureRecoveryActive && consecutiveToolFailures >= failureRecoveryTrigger {
+			failureRecoveryActive = true
+			failuresSinceRecovery = 0
+			return
+		}
+		if failureRecoveryActive {
+			failuresSinceRecovery++
+		}
+	}
+
 	for {
+		systemPrompt := out.Prompt
+		if failureRecoveryActive {
+			systemPrompt = appendPromptDirective(systemPrompt, "# ERROR_RECOVERY_MODE\n- Recent tool calls failed. Analyze the latest errors and outputs before choosing the next action.\n- Try a materially different approach to resolve the error.\n- Do not repeat the same failing command/arguments unless you explain why it should now work.")
+		}
+
 		resp, err := r.Model.Generate(ctx, ModelRequest{
-			SystemPrompt: out.Prompt,
+			SystemPrompt: systemPrompt,
 			Messages:     append([]ChatMessage(nil), messages...),
 			AllowedTools: append([]string(nil), input.AllowedTools...),
-			Prompt:       out.Prompt,
+			Prompt:       systemPrompt,
 			Message:      input.Message,
 			ToolResults:  append([]ToolCallResult(nil), toolResults...),
 		})
@@ -96,7 +124,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 		if toolIterations >= toolCap {
 			if len(toolResults) > 0 {
-				if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults); finalized != "" {
+				if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults, ""); finalized != "" {
 					out.FinalText = finalized
 					out.CompletedAt = time.Now().UTC()
 					return out, nil
@@ -123,6 +151,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
+					registerToolOutcome(record.Result.Error)
 					if input.OnToolCall != nil {
 						if err := input.OnToolCall(record); err != nil {
 							out.CompletedAt = time.Now().UTC()
@@ -137,6 +166,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					record := ToolCallRecord{Request: call, Result: cached, StartedAt: now, CompletedAt: now}
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
+					registerToolOutcome(record.Result.Error)
 					if input.OnToolCall != nil {
 						if err := input.OnToolCall(record); err != nil {
 							out.CompletedAt = time.Now().UTC()
@@ -165,6 +195,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			record.Result = result
 			record.CompletedAt = time.Now().UTC()
 			hadFreshExecution = true
+			registerToolOutcome(result.Error)
 
 			if callKey != "|" {
 				if strings.TrimSpace(result.Error) == "" {
@@ -202,8 +233,14 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			noProgressIterations++
 		}
 
+		if failureRecoveryActive && failuresSinceRecovery >= failureGuidanceEscalation && len(out.ToolCalls) > 0 {
+			out.FinalText = requestUserGuidanceFromFailures(input.Message, out.ToolCalls)
+			out.CompletedAt = time.Now().UTC()
+			return out, nil
+		}
+
 		if noProgressIterations >= repeatedNoProgressLoopCapTrigger && len(toolResults) > 0 {
-			if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults); finalized != "" {
+			if finalized := finalizeFromToolResults(ctx, r.Model, out.Prompt, messages, input.Message, toolResults, ""); finalized != "" {
 				out.FinalText = finalized
 			} else {
 				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
@@ -216,7 +253,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	}
 }
 
-func finalizeFromToolResults(ctx context.Context, model Model, prompt string, messages []ChatMessage, message string, toolResults []ToolCallResult) string {
+func finalizeFromToolResults(ctx context.Context, model Model, prompt string, messages []ChatMessage, message string, toolResults []ToolCallResult, extraDirective string) string {
 	if model == nil || len(toolResults) == 0 {
 		return ""
 	}
@@ -226,6 +263,9 @@ func finalizeFromToolResults(ctx context.Context, model Model, prompt string, me
 		finalPrompt += "\n\n"
 	}
 	finalPrompt += "# FINAL_RESPONSE_MODE\n- Do not call tools in this turn.\n- Use the latest tool results to answer the user directly.\n- If some commands failed, explain the failure and give the best next step."
+	if strings.TrimSpace(extraDirective) != "" {
+		finalPrompt += "\n\n" + strings.TrimSpace(extraDirective)
+	}
 
 	resp, err := model.Generate(ctx, ModelRequest{
 		SystemPrompt: finalPrompt,
@@ -274,6 +314,79 @@ func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
 	}
 	b.WriteString(fmt.Sprintf("\n(Iteration cap: %d)", toolCap))
 	return b.String()
+}
+
+func appendPromptDirective(prompt, directive string) string {
+	base := strings.TrimSpace(prompt)
+	extra := strings.TrimSpace(directive)
+	if extra == "" {
+		return base
+	}
+	if base == "" {
+		return extra
+	}
+	return base + "\n\n" + extra
+}
+
+func requestUserGuidanceFromFailures(userMessage string, records []ToolCallRecord) string {
+	var b strings.Builder
+	b.WriteString("I hit repeated tool failures and need your guidance before I continue.\n")
+	goal := strings.TrimSpace(userMessage)
+	if goal != "" {
+		b.WriteString("Goal: ")
+		b.WriteString(goal)
+		b.WriteString("\n")
+	}
+
+	failing := make([]ToolCallRecord, 0, 6)
+	for i := len(records) - 1; i >= 0 && len(failing) < 6; i-- {
+		if strings.TrimSpace(records[i].Result.Error) == "" {
+			continue
+		}
+		failing = append(failing, records[i])
+	}
+	if len(failing) == 0 {
+		b.WriteString("I do not have detailed failing tool outputs to share yet.\n")
+		b.WriteString("Please tell me how you want to proceed.")
+		return b.String()
+	}
+
+	b.WriteString("What I tried and what failed:\n")
+	for i := len(failing) - 1; i >= 0; i-- {
+		rec := failing[i]
+		attempt := rec.Request.Name
+		args := truncateGuidanceText(strings.TrimSpace(string(rec.Request.Arguments)), 220)
+		if args != "" {
+			attempt += " " + args
+		}
+		errorText := truncateGuidanceText(strings.TrimSpace(rec.Result.Error), 420)
+		b.WriteString(fmt.Sprintf("- %d) %s\n", len(failing)-i, attempt))
+		b.WriteString("  error: ")
+		b.WriteString(errorText)
+		b.WriteString("\n")
+		output := truncateGuidanceText(strings.TrimSpace(rec.Result.Output), 700)
+		if output != "" {
+			b.WriteString("  output: ")
+			b.WriteString(output)
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("Please guide me on the next step (for example: grant capability/permission, provide auth details, or pick a different approach).")
+	return b.String()
+}
+
+func truncateGuidanceText(value string, maxChars int) string {
+	text := strings.TrimSpace(value)
+	if text == "" || maxChars <= 0 {
+		return ""
+	}
+	if len(text) <= maxChars {
+		return text
+	}
+	if maxChars <= 3 {
+		return text[:maxChars]
+	}
+	return strings.TrimSpace(text[:maxChars-3]) + "..."
 }
 
 func uniqueToolCallID(rawID string, ordinal int, used map[string]struct{}) string {

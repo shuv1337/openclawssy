@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -393,5 +394,70 @@ func TestRunnerDefaultToolSettingsAreRaisedForLongTasks(t *testing.T) {
 	}
 	if DefaultToolTimeout < 120*time.Second {
 		t.Fatalf("expected higher default tool timeout, got %s", DefaultToolTimeout)
+	}
+}
+
+func TestRunnerEntersRecoveryModeAfterTwoFailures(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "1", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","tailscale status --json"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "2", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","tailscale status --json --peers"]}`)}}},
+		{ToolCalls: []ToolCallRequest{{ID: "3", Name: "shell.exec", Arguments: []byte(`{"command":"bash","args":["-lc","ps aux | grep tailscaled"]}`)}}},
+		{FinalText: "done"},
+	}}
+
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Error: "tool_execution_failed (shell.exec): socket missing"},
+		"2": {ID: "2", Error: "tool_execution_failed (shell.exec): socket missing"},
+		"3": {ID: "3", Output: "tailscaled running"},
+	}}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "fix tailscaled"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(model.reqs) < 3 {
+		t.Fatalf("expected at least three model requests, got %d", len(model.reqs))
+	}
+	if !strings.Contains(model.reqs[2].SystemPrompt, "ERROR_RECOVERY_MODE") {
+		t.Fatalf("expected recovery mode directive after two failures, got %q", model.reqs[2].SystemPrompt)
+	}
+}
+
+func TestRunnerAsksUserGuidanceAfterThreeMoreFailures(t *testing.T) {
+	responses := make([]ModelResponse, 0, 6)
+	toolResults := make(map[string]ToolCallResult, 6)
+	for i := 1; i <= 6; i++ {
+		id := "call-" + strconv.Itoa(i)
+		cmd := `{"command":"bash","args":["-lc","tailscale status # attempt ` + strconv.Itoa(i) + `"]}`
+		responses = append(responses, ModelResponse{ToolCalls: []ToolCallRequest{{ID: id, Name: "shell.exec", Arguments: []byte(cmd)}}})
+		toolResults[id] = ToolCallResult{ID: id, Output: "stderr: connect unix /var/run/tailscale/tailscaled.sock", Error: "tool_execution_failed (shell.exec): socket missing"}
+	}
+
+	model := &mockModel{responses: responses}
+	tools := &mockTools{results: toolResults}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "please fix tailscaled"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !strings.Contains(out.FinalText, "need your guidance before I continue") {
+		t.Fatalf("expected user-guidance finalization, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "What I tried and what failed") {
+		t.Fatalf("expected attempted steps in finalization, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "error:") || !strings.Contains(out.FinalText, "output:") {
+		t.Fatalf("expected error and output details in finalization, got %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 5 {
+		t.Fatalf("expected 5 tool calls before user-guidance escalation, got %d", len(out.ToolCalls))
+	}
+	if len(model.reqs) != 5 {
+		t.Fatalf("expected runner to stop without extra model call after escalation, got %d", len(model.reqs))
 	}
 }
