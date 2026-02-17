@@ -18,13 +18,19 @@ What works now:
 - multi-tool parsing and normalized tool call IDs across runs
 - repeated identical tool calls reuse successful cached results within a run
 - per-tool execution summaries in trace/dashboard/Discord output
-- long-context handling with compaction around 80 percent budget
+- session context replay with bounded/truncated history budgets
 - model response cap (`model.max_tokens`, default 20000)
+- thinking extraction with configurable display modes (`never` default, `on_error`, `always`)
 - dashboard chat layout controls (resizable chat, collapsible panes, focus mode)
 - long-running tool defaults (`120` iterations, `900s` per tool call) for heavy shell workflows
 - staged failure recovery (after 2 failures, force error-recovery mode; after 3 additional failures, ask user with attempted commands/errors/outputs, including intermittent failure loops)
 - dashboard chat auto-progress updates for long runs (elapsed time + completed tool calls + latest summary)
 - chat queue API now returns `session_id` for queued runs so clients can stay attached to session context
+- chatstore cross-process locking for writes and lock-respecting reads
+- scheduler concurrent execution worker pool + global/per-job pause-resume controls
+- dashboard admin scheduler APIs (jobs CRUD + pause/resume control)
+- global run queue saturation guard with explicit overload response (`429`)
+- canonical tool error codes with machine-readable persistence
 
 What is not production-ready:
 - compatibility and schema stability
@@ -32,9 +38,8 @@ What is not production-ready:
 - external security review
 - complete observability and disaster recovery
 
-Known open issue in test suite:
-- Full `go test ./...` currently reports one existing unrelated chat allowlist failure:
-  `internal/channels/chat` -> `TestAllowlist_EmptyUsersDenyByDefault`
+Current test status:
+- `go test ./...` passes.
 
 ## Recommendation
 
