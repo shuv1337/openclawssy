@@ -39,26 +39,26 @@ func RegisterCore(reg *Registry) error {
 }
 
 func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
-	if err := reg.Register(ToolSpec{Name: "fs.read", Description: "Read text file", Required: []string{"path"}}, fsRead); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.read", Description: "Read text file", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, fsRead); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "fs.list", Description: "List directory entries", Required: []string{"path"}}, fsList); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.list", Description: "List directory entries", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, fsList); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "fs.write", Description: "Write text file", Required: []string{"path", "content"}}, fsWrite); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.write", Description: "Write text file", Required: []string{"path", "content"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "content": ArgTypeString}}, fsWrite); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply line-based file edits", Required: []string{"path"}}, fsEdit); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply line-based file edits", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, fsEdit); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "code.search", Description: "Search code with regex", Required: []string{"pattern"}}, codeSearch); err != nil {
+	if err := reg.Register(ToolSpec{Name: "code.search", Description: "Search code with regex", Required: []string{"pattern"}, ArgTypes: map[string]ArgType{"pattern": ArgTypeString}}, codeSearch); err != nil {
 		return err
 	}
 	if err := reg.Register(ToolSpec{Name: "time.now", Description: "Get current time"}, timeNow); err != nil {
 		return err
 	}
 	if opts.EnableShellExec {
-		if err := reg.Register(ToolSpec{Name: "shell.exec", Description: "Run command in sandbox", Required: []string{"command"}}, shellExec); err != nil {
+		if err := reg.Register(ToolSpec{Name: "shell.exec", Description: "Run command in sandbox", Required: []string{"command"}, ArgTypes: map[string]ArgType{"command": ArgTypeString}}, shellExec); err != nil {
 			return err
 		}
 	}

@@ -24,6 +24,10 @@ var defaultQueuedRunTracker = newQueuedRunTracker()
 
 const queuedRunMaxAttempts = 2
 
+const defaultQueuedRunMaxInFlight = 64
+
+var ErrQueueFull = errors.New("httpchannel: run queue is full")
+
 func QueueRun(ctx context.Context, store RunStore, executor RunExecutor, agentID, message, source, sessionID string) (Run, error) {
 	now := time.Now().UTC()
 	run := Run{
@@ -36,11 +40,14 @@ func QueueRun(ctx context.Context, store RunStore, executor RunExecutor, agentID
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	if !defaultQueuedRunTracker.tryBegin() {
+		return Run{}, ErrQueueFull
+	}
 	created, err := store.Create(ctx, run)
 	if err != nil {
+		defaultQueuedRunTracker.done()
 		return Run{}, fmt.Errorf("create run: %w", err)
 	}
-	defaultQueuedRunTracker.begin()
 	go executeQueuedRun(context.Background(), store, executor, created)
 	return created, nil
 }
@@ -127,24 +134,29 @@ func WaitForQueuedRuns(ctx context.Context) error {
 }
 
 type queuedRunTracker struct {
-	mu       sync.Mutex
-	inFlight int
-	waitCh   chan struct{}
+	mu          sync.Mutex
+	inFlight    int
+	maxInFlight int
+	waitCh      chan struct{}
 }
 
 func newQueuedRunTracker() *queuedRunTracker {
 	ch := make(chan struct{})
 	close(ch)
-	return &queuedRunTracker{waitCh: ch}
+	return &queuedRunTracker{waitCh: ch, maxInFlight: defaultQueuedRunMaxInFlight}
 }
 
-func (t *queuedRunTracker) begin() {
+func (t *queuedRunTracker) tryBegin() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.maxInFlight > 0 && t.inFlight >= t.maxInFlight {
+		return false
+	}
 	if t.inFlight == 0 {
 		t.waitCh = make(chan struct{})
 	}
 	t.inFlight++
+	return true
 }
 
 func (t *queuedRunTracker) done() {

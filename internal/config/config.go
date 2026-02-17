@@ -37,7 +37,7 @@ type OutputConfig struct {
 func NormalizeThinkingMode(mode string) string {
 	value := strings.ToLower(strings.TrimSpace(mode))
 	if value == "" {
-		return ThinkingModeOnError
+		return ThinkingModeNever
 	}
 	return value
 }
@@ -147,7 +147,7 @@ func Default() Config {
 			Dashboard:   true,
 		},
 		Output: OutputConfig{
-			ThinkingMode: ThinkingModeOnError,
+			ThinkingMode: ThinkingModeNever,
 		},
 		Workspace: WorkspaceConfig{
 			Root: "./workspace",
@@ -288,10 +288,16 @@ func (c Config) Validate() error {
 		return fmt.Errorf("server.bind_address must be an IP address: %q", host)
 	}
 
+	sandboxProvider := strings.ToLower(strings.TrimSpace(c.Sandbox.Provider))
+	allowedSandboxProviders := map[string]bool{"none": true, "local": true}
+	if !allowedSandboxProviders[sandboxProvider] {
+		return fmt.Errorf("unsupported sandbox provider: %q", c.Sandbox.Provider)
+	}
+
 	if c.Shell.EnableExec && !c.Sandbox.Active {
 		return errors.New("shell.enable_exec cannot be true when sandbox.active is false")
 	}
-	if c.Sandbox.Active && c.Sandbox.Provider == "none" {
+	if c.Sandbox.Active && sandboxProvider == "none" {
 		return errors.New("sandbox.provider must not be 'none' when sandbox.active is true")
 	}
 	if !c.Sandbox.Active && c.Shell.EnableExec {

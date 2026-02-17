@@ -52,7 +52,7 @@ Provider API key env defaults:
     "dashboard_enabled": true
   },
   "output": {
-    "thinking_mode": "on_error"
+    "thinking_mode": "never"
   },
   "workspace": {
     "root": "./workspace"
@@ -77,7 +77,7 @@ Provider API key env defaults:
       "api_key_env": "REQUESTY_API_KEY"
     },
     "zai": {
-      "base_url": "https://api.z.ai/v1",
+      "base_url": "https://api.z.ai/api/coding/paas/v4",
       "api_key_env": "ZAI_API_KEY"
     },
     "generic": {
@@ -86,7 +86,7 @@ Provider API key env defaults:
     }
   },
   "chat": {
-    "enabled": false,
+    "enabled": true,
     "default_agent_id": "default",
     "allow_users": [],
     "allow_rooms": [],
@@ -113,7 +113,7 @@ Provider API key env defaults:
 - Config is human-managed; agent tools do not get write access to `.openclawssy/`.
 - Workspace write policy stays enforced after path and symlink resolution.
 - `shell.exec` is enabled only when sandbox is active and provider is not `none`.
-- If a configured sandbox provider is unavailable in the current build/runtime (for example `docker` when not implemented), runs fail fast with `sandbox.unavailable` and never silently fall back to unsafe execution.
+- Supported sandbox providers are `none` and `local`.
 - HTTP APIs require bearer token.
 - Chat queue accepts allowlisted senders only and enforces rate limits.
 - Discord queue accepts allowlisted senders/channels/guilds and enforces rate limits.
@@ -127,5 +127,5 @@ Provider API key env defaults:
 
 ## Output Notes
 - `output.thinking_mode` supports: `never`, `on_error`, `always`.
-- Default is `on_error`.
+- Default is `never`.
 - CLI `ask` supports per-call override: `openclawssy ask --thinking=always ...`.

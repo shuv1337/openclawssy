@@ -151,3 +151,35 @@ func TestQueueRunRetriesRetryableExecutorFailureOnce(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestQueueRunRejectsWhenQueueLimitReached(t *testing.T) {
+	store := NewInMemoryRunStore()
+
+	defaultQueuedRunTracker.mu.Lock()
+	originalLimit := defaultQueuedRunTracker.maxInFlight
+	defaultQueuedRunTracker.maxInFlight = 1
+	defaultQueuedRunTracker.mu.Unlock()
+	defer func() {
+		defaultQueuedRunTracker.mu.Lock()
+		defaultQueuedRunTracker.maxInFlight = originalLimit
+		defaultQueuedRunTracker.mu.Unlock()
+	}()
+
+	release := make(chan struct{})
+	_, err := QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "hello", "dashboard", "chat_123")
+	if err != nil {
+		t.Fatalf("queue first run: %v", err)
+	}
+
+	_, err = QueueRun(context.Background(), store, blockingExecutor{release: release}, "agent-1", "second", "dashboard", "chat_123")
+	if !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("expected ErrQueueFull, got %v", err)
+	}
+
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := WaitForQueuedRuns(ctx); err != nil {
+		t.Fatalf("wait for queued runs: %v", err)
+	}
+}

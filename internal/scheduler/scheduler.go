@@ -13,14 +13,12 @@ import (
 )
 
 type Job struct {
-	ID           string `json:"id"`
-	Schedule     string `json:"schedule"`
-	AgentID      string `json:"agentID"`
-	Message      string `json:"message"`
-	Mode         string `json:"mode"`
-	NotifyTarget string `json:"notifyTarget"`
-	Enabled      bool   `json:"enabled"`
-	LastRun      string `json:"lastRun"`
+	ID       string `json:"id"`
+	Schedule string `json:"schedule"`
+	AgentID  string `json:"agentID"`
+	Message  string `json:"message"`
+	Enabled  bool   `json:"enabled"`
+	LastRun  string `json:"lastRun"`
 }
 
 type RunFunc func(agentID string, message string)
@@ -30,12 +28,14 @@ var ErrJobNotFound = errors.New("scheduler: job not found")
 type Store struct {
 	path string
 
-	mu   sync.Mutex
-	jobs map[string]Job
+	mu     sync.Mutex
+	jobs   map[string]Job
+	paused bool
 }
 
 type persistedJobs struct {
-	Jobs []Job `json:"jobs"`
+	Paused bool  `json:"paused,omitempty"`
+	Jobs   []Job `json:"jobs"`
 }
 
 func NewStore(path string) (*Store, error) {
@@ -108,6 +108,7 @@ func (s *Store) load() error {
 	for _, job := range p.Jobs {
 		s.jobs[job.ID] = job
 	}
+	s.paused = p.Paused
 	return nil
 }
 
@@ -120,7 +121,7 @@ func (s *Store) saveLocked() error {
 		return jobs[i].ID < jobs[j].ID
 	})
 
-	body, err := json.MarshalIndent(persistedJobs{Jobs: jobs}, "", "  ")
+	body, err := json.MarshalIndent(persistedJobs{Paused: s.paused, Jobs: jobs}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("scheduler: encode store: %w", err)
 	}
@@ -144,30 +145,64 @@ func (s *Store) updateAfterRun(job Job, runAt time.Time, disable bool) error {
 	return s.saveLocked()
 }
 
+func (s *Store) SetPaused(paused bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paused = paused
+	return s.saveLocked()
+}
+
+func (s *Store) IsPaused() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paused
+}
+
+func (s *Store) SetJobEnabled(id string, enabled bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[id]
+	if !ok {
+		return ErrJobNotFound
+	}
+	job.Enabled = enabled
+	s.jobs[id] = job
+	return s.saveLocked()
+}
+
 type Executor struct {
 	store  *Store
 	ticker *time.Ticker
 	stopCh chan struct{}
 	doneCh chan struct{}
 
-	runFunc RunFunc
-	nowFn   func() time.Time
+	runFunc       RunFunc
+	nowFn         func() time.Time
+	maxConcurrent int
 }
 
 func NewExecutor(store *Store, tickInterval time.Duration, runFn RunFunc) *Executor {
+	return NewExecutorWithConcurrency(store, tickInterval, 1, runFn)
+}
+
+func NewExecutorWithConcurrency(store *Store, tickInterval time.Duration, maxConcurrent int, runFn RunFunc) *Executor {
 	if tickInterval <= 0 {
 		tickInterval = time.Second
+	}
+	if maxConcurrent <= 0 {
+		maxConcurrent = 1
 	}
 	if runFn == nil {
 		runFn = func(string, string) {}
 	}
 	return &Executor{
-		store:   store,
-		runFunc: runFn,
-		nowFn:   time.Now,
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
-		ticker:  time.NewTicker(tickInterval),
+		store:         store,
+		runFunc:       runFn,
+		nowFn:         time.Now,
+		maxConcurrent: maxConcurrent,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+		ticker:        time.NewTicker(tickInterval),
 	}
 }
 
@@ -192,7 +227,15 @@ func (e *Executor) Stop() {
 }
 
 func (e *Executor) check(now time.Time) {
+	if e.store == nil || e.store.IsPaused() {
+		return
+	}
 	jobs := e.store.List()
+	type dueJob struct {
+		job             Job
+		disableAfterRun bool
+	}
+	dueJobs := make([]dueJob, 0, len(jobs))
 	for _, job := range jobs {
 		if !job.Enabled {
 			continue
@@ -201,9 +244,36 @@ func (e *Executor) check(now time.Time) {
 		if err != nil || !due {
 			continue
 		}
-		e.runFunc(job.AgentID, job.Message)
-		_ = e.store.updateAfterRun(job, now, disableAfterRun)
+		dueJobs = append(dueJobs, dueJob{job: job, disableAfterRun: disableAfterRun})
 	}
+	if len(dueJobs) == 0 {
+		return
+	}
+	workers := e.maxConcurrent
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > len(dueJobs) {
+		workers = len(dueJobs)
+	}
+
+	jobsCh := make(chan dueJob)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for item := range jobsCh {
+				e.runFunc(item.job.AgentID, item.job.Message)
+				_ = e.store.updateAfterRun(item.job, now, item.disableAfterRun)
+			}
+		}()
+	}
+	for _, item := range dueJobs {
+		jobsCh <- item
+	}
+	close(jobsCh)
+	wg.Wait()
 }
 
 func nextDue(job Job, now time.Time) (bool, bool, error) {

@@ -65,7 +65,6 @@ Canonical error codes:
 - `tool.input_invalid`
 - `policy.denied`
 - `sandbox.required`
-- `sandbox.unavailable`
 - `timeout`
 - `internal.error`
 
@@ -124,30 +123,26 @@ Scheduler jobs are persisted as JSON records.
 
 ```json
 {
-  "job_id": "job_daily_report",
-  "agent_id": "agent_default",
+  "id": "job_daily_report",
+  "agentID": "agent_default",
   "schedule": "@every 1h",
   "message": "Generate status report",
-  "mode": "isolated",
-  "notify": {
-    "channel": "none",
-    "target": ""
-  },
   "enabled": true,
-  "timezone": "UTC",
-  "created_at": "2026-02-15T00:00:00Z",
-  "updated_at": "2026-02-15T00:00:00Z"
+  "lastRun": "2026-02-15T00:00:00Z"
 }
 ```
 
 Rules:
-- `job_id`, `agent_id`, `schedule`, `message`, `mode`, and `enabled` are required.
-- `mode` allowed values: `isolated`, `main_like`.
+- `id` and `schedule` are required at create-time.
+- `agentID` and `message` should be provided for runnable jobs.
 - `schedule` supports only:
   - `@every <duration>` (Go duration format, for example `@every 30m`)
   - one-shot RFC3339 timestamp (for example `2026-02-18T09:00:00Z`)
 - Cron expressions are not supported in v0.2 and are rejected on create/update.
-- Missed-job policy for v0.1: do not replay missed windows; next tick runs normally.
+- Missed-job policy:
+  - Scheduler evaluates due jobs at each tick/startup check; it does not reconstruct every missed interval.
+  - `@every` jobs that were missed while offline run at most once on the next check, then continue from that run time.
+  - One-shot RFC3339 jobs scheduled in the past run once on the next check and are then disabled.
 
 ## 5) Minimal HTTP Endpoints
 
@@ -256,6 +251,10 @@ Session truncation rules before model invocation:
 - `POST /api/admin/config` -> persist validated config
 - `GET /api/admin/secrets` -> list secret keys only
 - `POST /api/admin/secrets` -> one-way secret ingestion `{name,value}` (value not retrievable via API)
+- `GET /api/admin/scheduler/jobs` -> list scheduler jobs + global paused state
+- `POST /api/admin/scheduler/jobs` -> create scheduler job `{id?,agent_id?,schedule,message,enabled?}`
+- `DELETE /api/admin/scheduler/jobs/{id}` -> delete scheduler job
+- `POST /api/admin/scheduler/control` -> pause/resume scheduler globally or per job `{action:"pause|resume",job_id?}`
 - `GET /api/admin/chat/sessions` -> list chat sessions for an agent/user/room/channel filter
 - `GET /api/admin/chat/sessions/{session_id}/messages` -> ordered session messages including tool metadata (`tool_name`, `tool_call_id`, `run_id`)
 

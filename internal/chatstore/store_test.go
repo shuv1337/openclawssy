@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -353,5 +354,115 @@ func TestSessionMetaRecoversFromBackup(t *testing.T) {
 	}
 	if got.SessionID != session.SessionID {
 		t.Fatalf("unexpected session loaded from backup: %+v", got)
+	}
+}
+
+func TestReadRecentMessagesWaitsForSessionLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cross-process flock is unix-only in this build")
+	}
+
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := store.AppendMessage(session.SessionID, Message{Role: "user", Content: "hello"}); err != nil {
+		t.Fatalf("append message: %v", err)
+	}
+
+	lockPath := filepath.Join(agentsRoot, "default", "memory", "chats", session.SessionID, ".chatstore.lock")
+	locked := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		_ = withCrossProcessLock(lockPath, time.Second, func() error {
+			close(locked)
+			time.Sleep(140 * time.Millisecond)
+			return nil
+		})
+		close(released)
+	}()
+
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for lock acquisition")
+	}
+
+	start := time.Now()
+	msgs, err := store.ReadRecentMessages(session.SessionID, 10)
+	if err != nil {
+		t.Fatalf("read recent: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "hello" {
+		t.Fatalf("unexpected messages: %+v", msgs)
+	}
+	if waited := time.Since(start); waited < 90*time.Millisecond {
+		t.Fatalf("expected read to wait for lock, only waited %s", waited)
+	}
+
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for lock release")
+	}
+}
+
+func TestGetActiveSessionPointerWaitsForPointerLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("cross-process flock is unix-only in this build")
+	}
+
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := store.SetActiveSessionPointer("default", "dashboard", "u1", "r1", session.SessionID); err != nil {
+		t.Fatalf("set active pointer: %v", err)
+	}
+
+	pointerPath := filepath.Join(agentsRoot, "default", "memory", "chats", "_active", "dashboard", "u1", "r1.json")
+	locked := make(chan struct{})
+	released := make(chan struct{})
+	go func() {
+		_ = withCrossProcessLock(pointerPath+".lock", time.Second, func() error {
+			close(locked)
+			time.Sleep(140 * time.Millisecond)
+			return nil
+		})
+		close(released)
+	}()
+
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pointer lock acquisition")
+	}
+
+	start := time.Now()
+	active, err := store.GetActiveSessionPointer("default", "dashboard", "u1", "r1")
+	if err != nil {
+		t.Fatalf("get active pointer: %v", err)
+	}
+	if active != session.SessionID {
+		t.Fatalf("unexpected active pointer: %q", active)
+	}
+	if waited := time.Since(start); waited < 90*time.Millisecond {
+		t.Fatalf("expected pointer read to wait for lock, only waited %s", waited)
+	}
+
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for pointer lock release")
 	}
 }

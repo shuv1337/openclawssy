@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 type testChatConnector struct {
@@ -179,5 +180,43 @@ func TestServer_ChatMessageImmediateResponse(t *testing.T) {
 	}
 	if resp.Response == "" || resp.ID != "" {
 		t.Fatalf("unexpected immediate response: %+v", resp)
+	}
+}
+
+func TestServer_ReturnsTooManyRequestsWhenRunQueueIsFull(t *testing.T) {
+	defaultQueuedRunTracker.mu.Lock()
+	originalLimit := defaultQueuedRunTracker.maxInFlight
+	defaultQueuedRunTracker.maxInFlight = 1
+	defaultQueuedRunTracker.mu.Unlock()
+	defer func() {
+		defaultQueuedRunTracker.mu.Lock()
+		defaultQueuedRunTracker.maxInFlight = originalLimit
+		defaultQueuedRunTracker.mu.Unlock()
+	}()
+
+	release := make(chan struct{})
+	s := NewServer(Config{BearerToken: "secret", Store: NewInMemoryRunStore(), Executor: blockingExecutor{release: release}})
+
+	first := httptest.NewRequest(http.MethodPost, "/v1/runs", bytes.NewBufferString(`{"agent_id":"agent-1","message":"first"}`))
+	first.Header.Set("Authorization", "Bearer secret")
+	firstResp := httptest.NewRecorder()
+	s.Handler().ServeHTTP(firstResp, first)
+	if firstResp.Code != http.StatusAccepted {
+		t.Fatalf("expected first request accepted, got %d", firstResp.Code)
+	}
+
+	second := httptest.NewRequest(http.MethodPost, "/v1/runs", bytes.NewBufferString(`{"agent_id":"agent-1","message":"second"}`))
+	second.Header.Set("Authorization", "Bearer secret")
+	secondResp := httptest.NewRecorder()
+	s.Handler().ServeHTTP(secondResp, second)
+	if secondResp.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected queue-full status %d, got %d", http.StatusTooManyRequests, secondResp.Code)
+	}
+
+	close(release)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := WaitForQueuedRuns(ctx); err != nil {
+		t.Fatalf("wait for queued runs: %v", err)
 	}
 }

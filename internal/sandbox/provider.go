@@ -14,7 +14,6 @@ import (
 var (
 	ErrExecDenied      = errors.New("sandbox: exec denied")
 	ErrNotStarted      = errors.New("sandbox: provider not started")
-	ErrUnavailable     = errors.New("sandbox.unavailable")
 	ErrUnknownProvider = errors.New("sandbox: unknown provider")
 )
 
@@ -46,8 +45,6 @@ func NewProvider(name string, workspace string) (Provider, error) {
 		return &NoneProvider{}, nil
 	case "local":
 		return NewLocalProvider(workspace)
-	case "docker":
-		return nil, fmt.Errorf("%w: docker provider is not implemented in this build", ErrUnavailable)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, name)
 	}

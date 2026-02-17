@@ -608,6 +608,25 @@ func TestProviderModelRetriesOnUnexpectedEOF(t *testing.T) {
 	}
 }
 
+func TestProviderModelFailsGracefullyOnNetworkConnectionError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "ok"}}}})
+	}))
+	baseURL := server.URL
+	server.Close()
+
+	model := testProviderModel(t, baseURL)
+	_, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "hi"})
+	if err == nil {
+		t.Fatal("expected network error when provider endpoint is unavailable")
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "connect") && !strings.Contains(lower, "refused") && !strings.Contains(lower, "unreachable") {
+		t.Fatalf("expected connection-style error, got %v", err)
+	}
+}
+
 func TestProviderModelRetriesUseFreshAttemptTimeouts(t *testing.T) {
 	var calls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

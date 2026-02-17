@@ -82,7 +82,7 @@ func TestEngineExecuteWritesRunBundle(t *testing.T) {
 	}
 }
 
-func TestExecuteWithInputFailsClearlyWhenDockerSandboxUnavailable(t *testing.T) {
+func TestExecuteWithInputRejectsUnsupportedSandboxProvider(t *testing.T) {
 	root := t.TempDir()
 	e, err := NewEngine(root)
 	if err != nil {
@@ -100,16 +100,20 @@ func TestExecuteWithInputFailsClearlyWhenDockerSandboxUnavailable(t *testing.T) 
 	cfg.Sandbox.Active = true
 	cfg.Sandbox.Provider = "docker"
 	cfg.Shell.EnableExec = true
-	if err := config.Save(cfgPath, cfg); err != nil {
-		t.Fatalf("save config: %v", err)
+	rawCfg, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, rawCfg, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 
 	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "run diagnostic", Source: "dashboard"})
 	if err == nil {
-		t.Fatalf("expected sandbox.unavailable runtime error")
+		t.Fatalf("expected unsupported sandbox provider error")
 	}
-	if !strings.Contains(err.Error(), "sandbox.unavailable") {
-		t.Fatalf("expected sandbox.unavailable error, got %v", err)
+	if !strings.Contains(err.Error(), "unsupported sandbox provider") {
+		t.Fatalf("expected unsupported sandbox provider error, got %v", err)
 	}
 }
 
@@ -1021,7 +1025,7 @@ func TestExecuteWithInputLogsAndTracesOnToolCallCallbackFailures(t *testing.T) {
 	}
 }
 
-func TestExecuteDefaultOnErrorDoesNotShowThinkingOnSuccessfulRun(t *testing.T) {
+func TestExecuteDefaultNeverDoesNotShowThinkingOnSuccessfulRun(t *testing.T) {
 	root := t.TempDir()
 	e, err := NewEngine(root)
 	if err != nil {
@@ -1062,7 +1066,7 @@ func TestExecuteDefaultOnErrorDoesNotShowThinkingOnSuccessfulRun(t *testing.T) {
 	}
 }
 
-func TestExecuteDefaultOnErrorShowsThinkingOnParseFailure(t *testing.T) {
+func TestExecuteOnErrorShowsThinkingOnParseFailure(t *testing.T) {
 	root := t.TempDir()
 	e, err := NewEngine(root)
 	if err != nil {
@@ -1090,6 +1094,7 @@ func TestExecuteDefaultOnErrorShowsThinkingOnParseFailure(t *testing.T) {
 	cfg.Providers.Generic.BaseURL = server.URL
 	cfg.Providers.Generic.APIKey = "test-key"
 	cfg.Providers.Generic.APIKeyEnv = ""
+	cfg.Output.ThinkingMode = config.ThinkingModeOnError
 	if err := config.Save(cfgPath, cfg); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
@@ -1100,6 +1105,47 @@ func TestExecuteDefaultOnErrorShowsThinkingOnParseFailure(t *testing.T) {
 	}
 	if !strings.Contains(res.FinalText, "Thinking:\nparse diagnostics") {
 		t.Fatalf("expected thinking shown for parse failure, got %q", res.FinalText)
+	}
+}
+
+func TestExecuteDefaultNeverHidesThinkingOnParseFailure(t *testing.T) {
+	root := t.TempDir()
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "<think>internal notes</think>```json\n{invalid}\n```"}}},
+		})
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	res, err := e.ExecuteWithInput(context.Background(), ExecuteInput{AgentID: "default", Message: "hi"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if strings.Contains(res.FinalText, "Thinking:") {
+		t.Fatalf("expected default never mode to hide thinking, got %q", res.FinalText)
 	}
 }
 

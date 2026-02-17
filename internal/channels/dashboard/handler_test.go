@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,9 @@ import (
 
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
+	"openclawssy/internal/config"
+	"openclawssy/internal/scheduler"
+	"openclawssy/internal/secrets"
 )
 
 func TestDebugRunTraceEndpoint(t *testing.T) {
@@ -50,6 +54,110 @@ func TestDebugRunTraceEndpoint(t *testing.T) {
 	}
 	if trace["run_id"] != "run_1" {
 		t.Fatalf("unexpected run_id in trace: %#v", trace["run_id"])
+	}
+}
+
+func TestAdminStatusEndpoint(t *testing.T) {
+	store := httpchannel.NewInMemoryRunStore()
+	_, err := store.Create(context.Background(), httpchannel.Run{ID: "run_a", AgentID: "default", Message: "hello", Status: "completed", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	h := New(t.TempDir(), store)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["run_count"] != float64(1) {
+		t.Fatalf("expected run_count=1, got %#v", payload["run_count"])
+	}
+}
+
+func TestAdminConfigEndpointRedactsSecrets(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Providers.OpenAI.APIKey = "super-secret"
+	cfg.Providers.Generic.APIKey = "generic-secret"
+	cfg.Discord.Token = "discord-secret"
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/config", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	var out config.Config
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode config response: %v", err)
+	}
+	if out.Providers.OpenAI.APIKey != "" || out.Providers.Generic.APIKey != "" || out.Discord.Token != "" {
+		t.Fatalf("expected sensitive values redacted, got %+v", out)
+	}
+}
+
+func TestAdminSecretsEndpointSetAndList(t *testing.T) {
+	root := t.TempDir()
+	masterPath := filepath.Join(root, ".openclawssy", "master.key")
+	if _, err := secrets.GenerateAndWriteMasterKey(masterPath); err != nil {
+		t.Fatalf("generate master key: %v", err)
+	}
+
+	configPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Secrets.MasterKeyFile = masterPath
+	cfg.Secrets.StoreFile = filepath.Join(root, ".openclawssy", "secrets.enc")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	setReq := httptest.NewRequest(http.MethodPost, "/api/admin/secrets", bytes.NewBufferString(`{"name":"discord/token","value":"abc"}`))
+	setReq.Header.Set("Content-Type", "application/json")
+	setResp := httptest.NewRecorder()
+	mux.ServeHTTP(setResp, setReq)
+	if setResp.Code != http.StatusOK {
+		t.Fatalf("expected set secret status %d, got %d (%s)", http.StatusOK, setResp.Code, setResp.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/admin/secrets", nil)
+	listResp := httptest.NewRecorder()
+	mux.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list secrets status %d, got %d (%s)", http.StatusOK, listResp.Code, listResp.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(listResp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode secrets response: %v", err)
+	}
+	keys, ok := payload["keys"].([]any)
+	if !ok || len(keys) != 1 {
+		t.Fatalf("expected one stored secret key, got %#v", payload["keys"])
+	}
+	if keys[0] != "discord/token" {
+		t.Fatalf("unexpected key entry: %#v", keys[0])
 	}
 }
 
@@ -251,5 +359,87 @@ func TestChatSessionMessagesEndpointPreservesMultiStepOrder(t *testing.T) {
 	tool2, _ := msgs[2].(map[string]any)
 	if tool1["tool_call_id"] != "tool-json-1" || tool2["tool_call_id"] != "tool-json-2" {
 		t.Fatalf("expected distinct tool call ids in order, got %#v and %#v", tool1, tool2)
+	}
+}
+
+func TestSchedulerAdminEndpointsCRUDAndPauseResume(t *testing.T) {
+	root := t.TempDir()
+	jobStore, err := scheduler.NewStore(filepath.Join(root, ".openclawssy", "scheduler", "jobs.json"))
+	if err != nil {
+		t.Fatalf("new scheduler store: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore(), jobStore)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	addReq := httptest.NewRequest(http.MethodPost, "/api/admin/scheduler/jobs", bytes.NewBufferString(`{"schedule":"@every 1m","message":"status ping"}`))
+	addResp := httptest.NewRecorder()
+	mux.ServeHTTP(addResp, addReq)
+	if addResp.Code != http.StatusOK {
+		t.Fatalf("expected add job 200, got %d (%s)", addResp.Code, addResp.Body.String())
+	}
+	var addPayload map[string]any
+	if err := json.Unmarshal(addResp.Body.Bytes(), &addPayload); err != nil {
+		t.Fatalf("decode add response: %v", err)
+	}
+	jobID, _ := addPayload["id"].(string)
+	if jobID == "" {
+		t.Fatalf("expected returned job id, got %#v", addPayload)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/admin/scheduler/jobs", nil)
+	listResp := httptest.NewRecorder()
+	mux.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list jobs 200, got %d", listResp.Code)
+	}
+	var listPayload map[string]any
+	if err := json.Unmarshal(listResp.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	jobs, ok := listPayload["jobs"].([]any)
+	if !ok || len(jobs) != 1 {
+		t.Fatalf("expected one scheduler job, got %#v", listPayload["jobs"])
+	}
+
+	pauseReq := httptest.NewRequest(http.MethodPost, "/api/admin/scheduler/control", bytes.NewBufferString(`{"action":"pause"}`))
+	pauseResp := httptest.NewRecorder()
+	mux.ServeHTTP(pauseResp, pauseReq)
+	if pauseResp.Code != http.StatusOK {
+		t.Fatalf("expected global pause 200, got %d", pauseResp.Code)
+	}
+	if !jobStore.IsPaused() {
+		t.Fatal("expected scheduler paused state after pause action")
+	}
+
+	jobPauseReq := httptest.NewRequest(http.MethodPost, "/api/admin/scheduler/control", bytes.NewBufferString(`{"action":"pause","job_id":"`+jobID+`"}`))
+	jobPauseResp := httptest.NewRecorder()
+	mux.ServeHTTP(jobPauseResp, jobPauseReq)
+	if jobPauseResp.Code != http.StatusOK {
+		t.Fatalf("expected per-job pause 200, got %d", jobPauseResp.Code)
+	}
+	if jobStore.List()[0].Enabled {
+		t.Fatalf("expected paused job to be disabled: %+v", jobStore.List()[0])
+	}
+
+	jobResumeReq := httptest.NewRequest(http.MethodPost, "/api/admin/scheduler/control", bytes.NewBufferString(`{"action":"resume","job_id":"`+jobID+`"}`))
+	jobResumeResp := httptest.NewRecorder()
+	mux.ServeHTTP(jobResumeResp, jobResumeReq)
+	if jobResumeResp.Code != http.StatusOK {
+		t.Fatalf("expected per-job resume 200, got %d", jobResumeResp.Code)
+	}
+	if !jobStore.List()[0].Enabled {
+		t.Fatalf("expected resumed job to be enabled: %+v", jobStore.List()[0])
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/admin/scheduler/jobs/"+jobID, nil)
+	deleteResp := httptest.NewRecorder()
+	mux.ServeHTTP(deleteResp, deleteReq)
+	if deleteResp.Code != http.StatusOK {
+		t.Fatalf("expected delete job 200, got %d", deleteResp.Code)
+	}
+	if len(jobStore.List()) != 0 {
+		t.Fatalf("expected empty scheduler after deletion, got %+v", jobStore.List())
 	}
 }

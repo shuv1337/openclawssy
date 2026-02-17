@@ -257,30 +257,36 @@ func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, erro
 	}
 
 	path := filepath.Join(dir, "messages.jsonl")
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("chatstore: open messages: %w", err)
-	}
-	defer f.Close()
-
+	lockPath := filepath.Join(dir, ".chatstore.lock")
 	all := make([]Message, 0)
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
+	if err := withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		f, err := os.Open(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return fmt.Errorf("chatstore: open messages: %w", err)
 		}
-		var m Message
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
+		defer f.Close()
+
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var m Message
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				continue
+			}
+			all = append(all, m)
 		}
-		all = append(all, m)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("chatstore: scan messages: %w", err)
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("chatstore: scan messages: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	if len(all) <= limit {
@@ -357,16 +363,24 @@ func (s *Store) GetActiveSessionPointer(agentID, channel, userID, roomID string)
 		return "", err
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	path := s.activePointerPath(agentID, channel, userID, roomID)
-	b, err := readFileWithBackup(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
+	lockPath := path + ".lock"
+	var b []byte
+	if err := withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		readBytes, err := readFileWithBackup(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ErrSessionNotFound
+			}
+			return fmt.Errorf("chatstore: read active pointer: %w", err)
+		}
+		b = readBytes
+		return nil
+	}); err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
 			return "", ErrSessionNotFound
 		}
-		return "", fmt.Errorf("chatstore: read active pointer: %w", err)
+		return "", err
 	}
 	var payload struct {
 		SessionID string `json:"session_id"`

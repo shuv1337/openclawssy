@@ -30,7 +30,7 @@ func TestConfigRoundtripAndBackup(t *testing.T) {
 
 	cfg := Default()
 	cfg.Sandbox.Active = true
-	cfg.Sandbox.Provider = "docker"
+	cfg.Sandbox.Provider = "local"
 	cfg.Shell.EnableExec = true
 
 	if err := Save(path, cfg); err != nil {
@@ -78,18 +78,18 @@ func TestValidateRejectsOutOfRangeMaxTokens(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigSetsThinkingModeOnError(t *testing.T) {
+func TestDefaultConfigSetsThinkingModeNever(t *testing.T) {
 	cfg := Default()
-	if cfg.Output.ThinkingMode != ThinkingModeOnError {
-		t.Fatalf("expected default output.thinking_mode=%q, got %q", ThinkingModeOnError, cfg.Output.ThinkingMode)
+	if cfg.Output.ThinkingMode != ThinkingModeNever {
+		t.Fatalf("expected default output.thinking_mode=%q, got %q", ThinkingModeNever, cfg.Output.ThinkingMode)
 	}
 }
 
-func TestApplyDefaultsSetsThinkingModeOnError(t *testing.T) {
+func TestApplyDefaultsSetsThinkingModeNever(t *testing.T) {
 	cfg := Config{}
 	cfg.ApplyDefaults()
-	if cfg.Output.ThinkingMode != ThinkingModeOnError {
-		t.Fatalf("expected thinking_mode default %q, got %q", ThinkingModeOnError, cfg.Output.ThinkingMode)
+	if cfg.Output.ThinkingMode != ThinkingModeNever {
+		t.Fatalf("expected thinking_mode default %q, got %q", ThinkingModeNever, cfg.Output.ThinkingMode)
 	}
 }
 
@@ -98,5 +98,13 @@ func TestValidateRejectsInvalidThinkingMode(t *testing.T) {
 	cfg.Output.ThinkingMode = "sometimes"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for invalid thinking_mode")
+	}
+}
+
+func TestValidateRejectsUnsupportedSandboxProvider(t *testing.T) {
+	cfg := Default()
+	cfg.Sandbox.Provider = "docker"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for unsupported sandbox provider")
 	}
 }

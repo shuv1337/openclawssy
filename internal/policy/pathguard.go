@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 )
@@ -16,18 +17,80 @@ var protectedControlFiles = map[string]bool{
 	"SPECPLAN.md": true,
 }
 
-func HasTraversal(path string) bool {
-	clean := filepath.Clean(path)
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+func HasTraversal(targetPath string) bool {
+	normalized := strings.TrimSpace(targetPath)
+	if normalized == "" {
+		return false
+	}
+	normalized = strings.ReplaceAll(normalized, "\\", "/")
+	normalized = stripWindowsPathRoot(normalized)
+	clean := pathpkg.Clean(normalized)
+	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return true
 	}
-	parts := strings.Split(filepath.ToSlash(path), "/")
+	parts := strings.Split(normalized, "/")
 	for _, p := range parts {
 		if p == ".." {
 			return true
 		}
 	}
 	return false
+}
+
+func stripWindowsPathRoot(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, "//?/") || strings.HasPrefix(trimmed, "//./") {
+		trimmed = trimmed[4:]
+	}
+	if hasWindowsDrivePrefix(trimmed) {
+		trimmed = trimmed[2:]
+	}
+	if strings.HasPrefix(trimmed, "//") {
+		rest := strings.TrimPrefix(trimmed, "//")
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) == 3 {
+			return "/" + parts[2]
+		}
+		return "/"
+	}
+	return trimmed
+}
+
+func hasWindowsDrivePrefix(value string) bool {
+	if len(value) < 2 {
+		return false
+	}
+	ch := value[0]
+	if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+		return false
+	}
+	return value[1] == ':'
+}
+
+func isAbsoluteTarget(target string) bool {
+	clean := strings.TrimSpace(target)
+	if clean == "" {
+		return false
+	}
+	if filepath.IsAbs(clean) {
+		return true
+	}
+	normalized := strings.ReplaceAll(clean, "\\", "/")
+	if hasWindowsDrivePrefix(normalized) && len(normalized) > 2 && normalized[2] == '/' {
+		return true
+	}
+	if strings.HasPrefix(normalized, "//") {
+		return true
+	}
+	return false
+}
+
+func isWindowsDriveRelative(target string) bool {
+	normalized := strings.ReplaceAll(strings.TrimSpace(target), "\\", "/")
+	if !hasWindowsDrivePrefix(normalized) {
+		return false
+	}
+	return len(normalized) == 2 || normalized[2] != '/'
 }
 
 func (e *Enforcer) ResolveReadPath(workspace, target string) (string, error) {
@@ -45,6 +108,9 @@ func resolvePath(workspace, target string, write bool) (string, error) {
 	if target == "" {
 		return "", &PathError{Path: target, Reason: "empty path"}
 	}
+	if isWindowsDriveRelative(target) {
+		return "", &PathError{Path: target, Reason: "invalid path"}
+	}
 	if HasTraversal(target) {
 		return "", &PathError{Path: target, Reason: "path traversal"}
 	}
@@ -59,8 +125,10 @@ func resolvePath(workspace, target string, write bool) (string, error) {
 	}
 
 	targetAbs := target
-	if !filepath.IsAbs(targetAbs) {
+	if !isAbsoluteTarget(targetAbs) {
 		targetAbs = filepath.Join(wsReal, targetAbs)
+	} else {
+		targetAbs = strings.ReplaceAll(targetAbs, "\\", string(filepath.Separator))
 	}
 	targetAbs = filepath.Clean(targetAbs)
 

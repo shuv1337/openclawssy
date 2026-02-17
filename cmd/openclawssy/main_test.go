@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"openclawssy/internal/channels/chat"
+	"openclawssy/internal/channels/cli"
 	"openclawssy/internal/channels/discord"
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
@@ -56,5 +59,47 @@ func TestChatAdaptersRouteBySource(t *testing.T) {
 	}
 	if sources[0] != "discord" || sources[1] != "dashboard" {
 		t.Fatalf("unexpected source routing: %#v", sources)
+	}
+}
+
+func TestCronServiceSupportsDeleteAndPauseResume(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir temp: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	svc := cronService{}
+	if _, err := svc.Cron(context.Background(), cli.CronInput{Command: "add", Args: []string{"-id", "job-1", "-schedule", "@every 1m", "-message", "ping"}}); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+	if _, err := svc.Cron(context.Background(), cli.CronInput{Command: "pause"}); err != nil {
+		t.Fatalf("pause scheduler: %v", err)
+	}
+	out, err := svc.Cron(context.Background(), cli.CronInput{Command: "list"})
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	if !strings.Contains(out, "scheduler=paused") {
+		t.Fatalf("expected paused scheduler state, got %q", out)
+	}
+	if _, err := svc.Cron(context.Background(), cli.CronInput{Command: "resume", Args: []string{"-id", "job-1"}}); err != nil {
+		t.Fatalf("resume job: %v", err)
+	}
+	if _, err := svc.Cron(context.Background(), cli.CronInput{Command: "delete", Args: []string{"-id", "job-1"}}); err != nil {
+		t.Fatalf("delete job via alias: %v", err)
+	}
+	out, err = svc.Cron(context.Background(), cli.CronInput{Command: "list"})
+	if err != nil {
+		t.Fatalf("list jobs after delete: %v", err)
+	}
+	if !strings.Contains(out, "no jobs") {
+		t.Fatalf("expected no jobs output, got %q", out)
 	}
 }

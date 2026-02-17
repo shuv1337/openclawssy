@@ -1,501 +1,141 @@
-Openclawssy DevPlan v0.2
+**Purpose:** Address all remaining gaps identified in the latest code review.  This plan focuses on items not yet resolved after v0.2, prioritising reliability and security.  Use this checklist to guide incremental pull requests (PRs) and track progress.
 
-Theme: Make chat reliable and transparent (better parsing, better tool calls, optional “thinking” visibility), then harden the rest of the prototype.
+## How to use this plan
 
-How to use this plan
+- Every numbered item should be delivered as a **self‑contained PR**.  Keep PRs small and focused.  Each PR must update the **Progress Log** (append a dated entry), mark relevant tasks as complete (`[x]`), and include new/updated tests.  
+- Always update docs/specs when interfaces or behaviours change.  
+- After each milestone, increment the version (e.g., v0.3 → v0.4).
 
-Treat each numbered item as a small PR (ideally one concern per PR).
+## Progress Log
+*(append a new entry for each merged PR)*
 
-Every PR must include:
+- 2026-02-17 — PR###: Completed M1.1 by confirming/fixing trace condition regressions in `internal/runtime/trace.go` and adding focused unit coverage for shell fallback summarization and nil/empty `intValue()` parsing behavior.
 
-✅ tests (unit/integration as appropriate)
+- 2026-02-17 — PR###: Completed M1.2 by hardening `internal/policy/pathguard.go` for cross-platform Windows path forms (drive letters, UNC, mixed separators), adding explicit absolute-path detection, and expanding policy tests with POSIX + Windows-style traversal and absolute-path cases.
 
-✅ a short entry in Progress Log
+- 2026-02-17 — PR###: Completed M1.3 via the “remove Docker provider” path by restricting sandbox providers to `none|local` in config validation, removing docker support from sandbox provider selection and docs, and updating runtime/config/sandbox tests accordingly.
 
-✅ updates to this checklist (mark [x])
+- 2026-02-17 — PR###: Completed M1.4 by extending chatstore file locking to reads (`messages.jsonl` and `_active` pointers), and adding contention tests that prove reads wait for lock release while concurrent writers/lock-holders are active.
 
-Prefer contract-first changes: update docs/specs/CONTRACTS.md when interfaces change.
+- 2026-02-17 — PR###: Completed M2.1 using the spec-alignment path by documenting that scheduler supports only `@every <duration>` and one-shot RFC3339 schedules, and that cron expressions are rejected.
 
-Progress Log
+- 2026-02-17 — PR###: Completed M2.2 by documenting missed-job behavior explicitly, adding bounded concurrent scheduler execution with a worker pool, and adding restart/resume tests covering no-replay `@every` and one-shot disable-after-run behavior.
 
-(Append one entry per merged PR)
+- 2026-02-17 — PR###: Completed M3.1 by validating full thinking extraction wiring end-to-end and aligning `output.thinking_mode` defaults/behavior to `never` by default with `on_error` and `always` overrides via config/CLI/runtime.
 
-2026-02-17 — PR###: Completed M1.1 by wiring RunInput metadata/history/allowed-tools/timeout into all Runner model requests (including finalize-from-tool-results) and added unit tests asserting request passthrough.
+- 2026-02-17 — PR###: Completed M3.2 by confirming unified tool parsing + diagnostics entrypoints are used by runtime, surfaced in trace, and covered by malformed-call parser tests.
 
-2026-02-17 — PR###: Completed M1.2 by making OnToolCall callback errors deterministic log+continue, capturing callback failures on tool-call records, and surfacing them in run trace + audit events with tests proving callback failures do not abort runs.
+- 2026-02-17 — PR###: Completed M4.2 by expanding coverage for scheduler concurrency/restart behavior, chatstore lock-respecting reads, provider network failure handling, path/protected-write enforcement, and dashboard admin API endpoints (`status`, `config`, `secrets`, debug/chat).
 
-2026-02-17 — PR###: Completed M1.3 by tightening tool allowlist enforcement at parse-time and exec-time (including alias canonicalization like bash.exec -> shell.exec), improving disallowed-tool diagnostics, and adding tests for parser/runtime/policy rejection behavior.
+- 2026-02-17 — PR###: Progressed M4.3 by aligning `CONFIG.md` and `CONTRACTS.md` with current runtime behavior (sandbox providers, scheduler schema/capabilities, thinking defaults) and rewriting `ACCEPTANCE.md` to a v0.2-aligned acceptance checklist.
 
-2026-02-17 — PR###: Completed M2.1 by adding a unified `ParseToolCalls` entrypoint with candidate/rejection diagnostics (fenced + inline + array support), routing runtime model parsing through that parser, forwarding diagnostics into trace extraction records, and adding parser/runtime tests for aliasing and max-call capping.
+- 2026-02-17 — PR###: Partially completed M4.4 by adding registry-level required argument type enforcement (`ToolSpec.ArgTypes`) so invalid types are rejected before handler execution, plus tests for typed validation failures.
 
-2026-02-17 — PR###: Completed M2.2 by adding minimal safe JSON repair in the unified tool parser (trailing-comma stripping, fence/commentary tolerance), preserving strict allowlist/schema enforcement, and improving invalid-JSON diagnostics with tests for repaired and unrepaired cases.
+- 2026-02-17 — PR###: Further completed M4.4 by adding a bounded global run-queue guard (default max in-flight runs), returning queue-full errors/HTTP 429 under overload, and adding pipeline/server tests for queue saturation behavior.
 
-2026-02-17 — PR###: Completed M2.3 by enforcing strict tool-call object schema (`tool_name` string + `arguments` object), rejecting missing/non-object arguments with explicit reasons, and asserting deterministic generated IDs for calls missing `id`.
+- 2026-02-17 — PR###: Completed the remaining M4.4 scheduler-cleanup item by removing unused `mode` and `notifyTarget` fields from scheduler job models/CLI wiring and aligning scheduler contracts/docs with the simplified job schema.
 
-2026-02-17 — PR###: Completed M3.1 by replacing blind think-tag stripping with runtime `ExtractThinking` extraction (`<think>`, `<analysis>`, `<!-- THINK -->`), integrating provider fallback tool-call parsing through extracted visible text, and adding graceful ambiguity handling + unit tests.
+- 2026-02-17 — PR###: Completed M4.1 by adding authenticated scheduler admin HTTP endpoints (list/add/delete jobs plus global/per-job pause/resume control) and extending CLI cron commands with `delete` alias and `pause`/`resume` controls backed by persisted scheduler state.
 
-2026-02-17 — PR###: Completed M3.2/M3.3 by adding `output.thinking_mode` config defaulting to `on_error`, wiring `ask --thinking=` override through runtime output formatting, and persisting redacted/truncated thinking metadata into run trace/bundles/audit with tests for success, parse-failure, always-mode, and persistence behavior.
+---
 
-2026-02-17 — PR###: Completed M4.1 by adopting role=`tool` session replay in model context, normalizing stored tool payloads into truncated context-safe tool messages, enforcing per-message and total-history truncation caps, updating session policy in `docs/specs/CONTRACTS.md`, and adding runtime tests for inclusion/truncation behavior.
+## Milestone M1 — Core Correctness Fixes (highest priority)
 
-2026-02-17 — PR###: Completed M4.2 by adding cross-process chatstore file locking for session/message writes and active-pointer updates, plus a contention test that writes from multiple store instances and validates `messages.jsonl` remains fully valid JSONL.
+### M1.1 Fix trace‑collector bugs
 
-2026-02-17 — PR###: Completed M5.1 by ensuring per-tool timeouts produce structured `timeout` tool errors (including runner fallback formatting), mapping deadline-exceeded failures to timeout-coded tool errors in the registry, auditing timeout failures via `tool.result`, and adding unit tests for runner timeout behavior and audited timeout error codes.
+- [x] **Deduplicate conditions** – Correct duplicate conditions in `runtime/trace.go`:
+  - `fallback != "" && fallback != ""` should check for actual fallback presence【268606176511821†L70-L73】.
+  - `if s == "" || s == ""` in `intValue()` should properly detect empty string【268606176511821†L77-L79】.
+- [x] Add unit tests for `summarizeToolExecution()` and `intValue()` to ensure correct fallback messages and integer parsing.
 
-2026-02-17 — PR###: Completed M5.2 by aligning tool error codes to canonical dotted forms (`tool.not_found`, `tool.input_invalid`, `policy.denied`, `timeout`, `internal.error`), adding tests for canonical input-invalid/not-found and timeout mapping, and extending persisted tool message payloads with machine-readable `error_code` and `error_message` fields.
+### M1.2 Robust path guard & cross‑platform support
 
-2026-02-17 — PR###: Completed M5.3 by hardening `intValue()` numeric parsing across native numeric/json/string inputs, preserving shell fallback summarization behavior, and adding explicit unit coverage that numeric parsing is correct.
+- [x] Update `policy/pathguard.go` to correctly handle Windows drive letters and UNC paths; ensure path traversal detection works on Windows【222064012191688†L17-L29】.
+- [x] Add tests covering POSIX and Windows path variants (simulate in tests via path strings; no need for actual Windows runtime).
 
-2026-02-17 — PR###: Completed M6.1 by resolving the docker sandbox stub as unavailable in this build (fail-fast `sandbox.unavailable`), preventing silent unsafe fallback, and adding sandbox/runtime tests for clear docker-unavailable errors.
+### M1.3 Complete sandbox support
 
-2026-02-17 — PR###: Completed M6.2 by aligning default server bind posture to loopback (`127.0.0.1`) in runtime defaults, adding config test coverage for loopback binding, and keeping docs consistent with secure default behavior.
+- [x] Decide: implement Docker provider or remove it.  If implementing:
+  - Create a minimal `DockerProvider` that runs commands in a container with workspace mounted read‑write, capturing stdout/stderr/exit code.
+  - Add basic resource limits (CPU/memory/time).  
+  - Ensure `shell.exec` fails gracefully if Docker is unavailable.
+- [x] If removing: remove `docker` as a valid provider in config and docs; update defaults accordingly.
+- [x] Add tests verifying sandbox provider behaviour (exec allowed vs. denied).
 
-2026-02-17 — PR###: Completed M7.1 (spec-alignment path) by updating scheduler contracts to explicitly support only `@every <duration>` and one-shot RFC3339 schedules, and documenting that cron expressions are currently rejected.
+### M1.4 Chat store concurrency safety
 
-2026-02-17 — PR###: Completed M8.1 by refactoring audit logging to keep an open buffered file handle (removing per-event open/close), syncing durably on run-end/close, and wiring runtime cleanup via logger close while preserving existing audit test behavior.
+- [x] Implement cross‑process file locking for `messages.jsonl` and `_active` pointers (e.g., using OS‑level advisory locks or a lock file).  Use minimal dependencies.
+- [x] Ensure reads respect locks to avoid reading partial writes.
+- [x] Add integration tests simulating concurrent writes (could spawn goroutines writing concurrently).
 
-YYYY-MM-DD — PR###: …
+## Milestone M2 — Scheduler & Cron (important)
 
-YYYY-MM-DD — PR###: …
+### M2.1 Cron expression support or spec update
 
-Milestone 1 — Chat correctness: wire the runner properly (highest priority)
+- [x] Either implement cron‑string parsing (use a minimal library or write a parser) or explicitly update `docs/specs/CONTRACTS.md` to state that only `@every` and one‑shot timestamps are supported.
+- [x] If implementing, support at least standard 5‑field cron syntax and `@hourly`, `@daily`, etc. *(N/A — chose spec-update path instead of cron implementation.)*
+- [x] Add `nextDue` logic for cron expressions and tests covering daily/hourly schedules, misfires, and time zones. *(N/A — chose spec-update path instead of cron implementation.)*
 
-Goal: The “chat” system must actually use conversation history, allowed tools, tool timeouts, and tool-call hooks (some of these are currently present in structs but not wired through).
+### M2.2 Missed‑job handling and concurrency
 
-- [x] M1.1 Wire RunInput → ModelRequest completely
+- [x] Decide on policy for missed jobs (e.g., run immediately on startup or skip).  Document this in the spec.
+- [x] Allow multiple jobs to run concurrently with a worker pool (limit concurrency to avoid overload).
+- [x] Add tests ensuring the scheduler persists and resumes jobs correctly after restart.
 
-Problem this fixes: Chat/session history + allowed tools may be loaded but not actually used by the model loop.
+## Milestone M3 — Thinking & Diagnostics (important)
 
-Implementation tasks
+### M3.1 Replace `stripThinkingTags` with extraction
 
- Update internal/agent/runner.go so Model.Generate() receives all required fields, not just Prompt/Message/ToolResults.
+- [x] Implement `ExtractThinking` that returns `(visibleText, thinkingText)` instead of deleting thinking.  If extraction fails, leave original text intact.
+- [x] Replace all calls to `stripThinkingTags` with the new extractor.  Store `thinkingText` in the trace and bundle (with redaction).  
+- [x] Add config & CLI flag `output.thinking_mode` with values: `never` (default), `on_error`, `always`.  Use this to decide when to display thinking to users.
 
-Pass through (at minimum):
+### M3.2 Unified tool‑parse diagnostics
 
-AgentID, RunID
+- [x] Consolidate tool parsing into a single entrypoint that returns both accepted calls and diagnostic data (parsed name, arguments, acceptance reason).  Replace ad‑hoc parsing scattered across `model.go` and `toolparse`.
+- [x] Expose diagnostics in the run trace so users can see why a tool call was rejected (e.g., invalid JSON, unsupported tool name, not allowed).
+- [x] Add tests for various malformed tool call patterns.
 
-Messages (history)
+## Milestone M4 — Remaining Gaps & Hardening (medium priority)
 
-SystemPrompt / Prompt (whichever your design uses)
+### M4.1 Cron & admin features in HTTP/CLI
 
-AllowedTools
+- [x] Expose scheduler CRUD via HTTP API and CLI (add, list, delete jobs).  Require proper auth.
+- [x] Add endpoints/commands to pause/resume scheduler globally and per job.
 
-ToolTimeoutMS
+### M4.2 Test coverage expansion
 
- Ensure the model layer (internal/runtime/model.go) actually respects:
+- [x] Add tests for:
+  - `scheduler` concurrency and persistence.
+  - `chatstore` cross‑process locks.
+  - Path traversal & protected file editing.
+  - Provider error handling (simulate network failures/timeouts).
+  - Dashboard actions (basic admin API functions).
 
-AllowedTools (tool parsing and validation)
+### M4.3 Documentation alignment
 
-Messages (conversation)
+- [x] Update `docs/specs/CONFIG.md`, `CONTRACTS.md`, `ACCEPTANCE.md` to reflect implemented features and removed/stubbed ones (e.g., update sandbox provider list, scheduler capabilities, thinking mode semantics).
+- [x] Ensure README highlights **prototype** status, improved iteration limits, and new safety controls.
 
- Update/confirm tool loop behavior: tool calls should be generated from the model response based on the current prompt + message history, not only the latest user message.
+### M4.4 Miscellaneous fixes
 
-Acceptance
+- [x] Clean up unused fields like `Mode` and `NotifyTarget` in scheduler `Job` struct if not implemented.  Or implement their intended functions (e.g., different run contexts, notification channels).
+- [x] Ensure tool registry enforces required argument types (not just presence).
+- [x] Add per‑tool concurrency limit or global run queue size limit to avoid over‑loading the engine.
 
- Add a test using a mock agent.Model that asserts it received:
+---
 
-the history messages
+## Recommended PR Sequence
 
-the allowed tools list
+1. **PR‑1:** Fix trace bugs (M1.1) + tests.
+2. **PR‑2:** Path guard cross‑platform + tests (M1.2).
+3. **PR‑3:** Implement or remove Docker provider (M1.3).
+4. **PR‑4:** Add file locks in chatstore (M1.4).
+5. **PR‑5:** Cron support or spec update (M2.1) + tests.
+6. **PR‑6:** Missed‑job handling & concurrency (M2.2).
+7. **PR‑7:** Thinking extraction & config (M3.1).
+8. **PR‑8:** Unified tool parse diagnostics (M3.2).
+9. **PR‑9+:** Scheduler admin endpoints & CLI (M4.1), followed by expanded tests (M4.2) and docs alignment (M4.3).
 
-run metadata (agent/run IDs)
-
- Manual: Start a chat session, ask a follow-up question that requires context; verify the model sees prior context.
-
-- [x] M1.2 Wire OnToolCall so chat can stream tool activity (or record it reliably)
-
-Problem this fixes: The runtime prepares an OnToolCall callback, but tool calls may only be appended after the run, meaning chat can’t show incremental progress and some intended behavior is unwired.
-
-Implementation tasks
-
- In internal/agent/runner.go, invoke input.OnToolCall(record) after each tool execution record is created (or at least after result is known).
-
- Ensure this callback error is handled deterministically:
-
-If OnToolCall fails, decide: fail the run vs. log and continue.
-
-Recommendation: log + continue, but record the failure in run trace/audit.
-
-Acceptance
-
- Unit test: OnToolCall is invoked exactly once per tool call.
-
- Manual: In chat mode, trigger a tool call and confirm the session store shows tool events during the run (or immediately after each tool call).
-
-- [x] M1.3 Make tool-allowlisting real (and test it)
-
-Problem this fixes: “Allowed tools” should be enforced at two layers:
-
-tool parsing (don’t accept calls to tools not allowed)
-
-tool execution (policy enforcer denies execution)
-
-Implementation tasks
-
- In tool parsing, reject tool calls not in AllowedTools (after alias canonicalization).
-
- Add a clear “tool not allowed” diagnostic (for trace + user-visible error mode).
-
-Acceptance
-
- Unit test: model output containing shell.exec is rejected when not allowed.
-
- Manual: Disable exec; attempt to get model to run exec; verify refusal + helpful message.
-
-Milestone 2 — Tool call parsing that doesn’t break under real chat output (highest priority)
-
-Goal: Robustly parse tool calls from model output and make failures debuggable.
-
-- [x] M2.1 Consolidate tool parsing into one module + add diagnostics
-
-Implementation tasks
-
- Create (or expand) a single entrypoint in internal/toolparse/:
-
-ParseToolCalls(text string, allowedTools []string) (calls []agent.ToolCall, diag ParseDiagnostics)
-
- Ensure diag includes:
-
-candidate blocks found
-
-rejected blocks with reasons (invalid JSON, missing fields, tool not allowed, etc.)
-
- Update internal/runtime/model.go to use this single parser (remove/avoid duplicate parsing implementations).
-
-Acceptance
-
- Unit tests covering:
-
-fenced ```json blocks
-
-inline JSON objects
-
-arrays of tool calls
-
-“almost JSON” cases (see M2.2)
-
-tool aliasing (e.g., bash.exec → shell.exec)
-
-max tool calls per reply cap
-
-- [x] M2.2 Add a “JSON repair” strategy (minimal + safe)
-
-Goal: Recover from common LLM formatting mistakes without accepting dangerous garbage.
-
-Implementation tasks
-
- Implement small repairs only (do not build a permissive parser that can misinterpret):
-
-strip trailing commas
-
-tolerate code-fence wrappers
-
-trim leading/trailing commentary around a JSON object
-
- Never “guess” tool names or invent arguments.
-
- If repair fails, surface a debuggable parse failure:
-
-store diagnostics in trace/artifacts
-
-optionally show a user-facing message: “Tool call malformed; please retry.”
-
-Acceptance
-
- Tests: trailing comma JSON gets repaired; truly invalid JSON fails with good diagnostics.
-
-- [x] M2.3 Validate tool call schema strictly before execution
-
-Implementation tasks
-
- Require shape: {"tool_name": "...", "arguments": {...}}
-
- Ensure arguments is an object (not string).
-
- If tool call id is missing, generate one deterministically (e.g., call_<runSeq>_<n>).
-
-Acceptance
-
- Tests: missing args / wrong types are rejected with clear error.
-
-Milestone 3 — “Thinking” visibility when pertinent (highest priority)
-
-Goal: Don’t always strip thinking. Capture it reliably and optionally show it when it helps (e.g., on errors), without cluttering normal output.
-
-- [x] M3.1 Extract thinking instead of blindly stripping it
-
-Implementation tasks
-
- Replace stripThinkingTags() with an extractor:
-
-ExtractThinking(text) -> { visibleText, thinkingText }
-
- Support common patterns:
-
-<think>...</think>
-
-<analysis>...</analysis>
-
-(Optional) <!-- THINK --> ... <!-- /THINK -->
-
- Never delete content you can’t confidently classify; fall back to leaving text intact if parsing is ambiguous.
-
-Acceptance
-
- Unit tests with:
-
-nested tags (should not crash)
-
-missing closing tags (should degrade gracefully)
-
-mixed content where visible text must remain correct
-
-- [x] M3.2 Add thinking_mode configuration and CLI flags
-
-Recommended behavior: default to on_error.
-
-Implementation tasks
-
- Add config setting (choose location consistent with your config schema), e.g.:
-
-output.thinking_mode: "never" | "on_error" | "always"
-
- Add CLI override flag(s):
-
-openclawssy ask --thinking=always
-
-openclawssy serve respects config default
-
- Update HTTP/Discord/channel formatting to include thinking when enabled.
-
-Acceptance
-
- Manual:
-
-normal successful run: no thinking shown (default)
-
-tool parse failure: thinking shown (default on_error)
-
-always: thinking always shown
-
-- [x] M3.3 Persist thinking in artifacts + trace
-
-Implementation tasks
-
- Add fields to run trace snapshot and bundle metadata:
-
-thinking (may be truncated)
-
-thinking_present: true/false
-
- Ensure secrets redaction is applied to thinking before writing audit/log artifacts.
-
-Acceptance
-
- Verify run bundles include thinking in the configured mode.
-
- Verify thinking is redacted.
-
-Milestone 4 — Chat session quality improvements (still high priority)
-
-Goal: Sessions feel coherent, tool results are represented correctly, and storage is resilient.
-
-- [x] M4.1 Decide how tool results appear in conversation history
-
-You have two good options:
-
-Option A (recommended): Store tool results as role="tool" messages and include them in model context (with truncation).
-
-Pros: structured; closer to modern tool-calling semantics
-
-Cons: providers vary in “tool role” support
-
-Option B: Convert tool events into short assistant summaries.
-
-Pros: universal
-
-Cons: less structured
-
-Implementation tasks
-
- Pick A or B and document it in docs/specs/CONTRACTS.md.
-
- Ensure Engine.loadSessionMessages() includes the right message types for your choice.
-
- Add truncation limits (per-message and per-history) so tool output doesn’t explode context.
-
-Acceptance
-
- Manual: Ask the agent to do a multi-step task; confirm it remembers tool outputs appropriately.
-
-- [x] M4.2 Make chatstore safe across processes
-
-Problem: Current chatstore uses a process-local mutex; multi-process writes can corrupt JSONL.
-
-Implementation tasks
-
- Add a cross-process lock (directory/file lock) around:
-
-appending to messages.jsonl
-
-writing meta.json
-
-writing _active pointers
-
- Keep dependencies minimal:
-
-either implement flock with build tags
-
-or use a tiny lock dependency (if acceptable)
-
-Acceptance
-
- Add an integration test that spawns concurrent writers (or simulates contention) and verifies JSONL remains valid.
-
-Milestone 5 — Tool execution reliability & UX (important, after chat correctness)
-
-Goal: When tools fail, users get actionable output, and the system avoids runaway resource usage.
-
-- [x] M5.1 Respect ToolTimeoutMS
-
-Implementation tasks
-
- Wrap tool execution in context.WithTimeout using ToolTimeoutMS.
-
- Ensure timeout becomes a structured tool error (and is audited).
-
-Acceptance
-
- Test: a tool that sleeps past timeout is cancelled and returns a timeout error.
-
-- [x] M5.2 Improve tool error reporting + schema consistency
-
-Implementation tasks
-
- Align tool errors with your documented canonical codes (and keep mapping stable).
-
- Ensure tool result payloads are machine-readable for chat rendering (especially the tool summaries).
-
-Acceptance
-
- Tests: invalid input → tool.input_invalid (or your canonical equivalent)
-
- Manual: tool error shows a short summary + details in debug mode.
-
-- [x] M5.3 Fix small correctness bugs in trace summarization
-
-Implementation tasks
-
- Fix duplicated conditions in summarizeToolExecution() / intValue() logic.
-
- Add tests for summarization output format.
-
-Acceptance
-
- Unit test: shell.exec fallback summarization works.
-
- Unit test: intValue() parses numbers correctly.
-
-Milestone 6 — Security & sandboxing (important, but after chat/tool stability)
-
-Goal: Don’t claim sandboxing that isn’t real; make “safe defaults” actually safe.
-
-- [x] M6.1 Resolve Docker sandbox stub (implement or remove)
-
-Implementation tasks
-
- Choose one:
-
-Implement docker provider minimally (mount workspace, run command, capture stdout/stderr, apply resource limits)
-
-Or remove docker from config defaults/docs until implemented
-
- Ensure shell.exec behavior is consistent:
-
-if sandbox provider requested but unavailable → error clearly (sandbox.unavailable)
-
-never silently fall back to unsafe execution
-
-Acceptance
-
- Manual: sandbox=docker with docker missing yields a clear error and shell.exec remains disabled.
-
-- [x] M6.2 Align server bind defaults with secure posture
-
-Implementation tasks
-
- Ensure default bind is loopback unless explicitly overridden.
-
- Ensure dashboard/admin endpoints are clearly protected by token and disabled if desired.
-
-Acceptance
-
- Manual: default config binds to 127.0.0.1 only.
-
-Milestone 7 — Scheduler correctness vs. spec (later)
-
-Goal: Match spec expectations (cron-like scheduling, persistence, restart behavior).
-
-- [x] M7.1 Add cron expression support (or update spec to match reality)
-
-Implementation tasks
-
- Either:
-
-implement cron parsing (library or minimal parser)
-
-or update docs/specs to explicitly state only @every + one-shot are supported
-
- Add persistence and restart correctness tests.
-
-Milestone 8 — Performance & observability (later)
-
-Goal: Make it easier to debug and cheaper to run.
-
-- [x] M8.1 Improve audit logger performance safely
-
-Implementation tasks
-
- Avoid open/close/fsync on every single event (buffer with periodic flush).
-
- Preserve durability requirements (flush on run end; bounded buffering).
-
-“Done” Definition for v0.2
-
-Mark v0.2 complete when all are true:
-
- Chat sessions actually influence model output (history is wired end-to-end).
-
- Tool call parsing is robust, tested, and diagnostics are stored in trace/artifacts.
-
- Tool allowlist is enforced at parse-time and exec-time.
-
- “Thinking” can be captured and shown in on_error mode (default) + optionally always.
-
- Tool calls can be streamed/recorded via OnToolCall.
-
- Chatstore is safe against cross-process corruption (locking + tests).
-
- Docker sandbox situation is resolved (implemented or removed), no misleading config.
-
-Suggested PR Order (so progress stays visible)
-
-PR1: Runner wiring (M1.1) + tests
-
-PR2: OnToolCall wiring (M1.2) + tests
-
-PR3: Consolidated tool parser + diagnostics scaffold (M2.1) + tests
-
-PR4: Strict schema validation + allowlist enforcement (M2.3/M1.3)
-
-PR5: Thinking extraction + thinking_mode (M3.1/M3.2)
-
-PR6: Persist thinking in artifacts/trace + redaction (M3.3)
-
-PR7: Session history tool message policy + truncation (M4.1)
-
-PR8: Chatstore cross-process locking + tests (M4.2)
-
-PR9+: Tool timeout enforcement + tool error shaping (M5.1/M5.2)
-
-PR10+: Docker sandbox decision (M6.1) + secure defaults (M6.2)
+If you need more granular guidance (e.g., specific file names and functions), feel free to ask.
+EOF

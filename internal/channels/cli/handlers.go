@@ -197,7 +197,7 @@ func (h Handlers) HandleCron(ctx context.Context, args []string) int {
 
 	fs := flag.NewFlagSet("cron", flag.ContinueOnError)
 	fs.SetOutput(h.errorWriter())
-	fs.StringVar(&input.Command, "command", "list", "cron command (list/add/remove)")
+	fs.StringVar(&input.Command, "command", "list", "cron command (list/add/remove/delete/pause/resume)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

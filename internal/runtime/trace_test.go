@@ -71,6 +71,26 @@ func TestSummarizeToolExecutionShellFallback(t *testing.T) {
 	}
 }
 
+func TestSummarizeToolExecutionShellWithoutFallback(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{name: "missing fallback", output: `{"stdout":"ok","stderr":"","exit_code":2}`},
+		{name: "null fallback", output: `{"stdout":"ok","stderr":"","exit_code":2,"shell_fallback":null}`},
+		{name: "empty fallback", output: `{"stdout":"ok","stderr":"","exit_code":2,"shell_fallback":""}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			summary := summarizeToolExecution("shell.exec", tc.output, "")
+			if summary != "shell command completed (exit 2)" {
+				t.Fatalf("unexpected summary: %q", summary)
+			}
+		})
+	}
+}
+
 func TestRecordThinkingPersistsThinkingFields(t *testing.T) {
 	collector := newRunTraceCollector("run_3", "session_3", "dashboard", "hello")
 	collector.RecordThinking("redacted notes", true)
@@ -99,5 +119,17 @@ func TestIntValueParsesCommonNumericRepresentations(t *testing.T) {
 	}
 	if got := intValue("not-a-number"); got != 0 {
 		t.Fatalf("expected invalid numeric string to parse as 0, got %d", got)
+	}
+}
+
+func TestIntValueReturnsZeroForNilAndEmptyInputs(t *testing.T) {
+	if got := intValue(nil); got != 0 {
+		t.Fatalf("expected nil to parse as 0, got %d", got)
+	}
+	if got := intValue(""); got != 0 {
+		t.Fatalf("expected empty string to parse as 0, got %d", got)
+	}
+	if got := intValue("   "); got != 0 {
+		t.Fatalf("expected whitespace string to parse as 0, got %d", got)
 	}
 }

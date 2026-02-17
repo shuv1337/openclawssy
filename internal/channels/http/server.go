@@ -225,6 +225,10 @@ func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {
 
 	created, err := QueueRun(r.Context(), s.store, s.executor, req.AgentID, req.Message, "http", "")
 	if err != nil {
+		if errors.Is(err, ErrQueueFull) {
+			http.Error(w, "run queue is full", http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, "failed to queue run", http.StatusInternalServerError)
 		return
 	}

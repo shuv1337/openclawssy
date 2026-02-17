@@ -1,70 +1,56 @@
-# Openclawssy Acceptance Checklist (v0.1)
+# Openclawssy Acceptance Checklist (v0.2)
 
-Source of truth: `devplan.md` phases 1-9.
+Source of truth: `devplan.md`.
 
-## Implementation Notes (2026-02-17)
-- Chat/session UX, runtime reliability, tool summary rendering, and dashboard layout controls have advanced significantly.
-- This checklist is retained as a phase-gate artifact and is not yet being auto-derived from tests.
-- See `docs/PROJECT_STATUS.md` and `mondaynight.md` for the latest implementation detail.
+## Current Scope Notes
+- This checklist tracks implemented prototype behavior at v0.2.
+- Scheduler supports `@every <duration>` and one-shot RFC3339 schedules only (no cron parser).
+- Supported sandbox providers are `none` and `local`.
 
-## Phase 1 - Repo Bootstrap + Contracts
-- [ ] `go.mod` exists with module `openclawssy` and Go 1.24.
-- [ ] `Makefile` has `fmt`, `lint`, `test`, `build` targets.
-- [ ] Contracts exist for tools, runs, audit events, scheduler jobs, and HTTP shapes.
-- [ ] Security and config specs exist.
+## Core Platform
+- [x] `go.mod` exists with module `openclawssy` and Go 1.24.
+- [x] `Makefile` includes `fmt`, `lint`, `test`, and `build` targets.
+- [x] Core contracts exist for runs, tools, audit events, scheduler jobs, and HTTP shapes.
+- [x] Config and security specs exist.
 
-## Phase 2 - Config + Atomic Persistence
-- [ ] Config parse + validation implemented with secure defaults.
-- [ ] Atomic write flow implemented (`temp -> fsync -> rename`).
-- [ ] Last-known-good recovery path implemented.
-- [ ] Corruption and invalid-config tests pass.
+## Config + Persistence
+- [x] Config parse and validation are implemented with secure defaults.
+- [x] Atomic write flow is implemented for config/scheduler/secrets persistence.
+- [x] Backup/last-known-good recovery paths exist for critical persisted artifacts.
+- [x] Invalid/corrupt input tests exist for key persistence flows.
 
-## Phase 3 - Core Runner
-- [ ] Run state machine transitions are implemented and tested.
-- [ ] Prompt assembly is deterministic with bounded file sizes.
-- [ ] Run bundle persists input, tool calls, output, timing, and usage metadata.
-- [ ] `openclawssy ask "hello"` works with mock or real provider.
+## Runtime + Tooling
+- [x] Runner and tool-call loop behavior are implemented and tested.
+- [x] Prompt assembly is deterministic with bounded payload behavior.
+- [x] Run bundles persist inputs, outputs, tool activity, and trace metadata.
+- [x] Tool policy boundaries enforce workspace path/symlink protections.
+- [x] Path traversal and protected control-plane writes are denied and tested.
 
-## Phase 4 - Tool System + Policy Layer
-- [ ] Tool registry validates input/output contracts.
-- [ ] Capability policy enforced per agent.
-- [ ] Workspace-only write guard enforced.
-- [ ] Path traversal and symlink escape attempts are denied.
-- [ ] Core tools (`fs.read`, `fs.list`, `fs.write`, `fs.edit`, `code.search`) work.
+## Audit + Safety
+- [x] Required audit events are emitted (`run.*`, `tool.*`, `policy.denied`).
+- [x] Audit logging is append-only JSONL with redaction.
+- [x] Structured tool error codes are used (`tool.not_found`, `tool.input_invalid`, `policy.denied`, `timeout`, `internal.error`).
 
-## Phase 5 - Audit Logging + Redaction
-- [ ] Required audit events are emitted (`run.*`, `tool.*`, `policy.denied`).
-- [ ] Audit logs are append-only JSONL.
-- [ ] Secret redaction rules remove sensitive material from logs.
-- [ ] Abuse tests verify denial and redaction behavior.
+## Sandbox + Exec Gating
+- [x] Sandbox provider interface lifecycle is implemented.
+- [x] `none` blocks `shell.exec`.
+- [x] `local` allows `shell.exec` subject to policy constraints.
+- [x] Invariant enforced: no active sandbox means no shell execution.
+- [x] Unsupported sandbox providers are rejected at config validation.
 
-## Phase 6 - Sandbox Providers + Exec Gating
-- [ ] Sandbox interface implemented with lifecycle methods.
-- [ ] `none` mode blocks `shell.exec`.
-- [ ] `local` mode allows `shell.exec` within workspace policy constraints.
-- [ ] Roadmap providers documented: `podman`, `gvisor`, `nsjail`, `firecracker`.
-- [ ] Invariant enforced: no sandbox, no shell execution.
+## Scheduler
+- [x] Job add/list/remove works via CLI/store.
+- [x] Scheduler state persists across restarts.
+- [x] Missed-job policy is documented and tested (no replay for `@every`; one-shot runs once then disables).
+- [x] Scheduler supports bounded concurrent execution with a worker limit.
 
-## Phase 7 - Scheduler (Cron-lite)
-- [ ] Job create/list/remove works.
-- [ ] Scheduler state persists across restarts.
-- [ ] Triggered jobs generate run artifacts and audit events.
-- [ ] Missed-job behavior is documented and tested.
+## Channels
+- [x] CLI commands exist: `init`, `ask`, `run`, `serve`, `cron`, `doctor`.
+- [x] HTTP run create/status endpoints exist and require bearer token auth.
+- [x] Server bind defaults to loopback.
+- [x] Chat connector allowlist and rate limiting are enforced.
 
-## Phase 8 - Channels
-- [ ] CLI commands exist: `init`, `ask`, `run`, `serve`, `cron`, `doctor`.
-- [ ] HTTP API supports run create and run status endpoints.
-- [ ] HTTP requires auth token and defaults to loopback binding.
-- [ ] One chat connector enforces allowlist and rate limiting.
-
-## Phase 9 - Hardening + Packaging + Docs
-- [ ] CI runs fmt-check, vet, test, and build.
-- [ ] Quickstart docs enable first successful run in under 10 minutes.
-- [ ] Security deployment guidance is documented.
-- [ ] Release artifacts and changelog workflow are documented.
-
-## Definition of Done (v0.1)
-- [ ] CLI workflow operational end-to-end.
-- [ ] Policy + audit boundaries enforced and tested.
-- [ ] Scheduler and sandbox invariants hold under abuse tests.
-- [ ] At least one non-CLI channel works end-to-end.
+## Remaining Hardening Work
+- [ ] Expose scheduler CRUD and pause/resume controls via authenticated HTTP admin endpoints.
+- [ ] Add scheduler global/per-job pause-resume controls to CLI where needed.
+- [ ] Add global run queue/per-tool concurrency caps for overload control.

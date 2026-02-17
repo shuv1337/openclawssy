@@ -21,7 +21,18 @@ type ToolSpec struct {
 	Name        string
 	Description string
 	Required    []string
+	ArgTypes    map[string]ArgType
 }
+
+type ArgType string
+
+const (
+	ArgTypeString ArgType = "string"
+	ArgTypeNumber ArgType = "number"
+	ArgTypeBool   ArgType = "bool"
+	ArgTypeObject ArgType = "object"
+	ArgTypeArray  ArgType = "array"
+)
 
 type ShellExecutor interface {
 	Exec(ctx context.Context, command string, args []string) (stdout string, stderr string, exitCode int, err error)
@@ -115,8 +126,14 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 	}
 
 	for _, required := range item.spec.Required {
-		if _, ok := args[required]; !ok {
+		value, ok := args[required]
+		if !ok {
 			err := &ToolError{Code: ErrCodeInvalidInput, Tool: name, Message: "missing required field: " + required}
+			_ = r.emit(ctx, "tool.result", map[string]any{"agent_id": agentID, "tool": name, "error": err.Error()})
+			return nil, err
+		}
+		if expected, ok := item.spec.ArgTypes[required]; ok && !matchesArgType(value, expected) {
+			err := &ToolError{Code: ErrCodeInvalidInput, Tool: name, Message: fmt.Sprintf("invalid type for field %s: expected %s", required, expected)}
 			_ = r.emit(ctx, "tool.result", map[string]any{"agent_id": agentID, "tool": name, "error": err.Error()})
 			return nil, err
 		}
@@ -159,6 +176,36 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 		"result":   res,
 	})
 	return res, nil
+}
+
+func matchesArgType(value any, expected ArgType) bool {
+	switch expected {
+	case ArgTypeString:
+		_, ok := value.(string)
+		return ok
+	case ArgTypeNumber:
+		switch value.(type) {
+		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+			return true
+		default:
+			return false
+		}
+	case ArgTypeBool:
+		_, ok := value.(bool)
+		return ok
+	case ArgTypeObject:
+		_, ok := value.(map[string]any)
+		return ok
+	case ArgTypeArray:
+		switch value.(type) {
+		case []any, []string, []int, []float64, []bool:
+			return true
+		default:
+			return false
+		}
+	default:
+		return true
+	}
 }
 
 func (r *Registry) emit(ctx context.Context, eventType string, fields map[string]any) error {

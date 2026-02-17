@@ -49,13 +49,11 @@ func TestStorePersistenceReload(t *testing.T) {
 	}
 
 	job := Job{
-		ID:           "job-persist",
-		Schedule:     "@every 10s",
-		AgentID:      "agent-beta",
-		Message:      "persist me",
-		Mode:         "isolated",
-		NotifyTarget: "stdout",
-		Enabled:      true,
+		ID:       "job-persist",
+		Schedule: "@every 10s",
+		AgentID:  "agent-beta",
+		Message:  "persist me",
+		Enabled:  true,
 	}
 	if err := store.Add(job); err != nil {
 		t.Fatalf("add job: %v", err)
@@ -121,5 +119,250 @@ func TestExecutorTriggerExecution(t *testing.T) {
 	updated := store.List()[0]
 	if updated.LastRun == "" {
 		t.Fatal("expected lastRun to be updated")
+	}
+}
+
+func TestExecutorCheckRunsDueJobsConcurrently(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.Add(Job{ID: "job-concurrent-" + time.Now().Add(time.Duration(i)).Format("150405.000000000"), Schedule: "@every 1ms", AgentID: "agent", Message: "run", Enabled: true}); err != nil {
+			t.Fatalf("add job %d: %v", i, err)
+		}
+	}
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	exec := NewExecutorWithConcurrency(store, time.Millisecond, 2, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		started <- struct{}{}
+		<-release
+	})
+
+	done := make(chan struct{})
+	go func() {
+		exec.check(time.Now().UTC())
+		close(done)
+	}()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for concurrent worker %d", i+1)
+		}
+	}
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("executor check did not finish")
+	}
+
+	for _, job := range store.List() {
+		if job.LastRun == "" {
+			t.Fatalf("expected lastRun for job %q", job.ID)
+		}
+	}
+}
+
+func TestExecutorCheckHonorsConcurrencyLimit(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := store.Add(Job{ID: "job-limit-" + time.Now().Add(time.Duration(i)).Format("150405.000000000"), Schedule: "@every 1ms", AgentID: "agent", Message: "run", Enabled: true}); err != nil {
+			t.Fatalf("add job %d: %v", i, err)
+		}
+	}
+
+	var mu sync.Mutex
+	current := 0
+	maxConcurrent := 0
+	exec := NewExecutorWithConcurrency(store, time.Millisecond, 2, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		mu.Lock()
+		current++
+		if current > maxConcurrent {
+			maxConcurrent = current
+		}
+		mu.Unlock()
+
+		time.Sleep(40 * time.Millisecond)
+
+		mu.Lock()
+		current--
+		mu.Unlock()
+	})
+
+	exec.check(time.Now().UTC())
+	if maxConcurrent > 2 {
+		t.Fatalf("expected max concurrent runs <= 2, got %d", maxConcurrent)
+	}
+	if maxConcurrent < 2 {
+		t.Fatalf("expected worker pool to run at least two jobs concurrently, got %d", maxConcurrent)
+	}
+}
+
+func TestExecutorRestartResumesEveryWithoutReplay(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	job := Job{ID: "job-restart-every", Schedule: "@every 1s", AgentID: "agent", Message: "run", Enabled: true}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+
+	runs := 0
+	exec := NewExecutor(store, time.Second, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	firstRunAt := time.Date(2026, 2, 17, 12, 0, 0, 0, time.UTC)
+	exec.check(firstRunAt)
+	if runs != 1 {
+		t.Fatalf("expected first execution, got %d", runs)
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	reloadedExec := NewExecutor(reloaded, time.Second, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	restartAt := firstRunAt.Add(10 * time.Second)
+	reloadedExec.check(restartAt)
+	reloadedExec.check(restartAt.Add(200 * time.Millisecond))
+
+	if runs != 2 {
+		t.Fatalf("expected single post-restart catch-up run with no replay, got %d", runs)
+	}
+}
+
+func TestExecutorRestartRunsMissedOneShotOnceAndDisables(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	scheduledAt := time.Date(2026, 2, 16, 12, 0, 0, 0, time.UTC)
+	job := Job{ID: "job-one-shot", Schedule: scheduledAt.Format(time.RFC3339), AgentID: "agent", Message: "run once", Enabled: true}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("add one-shot job: %v", err)
+	}
+
+	runs := 0
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	reloadedExec := NewExecutor(reloaded, time.Second, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	now := scheduledAt.Add(2 * time.Hour)
+	reloadedExec.check(now)
+
+	if runs != 1 {
+		t.Fatalf("expected missed one-shot to run once, got %d", runs)
+	}
+
+	reloadedAgain, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("reload store again: %v", err)
+	}
+	jobs := reloadedAgain.List()
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job after reload, got %d", len(jobs))
+	}
+	if jobs[0].Enabled {
+		t.Fatalf("expected one-shot job to be disabled after run: %+v", jobs[0])
+	}
+	if jobs[0].LastRun == "" {
+		t.Fatalf("expected one-shot job to persist LastRun: %+v", jobs[0])
+	}
+
+	reloadedExecAgain := NewExecutor(reloadedAgain, time.Second, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	reloadedExecAgain.check(now.Add(5 * time.Hour))
+	if runs != 1 {
+		t.Fatalf("expected one-shot to stay disabled after restart, got %d runs", runs)
+	}
+}
+
+func TestExecutorHonorsGlobalPauseAndResume(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := store.Add(Job{ID: "job-paused", Schedule: "@every 1ms", AgentID: "agent", Message: "run", Enabled: true}); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+	if err := store.SetPaused(true); err != nil {
+		t.Fatalf("set paused: %v", err)
+	}
+
+	runs := 0
+	exec := NewExecutor(store, time.Second, func(agentID string, message string) {
+		_ = agentID
+		_ = message
+		runs++
+	})
+	exec.check(time.Now().UTC())
+	if runs != 0 {
+		t.Fatalf("expected paused scheduler to suppress runs, got %d", runs)
+	}
+
+	if err := store.SetPaused(false); err != nil {
+		t.Fatalf("resume scheduler: %v", err)
+	}
+	exec.check(time.Now().UTC())
+	if runs != 1 {
+		t.Fatalf("expected resumed scheduler to execute jobs, got %d", runs)
+	}
+}
+
+func TestSetJobEnabledPersistsAcrossRestart(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := store.Add(Job{ID: "job-toggle", Schedule: "@every 1m", AgentID: "agent", Message: "run", Enabled: true}); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+	if err := store.SetJobEnabled("job-toggle", false); err != nil {
+		t.Fatalf("disable job: %v", err)
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	jobs := reloaded.List()
+	if len(jobs) != 1 {
+		t.Fatalf("expected one job after reload, got %d", len(jobs))
+	}
+	if jobs[0].Enabled {
+		t.Fatalf("expected job to remain disabled after reload: %+v", jobs[0])
 	}
 }

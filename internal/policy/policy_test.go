@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,80 @@ func TestTraversalDenied(t *testing.T) {
 	_, err := enf.ResolveReadPath(ws, "../secret.txt")
 	if err == nil {
 		t.Fatalf("expected traversal denial")
+	}
+}
+
+func TestHasTraversalWindowsStylePaths(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: `..\\secret.txt`, want: true},
+		{path: `safe\\nested\\file.txt`, want: false},
+		{path: `C:\\temp\\..\\secret.txt`, want: true},
+		{path: `C:\\temp\\logs\\app.txt`, want: false},
+		{path: `\\\\server\\share\\dir\\..\\secret.txt`, want: true},
+	}
+
+	for _, tc := range tests {
+		if got := HasTraversal(tc.path); got != tc.want {
+			t.Fatalf("HasTraversal(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestResolveWritePathRejectsWindowsTraversalVariants(t *testing.T) {
+	ws := t.TempDir()
+	enf := NewEnforcer(ws, map[string][]string{"agent": {"fs.write"}})
+
+	paths := []string{`..\\secret.txt`, `dir\\..\\secret.txt`, `dir/..\\secret.txt`, `C:relative\\file.txt`}
+	for _, target := range paths {
+		_, err := enf.ResolveWritePath(ws, target)
+		if err == nil {
+			t.Fatalf("expected traversal/invalid path denial for %q", target)
+		}
+		pathErr, ok := err.(*PathError)
+		if !ok {
+			t.Fatalf("expected PathError for %q, got %T", target, err)
+		}
+		if pathErr.Reason != "path traversal" && pathErr.Reason != "invalid path" {
+			t.Fatalf("unexpected reason for %q: %s", target, pathErr.Reason)
+		}
+	}
+}
+
+func TestResolveWritePathRejectsWindowsAbsoluteTargets(t *testing.T) {
+	ws := t.TempDir()
+	enf := NewEnforcer(ws, map[string][]string{"agent": {"fs.write"}})
+
+	absoluteTargets := []string{`C:\\Windows\\System32\\drivers\\etc\\hosts`, `\\\\server\\share\\secret.txt`}
+	for _, target := range absoluteTargets {
+		_, err := enf.ResolveWritePath(ws, target)
+		if err == nil {
+			t.Fatalf("expected absolute target %q to be denied", target)
+		}
+		if !strings.Contains(err.Error(), "outside workspace") && !strings.Contains(err.Error(), "write parent does not exist") {
+			t.Fatalf("expected absolute path denial reason for %q, got %v", target, err)
+		}
+	}
+}
+
+func TestIsAbsoluteTargetRecognizesWindowsForms(t *testing.T) {
+	tests := []struct {
+		target string
+		want   bool
+	}{
+		{target: `C:\\repo\\file.txt`, want: true},
+		{target: `C:/repo/file.txt`, want: true},
+		{target: `\\\\server\\share\\file.txt`, want: true},
+		{target: `//server/share/file.txt`, want: true},
+		{target: `C:relative\\file.txt`, want: false},
+		{target: `workspace\\file.txt`, want: false},
+	}
+	for _, tc := range tests {
+		if got := isAbsoluteTarget(tc.target); got != tc.want {
+			t.Fatalf("isAbsoluteTarget(%q) = %v, want %v", tc.target, got, tc.want)
+		}
 	}
 }
 

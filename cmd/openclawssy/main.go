@@ -105,7 +105,7 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	schedulerExec := scheduler.NewExecutor(jobsStore, time.Second, func(agentID string, message string) {
+	schedulerExec := scheduler.NewExecutorWithConcurrency(jobsStore, time.Second, 4, func(agentID string, message string) {
 		_, _ = httpchannel.QueueRun(context.Background(), runStore, exec, agentID, message, "scheduler", "")
 	})
 	schedulerExec.Start()
@@ -139,7 +139,7 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 		}
 	}
 
-	dash := dashboard.New(".", runStore)
+	dash := dashboard.New(".", runStore, jobsStore)
 	server := httpchannel.NewServer(httpchannel.Config{
 		Addr:        serveCfg.Addr,
 		BearerToken: serveCfg.Token,
@@ -292,10 +292,15 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 	switch strings.ToLower(strings.TrimSpace(input.Command)) {
 	case "list":
 		jobs := store.List()
+		state := "running"
+		if store.IsPaused() {
+			state = "paused"
+		}
 		if len(jobs) == 0 {
-			return "no jobs", nil
+			return "scheduler=" + state + " no jobs", nil
 		}
 		lines := make([]string, 0, len(jobs))
+		lines = append(lines, "scheduler="+state)
 		for _, job := range jobs {
 			lines = append(lines, fmt.Sprintf("%s %s %q enabled=%t", job.ID, job.Schedule, job.Message, job.Enabled))
 		}
@@ -307,15 +312,11 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 		agentID := "default"
 		schedule := ""
 		message := ""
-		mode := "isolated"
-		notify := ""
 		enabled := true
 		fs.StringVar(&id, "id", "", "job id")
 		fs.StringVar(&agentID, "agent", "default", "agent id")
 		fs.StringVar(&schedule, "schedule", "", "schedule (@every 1m or RFC3339)")
 		fs.StringVar(&message, "message", "", "message")
-		fs.StringVar(&mode, "mode", "isolated", "execution mode")
-		fs.StringVar(&notify, "notify-target", "", "notify target")
 		fs.BoolVar(&enabled, "enabled", true, "enable job")
 		if err := fs.Parse(input.Args); err != nil {
 			return "", err
@@ -326,11 +327,11 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 		if id == "" {
 			id = fmt.Sprintf("job_%d", time.Now().UTC().UnixNano())
 		}
-		if err := store.Add(scheduler.Job{ID: id, Schedule: schedule, AgentID: agentID, Message: message, Mode: mode, NotifyTarget: notify, Enabled: enabled}); err != nil {
+		if err := store.Add(scheduler.Job{ID: id, Schedule: schedule, AgentID: agentID, Message: message, Enabled: enabled}); err != nil {
 			return "", err
 		}
 		return "added job " + id, nil
-	case "remove":
+	case "remove", "delete":
 		fs := flag.NewFlagSet("cron remove", flag.ContinueOnError)
 		fs.SetOutput(os.Stderr)
 		id := ""
@@ -345,6 +346,31 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 			return "", err
 		}
 		return "removed job " + id, nil
+	case "pause", "resume":
+		fs := flag.NewFlagSet("cron pause/resume", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
+		id := ""
+		fs.StringVar(&id, "id", "", "job id (optional)")
+		if err := fs.Parse(input.Args); err != nil {
+			return "", err
+		}
+		enable := strings.EqualFold(strings.TrimSpace(input.Command), "resume")
+		if strings.TrimSpace(id) != "" {
+			if err := store.SetJobEnabled(strings.TrimSpace(id), enable); err != nil {
+				return "", err
+			}
+			if enable {
+				return "resumed job " + strings.TrimSpace(id), nil
+			}
+			return "paused job " + strings.TrimSpace(id), nil
+		}
+		if err := store.SetPaused(!enable); err != nil {
+			return "", err
+		}
+		if enable {
+			return "resumed scheduler", nil
+		}
+		return "paused scheduler", nil
 	default:
 		return "", fmt.Errorf("unsupported cron command: %s", input.Command)
 	}

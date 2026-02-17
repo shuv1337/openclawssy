@@ -159,6 +159,30 @@ func TestRegistryMissingRequiredFieldUsesCanonicalInputInvalidCode(t *testing.T)
 	}
 }
 
+func TestRegistryRejectsWrongTypeForRequiredField(t *testing.T) {
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := reg.Register(ToolSpec{Name: "needs_path", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString}}, func(ctx context.Context, req Request) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "needs_path", ".", map[string]any{"path": 42})
+	if err == nil {
+		t.Fatalf("expected invalid-input type error")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodeInvalidInput {
+		t.Fatalf("expected %s, got %s", ErrCodeInvalidInput, toolErr.Code)
+	}
+	if !strings.Contains(toolErr.Message, "invalid type") {
+		t.Fatalf("expected invalid type message, got %q", toolErr.Message)
+	}
+}
+
 func TestRegistryPolicyDenied(t *testing.T) {
 	a := &memAudit{}
 	reg := NewRegistry(fakePolicy{deny: true}, a)

@@ -7,20 +7,27 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/scheduler"
 	"openclawssy/internal/secrets"
 )
 
 type Handler struct {
-	rootDir string
-	store   httpchannel.RunStore
+	rootDir        string
+	store          httpchannel.RunStore
+	schedulerStore *scheduler.Store
 }
 
-func New(rootDir string, store httpchannel.RunStore) *Handler {
-	return &Handler{rootDir: rootDir, store: store}
+func New(rootDir string, store httpchannel.RunStore, schedulerStore ...*scheduler.Store) *Handler {
+	var jobs *scheduler.Store
+	if len(schedulerStore) > 0 {
+		jobs = schedulerStore[0]
+	}
+	return &Handler{rootDir: rootDir, store: store, schedulerStore: jobs}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -28,9 +35,139 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/status", h.getStatus)
 	mux.HandleFunc("/api/admin/config", h.handleConfig)
 	mux.HandleFunc("/api/admin/secrets", h.handleSecrets)
+	mux.HandleFunc("/api/admin/scheduler/jobs", h.handleSchedulerJobs)
+	mux.HandleFunc("/api/admin/scheduler/jobs/", h.handleSchedulerJobByID)
+	mux.HandleFunc("/api/admin/scheduler/control", h.handleSchedulerControl)
 	mux.HandleFunc("/api/admin/chat/sessions", h.listChatSessions)
 	mux.HandleFunc("/api/admin/chat/sessions/", h.chatSessionMessages)
 	mux.HandleFunc("/api/admin/debug/runs/", h.getRunTrace)
+}
+
+func (h *Handler) schedulerStoreOrDefault() (*scheduler.Store, error) {
+	if h.schedulerStore != nil {
+		return h.schedulerStore, nil
+	}
+	return scheduler.NewStore(filepath.Join(h.rootDir, ".openclawssy", "scheduler", "jobs.json"))
+}
+
+func (h *Handler) handleSchedulerJobs(w http.ResponseWriter, r *http.Request) {
+	store, err := h.schedulerStoreOrDefault()
+	if err != nil {
+		http.Error(w, "failed to open scheduler store", http.StatusInternalServerError)
+		return
+	}
+	if r.Method == http.MethodGet {
+		writeJSON(w, map[string]any{"paused": store.IsPaused(), "jobs": store.List()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID       string `json:"id"`
+		AgentID  string `json:"agent_id"`
+		Schedule string `json:"schedule"`
+		Message  string `json:"message"`
+		Enabled  *bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	req.Schedule = strings.TrimSpace(req.Schedule)
+	req.Message = strings.TrimSpace(req.Message)
+	if req.Schedule == "" || req.Message == "" {
+		http.Error(w, "schedule and message are required", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(req.ID)
+	if id == "" {
+		id = "job_" + strconv.FormatInt(time.Now().UTC().UnixNano(), 10)
+	}
+	agentID := strings.TrimSpace(req.AgentID)
+	if agentID == "" {
+		agentID = "default"
+	}
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+	if err := store.Add(scheduler.Job{ID: id, AgentID: agentID, Schedule: req.Schedule, Message: req.Message, Enabled: enabled}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "id": id})
+}
+
+func (h *Handler) handleSchedulerJobByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	store, err := h.schedulerStoreOrDefault()
+	if err != nil {
+		http.Error(w, "failed to open scheduler store", http.StatusInternalServerError)
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/admin/scheduler/jobs/"))
+	if id == "" || strings.Contains(id, "/") {
+		http.Error(w, "invalid job id", http.StatusBadRequest)
+		return
+	}
+	if err := store.Remove(id); err != nil {
+		if errors.Is(err, scheduler.ErrJobNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "removed": id})
+}
+
+func (h *Handler) handleSchedulerControl(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	store, err := h.schedulerStoreOrDefault()
+	if err != nil {
+		http.Error(w, "failed to open scheduler store", http.StatusInternalServerError)
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+		JobID  string `json:"job_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action != "pause" && action != "resume" {
+		http.Error(w, "action must be pause or resume", http.StatusBadRequest)
+		return
+	}
+	jobID := strings.TrimSpace(req.JobID)
+	enable := action == "resume"
+	if jobID != "" {
+		if err := store.SetJobEnabled(jobID, enable); err != nil {
+			if errors.Is(err, scheduler.ErrJobNotFound) {
+				http.Error(w, "job not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "action": action, "job_id": jobID})
+		return
+	}
+	if err := store.SetPaused(action == "pause"); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "action": action, "paused": store.IsPaused()})
 }
 
 func (h *Handler) serveDashboard(w http.ResponseWriter, r *http.Request) {

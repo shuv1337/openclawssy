@@ -44,12 +44,12 @@ func TestShellExecAllowedGating(t *testing.T) {
 	}
 }
 
-func TestNewProviderDockerUnavailable(t *testing.T) {
+func TestNewProviderRejectsUnsupportedProvider(t *testing.T) {
 	_, err := NewProvider("docker", t.TempDir())
 	if err == nil {
-		t.Fatalf("expected docker provider to be unavailable")
+		t.Fatalf("expected unsupported provider error")
 	}
-	if !errors.Is(err, ErrUnavailable) {
-		t.Fatalf("expected ErrUnavailable, got %v", err)
+	if !errors.Is(err, ErrUnknownProvider) {
+		t.Fatalf("expected ErrUnknownProvider, got %v", err)
 	}
 }
