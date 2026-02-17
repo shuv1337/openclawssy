@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +16,9 @@ import (
 )
 
 type requestCapture struct {
-	Messages []struct {
+	Model     string `json:"model"`
+	MaxTokens int    `json:"max_tokens"`
+	Messages  []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	} `json:"messages"`
@@ -584,6 +587,160 @@ func TestProviderModelCanonicalizesBashExecAlias(t *testing.T) {
 	}
 	if resp.ToolCalls[0].Name != "shell.exec" {
 		t.Fatalf("expected canonical shell.exec, got %q", resp.ToolCalls[0].Name)
+	}
+}
+
+func TestProviderModelRequestsMaxTokensCap(t *testing.T) {
+	var captured requestCapture
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "ok"}}}})
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.Model.Provider = "generic"
+	cfg.Model.Name = "test-model"
+	cfg.Model.MaxTokens = 50000
+	cfg.Providers.Generic.BaseURL = server.URL
+	cfg.Providers.Generic.APIKey = "test-key"
+	cfg.Providers.Generic.APIKeyEnv = ""
+
+	model, err := NewProviderModel(cfg, nil)
+	if err != nil {
+		t.Fatalf("new provider model: %v", err)
+	}
+
+	_, err = model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "hello"})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if captured.MaxTokens != 20000 {
+		t.Fatalf("expected max_tokens=20000, got %d", captured.MaxTokens)
+	}
+}
+
+func TestProviderModelCompactsAtEightyPercentContext(t *testing.T) {
+	var captured requestCapture
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": "ok"}}}})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+
+	messages := make([]agent.ChatMessage, 0, 260)
+	for i := 0; i < 260; i++ {
+		role := "assistant"
+		if i%2 == 0 {
+			role = "user"
+		}
+		messages = append(messages, agent.ChatMessage{
+			Role:    role,
+			Content: strings.Repeat("context-window-line-", 180) + " marker-" + strconv.Itoa(i),
+		})
+	}
+	messages = append(messages, agent.ChatMessage{Role: "user", Content: "latest-question-marker"})
+
+	_, err := model.Generate(context.Background(), agent.ModelRequest{
+		SystemPrompt: "system",
+		Messages:     messages,
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(captured.Messages) < 3 {
+		t.Fatalf("expected compacted request with system + history, got %d message(s)", len(captured.Messages))
+	}
+	if captured.Messages[1].Role != "system" || !strings.Contains(captured.Messages[1].Content, "Conversation compaction summary") {
+		t.Fatalf("expected compaction summary system message, got %+v", captured.Messages[1])
+	}
+	if captured.Messages[len(captured.Messages)-1].Role != "user" || captured.Messages[len(captured.Messages)-1].Content != "latest-question-marker" {
+		t.Fatalf("expected latest user turn preserved, got %+v", captured.Messages[len(captured.Messages)-1])
+	}
+
+	reqSystem := captured.Messages[0].Content
+	reqHistory := make([]agent.ChatMessage, 0, len(captured.Messages)-1)
+	for _, item := range captured.Messages[1:] {
+		reqHistory = append(reqHistory, agent.ChatMessage{Role: item.Role, Content: item.Content})
+	}
+	used := estimateConversationTokens(reqSystem, reqHistory)
+	budget := int(float64(model.contextWindow) * contextCompactionRatio)
+	if used > budget {
+		t.Fatalf("expected compacted context <= %d tokens, got %d", budget, used)
+	}
+}
+
+func TestProviderModelParsesMultipleToolCallsFromSingleResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{\"path\":\".\"}}\n```\n```json\n{\"tool_name\":\"fs.read\",\"arguments\":{\"path\":\"README.md\"}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{
+		Prompt:       "system",
+		Message:      "inspect files",
+		AllowedTools: []string{"fs.list", "fs.read"},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 2 {
+		t.Fatalf("expected two tool calls, got %d", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "fs.list" || resp.ToolCalls[1].Name != "fs.read" {
+		t.Fatalf("unexpected parsed tools: %+v", resp.ToolCalls)
+	}
+	if resp.ToolCalls[0].ID == resp.ToolCalls[1].ID {
+		t.Fatalf("expected unique tool IDs, got duplicate %q", resp.ToolCalls[0].ID)
+	}
+}
+
+func TestProviderModelUsesCurrentMessageForToolDirectiveDetection(t *testing.T) {
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]string{"content": "ok"}}},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{
+		Message: "what should we do now?",
+		Messages: []agent.ChatMessage{
+			{Role: "user", Content: `/tool fs.list {"path":"."}`},
+			{Role: "assistant", Content: "Done."},
+		},
+	})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if requestCount != 1 {
+		t.Fatalf("expected provider to be called once, got %d", requestCount)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no direct tool calls from historical /tool turn, got %+v", resp.ToolCalls)
+	}
+	if resp.FinalText != "ok" {
+		t.Fatalf("unexpected final text: %q", resp.FinalText)
 	}
 }
 

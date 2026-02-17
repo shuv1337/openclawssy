@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,12 +20,14 @@ import (
 )
 
 type ProviderModel struct {
-	providerName string
-	modelName    string
-	baseURL      string
-	apiKey       string
-	headers      map[string]string
-	httpClient   *http.Client
+	providerName      string
+	modelName         string
+	baseURL           string
+	apiKey            string
+	headers           map[string]string
+	httpClient        *http.Client
+	responseMaxTokens int
+	contextWindow     int
 }
 
 const (
@@ -32,6 +35,11 @@ const (
 	providerMaxAttempts    = 3
 	providerRetryBackoff   = 700 * time.Millisecond
 	toolNamePattern        = `[A-Za-z][A-Za-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*`
+	maxToolCallsPerReply   = 6
+	maxResponseTokens      = 20000
+	defaultContextWindow   = 120000
+	contextCompactionRatio = 0.80
+	compactionKeepRecent   = 60
 )
 
 var toolNameAliases = map[string]string{
@@ -81,13 +89,20 @@ func NewProviderModel(cfg config.Config, lookup SecretLookup) (*ProviderModel, e
 		headers[k] = v
 	}
 
+	responseMaxTokens := cfg.Model.MaxTokens
+	if responseMaxTokens <= 0 || responseMaxTokens > maxResponseTokens {
+		responseMaxTokens = maxResponseTokens
+	}
+
 	return &ProviderModel{
-		providerName: pName,
-		modelName:    cfg.Model.Name,
-		baseURL:      base,
-		apiKey:       apiKey,
-		headers:      headers,
-		httpClient:   &http.Client{Timeout: defaultProviderTimeout},
+		providerName:      pName,
+		modelName:         cfg.Model.Name,
+		baseURL:           base,
+		apiKey:            apiKey,
+		headers:           headers,
+		httpClient:        &http.Client{Timeout: defaultProviderTimeout},
+		responseMaxTokens: responseMaxTokens,
+		contextWindow:     defaultContextWindow,
 	}, nil
 }
 
@@ -96,7 +111,10 @@ func (m *ProviderModel) ModelName() string    { return m.modelName }
 
 func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (agent.ModelResponse, error) {
 	messages := requestMessages(req)
-	msg := strings.TrimSpace(lastUserMessage(messages))
+	msg := strings.TrimSpace(req.Message)
+	if msg == "" {
+		msg = strings.TrimSpace(lastUserMessage(messages))
+	}
 	if strings.HasPrefix(msg, "/tool ") {
 		if len(req.ToolResults) > 0 {
 			return agent.ModelResponse{FinalText: toolResultsText(req.ToolResults)}, nil
@@ -110,26 +128,34 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 	}
 	promptText := appendToolResultsPrompt(systemPrompt, req.ToolResults)
 
-	chatMessages := make([]map[string]string, 0, len(messages)+1)
-	chatMessages = append(chatMessages, map[string]string{"role": "system", "content": promptText})
-	for _, m := range messages {
-		role := strings.ToLower(strings.TrimSpace(m.Role))
+	normalizedMessages := make([]agent.ChatMessage, 0, len(messages))
+	for _, item := range messages {
+		role := strings.ToLower(strings.TrimSpace(item.Role))
 		if role == "" {
 			role = "user"
 		}
 		if role != "system" && role != "user" && role != "assistant" && role != "tool" {
 			continue
 		}
-		content := strings.TrimSpace(m.Content)
+		content := strings.TrimSpace(item.Content)
 		if content == "" {
 			continue
 		}
-		chatMessages = append(chatMessages, map[string]string{"role": role, "content": content})
+		normalizedMessages = append(normalizedMessages, agent.ChatMessage{Role: role, Content: content})
+	}
+
+	normalizedMessages = compactMessagesForContext(promptText, normalizedMessages, m.contextWindow)
+
+	chatMessages := make([]map[string]string, 0, len(normalizedMessages)+1)
+	chatMessages = append(chatMessages, map[string]string{"role": "system", "content": promptText})
+	for _, item := range normalizedMessages {
+		chatMessages = append(chatMessages, map[string]string{"role": item.Role, "content": item.Content})
 	}
 
 	body := map[string]any{
-		"model":    m.modelName,
-		"messages": chatMessages,
+		"model":      m.modelName,
+		"messages":   chatMessages,
+		"max_tokens": m.responseMaxTokens,
 	}
 
 	raw, err := json.Marshal(body)
@@ -137,7 +163,7 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 		return agent.ModelResponse{}, err
 	}
 	if trace := runTraceCollectorFromContext(ctx); trace != nil {
-		trace.RecordModelInput(msg, len(promptText), len(messages) > 1, string(raw))
+		trace.RecordModelInput(msg, len(promptText), len(normalizedMessages) > 1, string(raw))
 	}
 
 	var payload struct {
@@ -300,6 +326,163 @@ func appendToolResultsPrompt(prompt string, results []agent.ToolCallResult) stri
 	return b.String()
 }
 
+func compactMessagesForContext(systemPrompt string, messages []agent.ChatMessage, contextWindow int) []agent.ChatMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+	if contextWindow <= 0 {
+		contextWindow = defaultContextWindow
+	}
+	budget := int(float64(contextWindow) * contextCompactionRatio)
+	if budget <= 0 {
+		return messages
+	}
+	if estimateConversationTokens(systemPrompt, messages) <= budget {
+		return messages
+	}
+
+	keepRecent := compactionKeepRecent
+	if keepRecent >= len(messages) {
+		keepRecent = len(messages) / 2
+	}
+	if keepRecent < 8 {
+		keepRecent = 8
+	}
+	if keepRecent > len(messages) {
+		keepRecent = len(messages)
+	}
+
+	dropCount := len(messages) - keepRecent
+	if dropCount < 1 {
+		dropCount = 1
+	}
+
+	dropped := append([]agent.ChatMessage(nil), messages[:dropCount]...)
+	kept := append([]agent.ChatMessage(nil), messages[dropCount:]...)
+
+	compacted := make([]agent.ChatMessage, 0, len(kept)+1)
+	if summary := buildCompactionSummary(dropped); summary != "" {
+		compacted = append(compacted, agent.ChatMessage{Role: "system", Content: summary})
+	}
+	compacted = append(compacted, kept...)
+
+	for estimateConversationTokens(systemPrompt, compacted) > budget && len(compacted) > 2 {
+		if strings.EqualFold(strings.TrimSpace(compacted[0].Role), "system") {
+			compacted = append(compacted[:1], compacted[2:]...)
+			continue
+		}
+		compacted = compacted[1:]
+	}
+
+	if estimateConversationTokens(systemPrompt, compacted) > budget {
+		compacted = truncateCompactedMessages(systemPrompt, compacted, budget)
+	}
+
+	return compacted
+}
+
+func buildCompactionSummary(messages []agent.ChatMessage) string {
+	if len(messages) == 0 {
+		return ""
+	}
+	maxLines := 24
+	if maxLines > len(messages) {
+		maxLines = len(messages)
+	}
+
+	var b strings.Builder
+	b.WriteString("Conversation compaction summary (older turns):\n")
+	for i := 0; i < maxLines; i++ {
+		role := strings.ToLower(strings.TrimSpace(messages[i].Role))
+		if role == "" {
+			role = "user"
+		}
+		content := compactSummaryText(messages[i].Content, 180)
+		if content == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(role)
+		b.WriteString(": ")
+		b.WriteString(content)
+		b.WriteString("\n")
+	}
+	if len(messages) > maxLines {
+		b.WriteString("- ... ")
+		b.WriteString(strconv.Itoa(len(messages) - maxLines))
+		b.WriteString(" older turn(s) omitted")
+	}
+
+	return strings.TrimSpace(b.String())
+}
+
+func compactSummaryText(value string, maxRunes int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if value == "" {
+		return ""
+	}
+	return truncateRunes(value, maxRunes)
+}
+
+func truncateCompactedMessages(systemPrompt string, messages []agent.ChatMessage, budget int) []agent.ChatMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+	maxPerMessageRunes := 640
+
+	copyMessages := make([]agent.ChatMessage, 0, len(messages))
+	copyMessages = append(copyMessages, messages...)
+
+	for i := 0; i < len(copyMessages)-1 && estimateConversationTokens(systemPrompt, copyMessages) > budget; i++ {
+		copyMessages[i].Content = truncateRunes(copyMessages[i].Content, maxPerMessageRunes)
+	}
+	for estimateConversationTokens(systemPrompt, copyMessages) > budget && len(copyMessages) > 2 {
+		if strings.EqualFold(strings.TrimSpace(copyMessages[0].Role), "system") {
+			copyMessages = append(copyMessages[:1], copyMessages[2:]...)
+			continue
+		}
+		copyMessages = copyMessages[1:]
+	}
+	return copyMessages
+}
+
+func estimateConversationTokens(systemPrompt string, messages []agent.ChatMessage) int {
+	total := estimateTokens(systemPrompt) + 8
+	for _, msg := range messages {
+		total += estimateTokens(msg.Role)
+		total += estimateTokens(msg.Content)
+		total += 4
+	}
+	return total
+}
+
+func estimateTokens(value string) int {
+	runes := len([]rune(strings.TrimSpace(value)))
+	if runes <= 0 {
+		return 0
+	}
+	tokens := runes / 4
+	if runes%4 != 0 {
+		tokens++
+	}
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
+func truncateRunes(value string, maxRunes int) string {
+	trimmed := strings.TrimSpace(value)
+	if maxRunes <= 0 || len([]rune(trimmed)) <= maxRunes {
+		return trimmed
+	}
+	r := []rune(trimmed)
+	if maxRunes <= 3 {
+		return string(r[:maxRunes])
+	}
+	return strings.TrimSpace(string(r[:maxRunes-3])) + "..."
+}
+
 func toolResultsText(results []agent.ToolCallResult) string {
 	var b strings.Builder
 	for i, tr := range results {
@@ -351,7 +534,7 @@ func parseToolDirective(message string, allowedTools []string) (agent.ModelRespo
 }
 
 func parseToolCallsFromResponse(content string, allowedTools []string, trace *runTraceCollector) []agent.ToolCallRequest {
-	parsed := toolparse.ParseStrict(content, allowedTools, 1)
+	parsed := toolparse.ParseStrict(content, allowedTools, maxToolCallsPerReply)
 	if trace != nil {
 		for _, extraction := range parsed.Extractions {
 			trace.RecordToolExtraction(extraction.RawSnippet, extraction.ParsedToolName, extraction.ParsedArguments, extraction.Accepted, extraction.Reason)

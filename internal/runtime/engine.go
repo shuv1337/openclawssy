@@ -204,7 +204,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 
 	modelMessages := []agent.ChatMessage{{Role: "user", Content: message}}
 	if sessionID != "" {
-		history, historyErr := e.loadSessionMessages(sessionID, 50)
+		history, historyErr := e.loadSessionMessages(sessionID, 200)
 		if historyErr != nil {
 			return RunResult{}, historyErr
 		}
@@ -324,6 +324,9 @@ func (e *Engine) loadSessionMessages(sessionID string, limit int) ([]agent.ChatM
 		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		if role == "" {
 			role = "user"
+		}
+		if role == "tool" {
+			continue
 		}
 		content := strings.TrimSpace(msg.Content)
 		if content == "" {

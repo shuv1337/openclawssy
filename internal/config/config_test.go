@@ -55,3 +55,18 @@ func TestConfigRoundtripAndBackup(t *testing.T) {
 		t.Fatalf("expected readable backup config, got: %v", err)
 	}
 }
+
+func TestDefaultConfigSetsMaxTokens(t *testing.T) {
+	cfg := Default()
+	if cfg.Model.MaxTokens != 20000 {
+		t.Fatalf("expected default model.max_tokens=20000, got %d", cfg.Model.MaxTokens)
+	}
+}
+
+func TestValidateRejectsOutOfRangeMaxTokens(t *testing.T) {
+	cfg := Default()
+	cfg.Model.MaxTokens = 25000
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for max_tokens > 20000")
+	}
+}

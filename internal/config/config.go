@@ -125,6 +125,7 @@ func Default() Config {
 			Provider:    "zai",
 			Name:        "GLM-4.7",
 			Temperature: 0.2,
+			MaxTokens:   20000,
 		},
 		Providers: ProvidersConfig{
 			OpenAI: ProviderEndpointConfig{
@@ -192,6 +193,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Model.Name == "" {
 		c.Model.Name = d.Model.Name
+	}
+	if c.Model.MaxTokens == 0 {
+		c.Model.MaxTokens = d.Model.MaxTokens
 	}
 	if c.Chat.DefaultAgentID == "" {
 		c.Chat.DefaultAgentID = d.Chat.DefaultAgentID
@@ -281,6 +285,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Model.Name) == "" {
 		return errors.New("model.name is required")
+	}
+	if c.Model.MaxTokens < 1 || c.Model.MaxTokens > 20000 {
+		return errors.New("model.max_tokens must be between 1 and 20000")
 	}
 	if c.Chat.RateLimitPerMin < 1 {
 		return errors.New("chat.rate_limit_per_min must be >= 1")

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -197,5 +198,50 @@ func TestRunnerAppliesPerToolTimeout(t *testing.T) {
 	}
 	if time.Since(start) > 500*time.Millisecond {
 		t.Fatalf("expected run to finish quickly due to timeout")
+	}
+}
+
+func TestRunnerNormalizesDuplicateToolCallIDs(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{
+			{ID: "tool-json-1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)},
+			{ID: "tool-json-1", Name: "fs.read", Arguments: []byte(`{"path":"README.md"}`)},
+		}},
+		{FinalText: "done"},
+	}}
+
+	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 4}
+	out, err := runner.Run(context.Background(), RunInput{Message: "inspect files"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(out.ToolCalls))
+	}
+
+	firstID := out.ToolCalls[0].Request.ID
+	secondID := out.ToolCalls[1].Request.ID
+	if firstID != "tool-json-1" {
+		t.Fatalf("expected first ID to be preserved, got %q", firstID)
+	}
+	if secondID == firstID {
+		t.Fatalf("expected second call ID to be rewritten, got duplicate %q", secondID)
+	}
+	if !strings.HasPrefix(secondID, "tool-json-1-") {
+		t.Fatalf("expected rewritten ID to keep base prefix, got %q", secondID)
+	}
+
+	if out.ToolCalls[0].Result.ID != firstID || out.ToolCalls[1].Result.ID != secondID {
+		t.Fatalf("expected results to use normalized IDs, got %+v", out.ToolCalls)
+	}
+
+	if len(model.reqs) != 2 || len(model.reqs[1].ToolResults) != 2 {
+		t.Fatalf("expected two tool results in follow-up model request, got %#v", model.reqs)
+	}
+	if model.reqs[1].ToolResults[0].ID != firstID || model.reqs[1].ToolResults[1].ID != secondID {
+		t.Fatalf("unexpected tool result IDs passed to model: %+v", model.reqs[1].ToolResults)
 	}
 }

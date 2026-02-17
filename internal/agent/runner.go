@@ -58,6 +58,8 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 	toolResults := make([]ToolCallResult, 0)
 	toolIterations := 0
+	toolCallOrdinal := 0
+	usedToolCallIDs := make(map[string]struct{})
 	lastToolCallKey := ""
 	lastToolCallHadError := false
 	repeatedToolBlocks := 0
@@ -101,7 +103,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			return out, ErrToolIterationCapExceeded
 		}
 
-		for _, call := range resp.ToolCalls {
+		for _, incoming := range resp.ToolCalls {
+			toolCallOrdinal++
+			call := incoming
+			call.ID = uniqueToolCallID(call.ID, toolCallOrdinal, usedToolCallIDs)
+
 			callKey := call.Name + "|" + string(call.Arguments)
 			if callKey != "|" && callKey == lastToolCallKey && !lastToolCallHadError {
 				repeatedToolBlocks++
@@ -181,4 +187,19 @@ func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
 	}
 	b.WriteString(fmt.Sprintf("\n(Iteration cap: %d)", toolCap))
 	return b.String()
+}
+
+func uniqueToolCallID(rawID string, ordinal int, used map[string]struct{}) string {
+	base := strings.TrimSpace(rawID)
+	if base == "" {
+		base = fmt.Sprintf("tool-call-%d", ordinal)
+	}
+	candidate := base
+	for suffix := 2; ; suffix++ {
+		if _, exists := used[candidate]; !exists {
+			used[candidate] = struct{}{}
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, suffix)
+	}
 }
