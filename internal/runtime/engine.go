@@ -232,6 +232,14 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	_ = aud.LogEvent(runCtx, audit.EventRunStart, startEvent)
 
 	allowedTools := e.allowedTools(cfg)
+	isSchedulerRun := strings.HasPrefix(source, "scheduler")
+	runMessage := message
+	maxToolIterations := agent.DefaultToolIterationCap
+	if isSchedulerRun && !strings.HasPrefix(strings.TrimSpace(message), "/tool ") {
+		allowedTools = []string{}
+		maxToolIterations = 1
+		runMessage = "Scheduled proactive delivery. Respond with exactly one concise assistant message that delivers this content to the user. Do not call tools. Do not ask follow-up questions. Content: " + message
+	}
 	effectiveCaps := e.effectiveCapabilities(agentID, allowedTools)
 	traceCollector := newRunTraceCollector(runID, sessionID, source, message)
 	runCtx = withRunTraceCollector(runCtx, traceCollector)
@@ -286,7 +294,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		MaxToolIterations: agent.DefaultToolIterationCap,
 	}
 
-	modelMessages := []agent.ChatMessage{{Role: "user", Content: message}}
+	modelMessages := []agent.ChatMessage{{Role: "user", Content: runMessage}}
 	var conversationStore *chatstore.Store
 	if sessionID != "" {
 		conversationStore, err = chatstore.NewStore(e.agentsDir)
@@ -308,8 +316,8 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 			modelMessages = history
 		}
 	}
-	if len(modelMessages) == 0 || !hasTrailingUserMessage(modelMessages, message) {
-		modelMessages = append(modelMessages, agent.ChatMessage{Role: "user", Content: message})
+	if len(modelMessages) == 0 || !hasTrailingUserMessage(modelMessages, runMessage) {
+		modelMessages = append(modelMessages, agent.ChatMessage{Role: "user", Content: runMessage})
 	}
 
 	appendToolsAfterRun := true
@@ -325,11 +333,11 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	out, runErr := runner.Run(runCtx, agent.RunInput{
 		AgentID:           agentID,
 		RunID:             runID,
-		Message:           message,
+		Message:           runMessage,
 		Messages:          modelMessages,
 		ArtifactDocs:      docs,
 		PerFileByteLimit:  16 * 1024,
-		MaxToolIterations: agent.DefaultToolIterationCap,
+		MaxToolIterations: maxToolIterations,
 		ToolTimeoutMS:     int(agent.DefaultToolTimeout / time.Millisecond),
 		AllowedTools:      allowedTools,
 		OnToolCall:        onToolCall,
