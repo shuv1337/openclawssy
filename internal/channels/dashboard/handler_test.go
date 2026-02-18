@@ -622,6 +622,10 @@ func TestSchedulerAdminEndpointsCRUDAndPauseResume(t *testing.T) {
 	if !ok || len(jobs) != 1 {
 		t.Fatalf("expected one scheduler job, got %#v", listPayload["jobs"])
 	}
+	stored := jobStore.List()[0]
+	if stored.Channel != "dashboard" || stored.UserID != "dashboard_user" || stored.RoomID != "dashboard" {
+		t.Fatalf("expected dashboard default delivery metadata, got %+v", stored)
+	}
 
 	pauseReq := httptest.NewRequest(http.MethodPost, "/api/admin/scheduler/control", bytes.NewBufferString(`{"action":"pause"}`))
 	pauseResp := httptest.NewRecorder()

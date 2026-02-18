@@ -260,6 +260,17 @@ func TestParseToolCallsAcceptsMetricsGetWhenAllowed(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsCanonicalizesSkillGetAlias(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"skill.get\",\"arguments\":{\"name\":\"perplexity\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"skill.read"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "skill.read" {
+		t.Fatalf("expected canonical skill.read, got %q", calls[0].Name)
+	}
+}
+
 func TestParseToolCallsCanonicalizesNetFetchAlias(t *testing.T) {
 	text := "```json\n{\"tool_name\":\"net.fetch\",\"arguments\":{\"url\":\"https://example.com\"}}\n```"
 	calls, _ := ParseToolCalls(text, []string{"http.request"})

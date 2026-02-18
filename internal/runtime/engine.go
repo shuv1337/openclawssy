@@ -124,7 +124,7 @@ func (e *Engine) Init(agentID string, force bool) error {
 	files := map[string]string{
 		"SOUL.md":     "# SOUL\n\nMission and behavior contract for this agent.\n",
 		"RULES.md":    "# RULES\n\n- Follow workspace-only write policy.\n- Respect tool capabilities.\n",
-		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now.\n",
+		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now.\n",
 		"SPECPLAN.md": "# SPECPLAN\n\nDescribe specs and acceptance requirements before coding.\n",
 		"DEVPLAN.md":  "# DEVPLAN\n\n- [ ] Implement task\n- [ ] Add tests\n- [ ] Update handoff\n",
 		"HANDOFF.md":  "# HANDOFF\n\nStatus: initialized\n\nNext:\n- Define first run objective.\n",
@@ -922,6 +922,11 @@ func runtimeContextDoc(workspaceDir string) string {
 		"- Run tools (run.list/run.get/run.cancel) retrieve run traces and summaries from the run store and can cancel tracked in-flight runs.\n- Policy tools (policy.list/policy.grant/policy.revoke) manage per-agent capability grants and require policy.admin capability.\n- Metrics tool (metrics.get) aggregates run and per-tool duration/error metrics from run traces.",
 		1,
 	)
+	doc = strings.Replace(doc,
+		"- Secret tools (secrets.get/secrets.set/secrets.list) use encrypted secret storage; secret values are never written to audit fields in plaintext.",
+		"- Secret tools (secrets.get/secrets.set/secrets.list) use encrypted secret storage; secret values are never written to audit fields in plaintext.\n- Skill tools (skill.list/skill.read) discover workspace skills under skills/ and report required secret keys with missing-secret diagnostics.",
+		1,
+	)
 	return doc
 }
 
@@ -931,6 +936,16 @@ func toolCallingBestPracticesDoc() string {
 
 func toolCallingBestPracticesDocWithAgentTools() string {
 	doc := toolCallingBestPracticesDoc()
+	doc = strings.Replace(doc,
+		"secrets.get, secrets.set, secrets.list, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, run.list, run.get, http.request, time.now, shell.exec.",
+		"secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, run.list, run.get, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
+		"- Use secrets.set for secret writes and secrets.get for reads; never echo secret values in plain text summaries.",
+		"- Use secrets.set for secret writes and secrets.get for reads; never echo secret values in plain text summaries.\n- Use skill.list and skill.read to discover workspace skills under skills/ and validate required secret keys before execution.",
+		1,
+	)
 	doc = strings.Replace(doc,
 		"session.list, session.close, run.list, run.get, http.request, time.now, shell.exec.",
 		"session.list, session.close, agent.list, agent.create, agent.switch, run.list, run.get, run.cancel, http.request, time.now, shell.exec.",
@@ -1084,6 +1099,31 @@ func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
 				args["pattern"] = value
 			}
 		}
+	case "skill.read":
+		if getStringArg(args, "name") == "" {
+			for _, key := range []string{"skill", "skill_name", "skillName", "id"} {
+				if value := getStringArg(args, key); value != "" {
+					args["name"] = strings.TrimSpace(value)
+					break
+				}
+			}
+		}
+		if getStringArg(args, "path") == "" {
+			for _, key := range []string{"file", "filename", "skill_path", "skillPath"} {
+				if value := getStringArg(args, key); value != "" {
+					args["path"] = sanitizePathArg(value)
+					break
+				}
+			}
+		}
+		if getStringArg(args, "root") == "" {
+			for _, key := range []string{"dir", "directory"} {
+				if value := getStringArg(args, key); value != "" {
+					args["root"] = sanitizePathArg(value)
+					break
+				}
+			}
+		}
 	case "http.request":
 		if getStringArg(args, "url") == "" {
 			for _, key := range []string{"uri", "endpoint", "link"} {
@@ -1217,7 +1257,7 @@ func sanitizePathArg(path string) string {
 }
 
 func (e *Engine) allowedTools(cfg config.Config) []string {
-	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.append", "fs.delete", "fs.move", "fs.edit", "code.search", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "agent.list", "agent.create", "agent.switch", "policy.list", "policy.grant", "policy.revoke", "run.list", "run.get", "run.cancel", "metrics.get", "time.now"}
+	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.append", "fs.delete", "fs.move", "fs.edit", "code.search", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "skill.list", "skill.read", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "agent.list", "agent.create", "agent.switch", "policy.list", "policy.grant", "policy.revoke", "run.list", "run.get", "run.cancel", "metrics.get", "time.now"}
 	if cfg.Network.Enabled {
 		toolsList = append(toolsList, "http.request")
 	}

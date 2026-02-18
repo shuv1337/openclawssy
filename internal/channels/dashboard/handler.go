@@ -94,11 +94,15 @@ func (h *Handler) handleSchedulerJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ID       string `json:"id"`
-		AgentID  string `json:"agent_id"`
-		Schedule string `json:"schedule"`
-		Message  string `json:"message"`
-		Enabled  *bool  `json:"enabled"`
+		ID        string `json:"id"`
+		AgentID   string `json:"agent_id"`
+		Schedule  string `json:"schedule"`
+		Message   string `json:"message"`
+		Channel   string `json:"channel"`
+		UserID    string `json:"user_id"`
+		RoomID    string `json:"room_id"`
+		SessionID string `json:"session_id"`
+		Enabled   *bool  `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -118,11 +122,24 @@ func (h *Handler) handleSchedulerJobs(w http.ResponseWriter, r *http.Request) {
 	if agentID == "" {
 		agentID = "default"
 	}
+	channel := strings.TrimSpace(req.Channel)
+	if channel == "" {
+		channel = "dashboard"
+	}
+	userID := strings.TrimSpace(req.UserID)
+	if userID == "" {
+		userID = "dashboard_user"
+	}
+	roomID := strings.TrimSpace(req.RoomID)
+	if roomID == "" {
+		roomID = "dashboard"
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
-	if err := store.Add(scheduler.Job{ID: id, AgentID: agentID, Schedule: req.Schedule, Message: req.Message, Enabled: enabled}); err != nil {
+	if err := store.Add(scheduler.Job{ID: id, AgentID: agentID, Schedule: req.Schedule, Message: req.Message, Channel: channel, UserID: userID, RoomID: roomID, SessionID: sessionID, Enabled: enabled}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

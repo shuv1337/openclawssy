@@ -105,8 +105,30 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	schedulerExec := scheduler.NewExecutorWithPolicy(jobsStore, time.Second, runtimeCfg.Scheduler.MaxConcurrentJobs, runtimeCfg.Scheduler.CatchUp, func(agentID string, message string) {
-		_, _ = httpchannel.QueueRun(context.Background(), runStore, exec, agentID, message, "scheduler", "", "")
+	var schedulerChatStore *chatstore.Store
+	if runtimeCfg.Chat.Enabled || runtimeCfg.Discord.Enabled {
+		schedulerChatStore, err = chatstore.NewStore(filepath.Join(".openclawssy", "agents"))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "failed to initialize scheduler chat delivery:", err)
+			return 1
+		}
+	}
+	schedulerExec := scheduler.NewExecutorWithJobPolicy(jobsStore, time.Second, runtimeCfg.Scheduler.MaxConcurrentJobs, runtimeCfg.Scheduler.CatchUp, func(job scheduler.Job) {
+		agentID := strings.TrimSpace(job.AgentID)
+		if agentID == "" {
+			agentID = "default"
+		}
+		sessionID, err := resolveScheduledJobSession(schedulerChatStore, job)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "scheduler delivery warning:", err)
+		}
+		source := "scheduler"
+		if channel := strings.TrimSpace(job.Channel); channel != "" {
+			source = "scheduler/" + channel
+		}
+		if _, err := httpchannel.QueueRun(context.Background(), runStore, exec, agentID, job.Message, source, sessionID, ""); err != nil {
+			fmt.Fprintln(os.Stderr, "scheduler queue warning:", err)
+		}
 	})
 	schedulerExec.Start()
 	defer schedulerExec.Stop()
@@ -167,6 +189,54 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 	}
 
 	return 0
+}
+
+func resolveScheduledJobSession(store *chatstore.Store, job scheduler.Job) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	agentID := strings.TrimSpace(job.AgentID)
+	if agentID == "" {
+		agentID = "default"
+	}
+	channel := strings.TrimSpace(job.Channel)
+	if channel == "" {
+		channel = "dashboard"
+	}
+	userID := strings.TrimSpace(job.UserID)
+	if userID == "" {
+		userID = "dashboard_user"
+	}
+	roomID := strings.TrimSpace(job.RoomID)
+	if roomID == "" {
+		roomID = "dashboard"
+	}
+
+	if sessionID := strings.TrimSpace(job.SessionID); sessionID != "" {
+		session, err := store.GetSession(sessionID)
+		if err == nil {
+			if !session.IsClosed() && session.AgentID == agentID && session.Channel == channel && session.UserID == userID && session.RoomID == roomID {
+				return sessionID, nil
+			}
+		}
+	}
+
+	sessionID, err := store.GetActiveSessionPointer(agentID, channel, userID, roomID)
+	if err == nil {
+		return sessionID, nil
+	}
+	if !errors.Is(err, chatstore.ErrSessionNotFound) {
+		return "", err
+	}
+
+	session, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: agentID, Channel: channel, UserID: userID, RoomID: roomID})
+	if err != nil {
+		return "", err
+	}
+	if err := store.SetActiveSessionPointer(agentID, channel, userID, roomID, session.SessionID); err != nil {
+		return "", err
+	}
+	return session.SessionID, nil
 }
 
 type initService struct{ engine *runtime.Engine }
@@ -310,11 +380,19 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 		fs.SetOutput(os.Stderr)
 		id := ""
 		agentID := "default"
+		channel := "dashboard"
+		userID := "dashboard_user"
+		roomID := "dashboard"
+		sessionID := ""
 		schedule := ""
 		message := ""
 		enabled := true
 		fs.StringVar(&id, "id", "", "job id")
 		fs.StringVar(&agentID, "agent", "default", "agent id")
+		fs.StringVar(&channel, "channel", "dashboard", "delivery channel")
+		fs.StringVar(&userID, "user", "dashboard_user", "delivery user id")
+		fs.StringVar(&roomID, "room", "dashboard", "delivery room id")
+		fs.StringVar(&sessionID, "session", "", "delivery session id (optional)")
 		fs.StringVar(&schedule, "schedule", "", "schedule (@every 1m or RFC3339)")
 		fs.StringVar(&message, "message", "", "message")
 		fs.BoolVar(&enabled, "enabled", true, "enable job")
@@ -327,7 +405,7 @@ func (cronService) Cron(_ context.Context, input cli.CronInput) (string, error) 
 		if id == "" {
 			id = fmt.Sprintf("job_%d", time.Now().UTC().UnixNano())
 		}
-		if err := store.Add(scheduler.Job{ID: id, Schedule: schedule, AgentID: agentID, Message: message, Enabled: enabled}); err != nil {
+		if err := store.Add(scheduler.Job{ID: id, Schedule: schedule, AgentID: agentID, Message: message, Channel: channel, UserID: userID, RoomID: roomID, SessionID: sessionID, Enabled: enabled}); err != nil {
 			return "", err
 		}
 		return "added job " + id, nil

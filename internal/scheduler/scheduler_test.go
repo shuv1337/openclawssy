@@ -124,6 +124,39 @@ func TestExecutorTriggerExecution(t *testing.T) {
 	}
 }
 
+func TestExecutorRunJobCallbackReceivesDeliveryMetadata(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	store, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	job := Job{
+		ID:        "job-delivery",
+		Schedule:  "@every 1ms",
+		AgentID:   "agent-gamma",
+		Message:   "run now",
+		Channel:   "dashboard",
+		UserID:    "dashboard_user",
+		RoomID:    "dashboard",
+		SessionID: "chat_123",
+		Enabled:   true,
+	}
+	if err := store.Add(job); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+
+	var got Job
+	exec := NewExecutorWithJobPolicy(store, time.Millisecond, 1, true, func(input Job) {
+		got = input
+	})
+	exec.check(time.Now().UTC())
+
+	if got.ID != job.ID || got.Channel != job.Channel || got.UserID != job.UserID || got.RoomID != job.RoomID || got.SessionID != job.SessionID {
+		t.Fatalf("expected delivery metadata to propagate, got %+v", got)
+	}
+}
+
 func TestExecutorCheckRunsDueJobsConcurrently(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "jobs.json")
 	store, err := NewStore(storePath)

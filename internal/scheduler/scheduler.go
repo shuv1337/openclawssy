@@ -13,15 +13,20 @@ import (
 )
 
 type Job struct {
-	ID       string `json:"id"`
-	Schedule string `json:"schedule"`
-	AgentID  string `json:"agentID"`
-	Message  string `json:"message"`
-	Enabled  bool   `json:"enabled"`
-	LastRun  string `json:"lastRun"`
+	ID        string `json:"id"`
+	Schedule  string `json:"schedule"`
+	AgentID   string `json:"agentID"`
+	Message   string `json:"message"`
+	Channel   string `json:"channel,omitempty"`
+	UserID    string `json:"user_id,omitempty"`
+	RoomID    string `json:"room_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Enabled   bool   `json:"enabled"`
+	LastRun   string `json:"lastRun"`
 }
 
 type RunFunc func(agentID string, message string)
+type RunJobFunc func(job Job)
 
 var ErrJobNotFound = errors.New("scheduler: job not found")
 
@@ -176,7 +181,7 @@ type Executor struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 
-	runFunc       RunFunc
+	runJobFunc    RunJobFunc
 	nowFn         func() time.Time
 	maxConcurrent int
 	catchUp       bool
@@ -192,6 +197,15 @@ func NewExecutorWithConcurrency(store *Store, tickInterval time.Duration, maxCon
 }
 
 func NewExecutorWithPolicy(store *Store, tickInterval time.Duration, maxConcurrent int, catchUp bool, runFn RunFunc) *Executor {
+	if runFn == nil {
+		runFn = func(string, string) {}
+	}
+	return NewExecutorWithJobPolicy(store, tickInterval, maxConcurrent, catchUp, func(job Job) {
+		runFn(job.AgentID, job.Message)
+	})
+}
+
+func NewExecutorWithJobPolicy(store *Store, tickInterval time.Duration, maxConcurrent int, catchUp bool, runFn RunJobFunc) *Executor {
 	if tickInterval <= 0 {
 		tickInterval = time.Second
 	}
@@ -199,11 +213,11 @@ func NewExecutorWithPolicy(store *Store, tickInterval time.Duration, maxConcurre
 		maxConcurrent = 1
 	}
 	if runFn == nil {
-		runFn = func(string, string) {}
+		runFn = func(Job) {}
 	}
 	return &Executor{
 		store:         store,
-		runFunc:       runFn,
+		runJobFunc:    runFn,
 		nowFn:         time.Now,
 		maxConcurrent: maxConcurrent,
 		catchUp:       catchUp,
@@ -278,7 +292,7 @@ func (e *Executor) check(now time.Time) {
 		go func() {
 			defer wg.Done()
 			for item := range jobsCh {
-				e.runFunc(item.job.AgentID, item.job.Message)
+				e.runJobFunc(item.job)
 				_ = e.store.updateAfterRun(item.job, now, item.disableAfterRun)
 			}
 		}()

@@ -80,6 +80,9 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := registerSecretsTools(reg, opts.ConfigPath); err != nil {
 		return err
 	}
+	if err := registerSkillTools(reg, opts.ConfigPath); err != nil {
+		return err
+	}
 	if err := registerSchedulerTools(reg, opts.SchedulerPath); err != nil {
 		return err
 	}

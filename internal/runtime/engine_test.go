@@ -168,6 +168,9 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(doc.Content, "secrets.get/secrets.set/secrets.list") {
 			t.Fatalf("runtime context missing secrets tools guidance: %q", doc.Content)
 		}
+		if !strings.Contains(doc.Content, "skill.list/skill.read") {
+			t.Fatalf("runtime context missing skill tools guidance: %q", doc.Content)
+		}
 		if !strings.Contains(doc.Content, "scheduler.list/add/remove/pause/resume") {
 			t.Fatalf("runtime context missing scheduler tools guidance: %q", doc.Content)
 		}
@@ -221,6 +224,9 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(doc.Content, "secrets.get") || !strings.Contains(doc.Content, "secrets.set") {
 			t.Fatalf("tool best practices missing secrets tool guidance: %q", doc.Content)
 		}
+		if !strings.Contains(doc.Content, "skill.list") || !strings.Contains(doc.Content, "skill.read") {
+			t.Fatalf("tool best practices missing skill tool guidance: %q", doc.Content)
+		}
 		if !strings.Contains(doc.Content, "scheduler.add") || !strings.Contains(doc.Content, "scheduler.resume") {
 			t.Fatalf("tool best practices missing scheduler tool guidance: %q", doc.Content)
 		}
@@ -273,6 +279,16 @@ print("hello")
 	content, _ := args["content"].(string)
 	if !strings.Contains(content, "#!/usr/bin/env python3") {
 		t.Fatalf("expected normalized content to include script, got %#v", args["content"])
+	}
+}
+
+func TestNormalizeToolArgsSkillReadAliases(t *testing.T) {
+	args := normalizeToolArgs("skill.read", map[string]any{"skill": "perplexity", "dir": "skills"})
+	if args["name"] != "perplexity" {
+		t.Fatalf("expected skill alias to normalize to name, got %#v", args["name"])
+	}
+	if args["root"] != "skills" {
+		t.Fatalf("expected dir alias to normalize to root, got %#v", args["root"])
 	}
 }
 
@@ -338,6 +354,8 @@ func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 	hasPolicyGrant := false
 	hasPolicyRevoke := false
 	hasMetricsGet := false
+	hasSkillList := false
+	hasSkillRead := false
 	for _, name := range tools {
 		if name == "session.list" {
 			hasSessionList = true
@@ -363,6 +381,12 @@ func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 		if name == "metrics.get" {
 			hasMetricsGet = true
 		}
+		if name == "skill.list" {
+			hasSkillList = true
+		}
+		if name == "skill.read" {
+			hasSkillRead = true
+		}
 		if name == "http.request" {
 			t.Fatal("did not expect http.request when network is disabled")
 		}
@@ -375,6 +399,9 @@ func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 	}
 	if !hasPolicyGrant || !hasPolicyRevoke || !hasMetricsGet {
 		t.Fatalf("expected policy/metrics tools in allowed list, got %#v", tools)
+	}
+	if !hasSkillList || !hasSkillRead {
+		t.Fatalf("expected skill tools in allowed list, got %#v", tools)
 	}
 	foundAppend := false
 	for _, name := range tools {

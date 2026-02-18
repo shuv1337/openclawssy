@@ -7,6 +7,7 @@ const CHAT_DEFAULTS = {
 const RUN_POLL_MS = 1500;
 const SESSION_POLL_MS = 2000;
 const SESSION_MESSAGES_LIMIT = 200;
+const SESSION_LOOKUP_LIMIT = 1;
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "canceled"]);
 
 const chatViewState = {
@@ -37,8 +38,11 @@ const chatViewState = {
   pollToken: 0,
   runPollTimer: 0,
   sessionPollTimer: 0,
+  idleSessionTimer: 0,
   runPollInFlight: false,
   sessionPollInFlight: false,
+  idleSessionInFlight: false,
+  sessionBootstrapInFlight: false,
 
   transcriptPinned: true,
   transcriptScrollTop: 0,
@@ -156,6 +160,58 @@ function updateLastError(store, errorLike) {
 
 function pollSessionMessagesPath(sessionID) {
   return `/api/admin/chat/sessions/${encodeURIComponent(sessionID)}/messages?limit=${encodeURIComponent(String(SESSION_MESSAGES_LIMIT))}`;
+}
+
+function listSessionsPath() {
+  const params = new URLSearchParams({
+    agent_id: CHAT_DEFAULTS.agentID,
+    user_id: CHAT_DEFAULTS.userID,
+    room_id: CHAT_DEFAULTS.roomID,
+    channel: "dashboard",
+    limit: String(SESSION_LOOKUP_LIMIT),
+    offset: "0",
+  });
+  return `/api/admin/chat/sessions?${params.toString()}`;
+}
+
+function normalizeSessionTranscript(messages) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+  return messages
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const role = safeText(item.role).toLowerCase();
+      if (role !== "user" && role !== "assistant") {
+        return null;
+      }
+      const content = String(item.content || "");
+      if (!safeText(content)) {
+        return null;
+      }
+      return {
+        role,
+        content,
+        pending: false,
+        ts: String(item.ts || new Date().toISOString()),
+      };
+    })
+    .filter((item) => item !== null);
+}
+
+function syncTranscriptFromSession(messages) {
+  const sessionTranscript = normalizeSessionTranscript(messages);
+  if (!sessionTranscript.length) {
+    return;
+  }
+
+  const pending = chatViewState.transcript.find((item) => item?.role === "assistant" && item?.pending) || null;
+  chatViewState.transcript = sessionTranscript;
+  if (pending && (chatViewState.sendPending || chatViewState.polling)) {
+    chatViewState.transcript.push(pending);
+  }
 }
 
 function toToolEvent(message, index) {
@@ -319,6 +375,13 @@ function clearTimers() {
   }
 }
 
+function clearIdleSessionTimer() {
+  if (chatViewState.idleSessionTimer) {
+    window.clearTimeout(chatViewState.idleSessionTimer);
+    chatViewState.idleSessionTimer = 0;
+  }
+}
+
 function stopPolling() {
   chatViewState.polling = false;
   chatViewState.pollToken += 1;
@@ -407,6 +470,78 @@ function startPolling({ runID, sessionID }) {
   }
 }
 
+async function ensureCurrentSessionID() {
+  if (safeText(chatViewState.currentSessionID)) {
+    return chatViewState.currentSessionID;
+  }
+  if (chatViewState.sessionBootstrapInFlight) {
+    return "";
+  }
+
+  chatViewState.sessionBootstrapInFlight = true;
+  try {
+    const payload = await chatViewState.apiClient.get(listSessionsPath());
+    const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+    const first = sessions[0] || null;
+    const sessionID = safeText(first?.session_id);
+    if (sessionID) {
+      chatViewState.currentSessionID = sessionID;
+    }
+    return sessionID;
+  } catch (_err) {
+    return "";
+  } finally {
+    chatViewState.sessionBootstrapInFlight = false;
+  }
+}
+
+function scheduleIdleSessionPoll(immediate = false) {
+  if (chatViewState.idleSessionTimer) {
+    window.clearTimeout(chatViewState.idleSessionTimer);
+  }
+  chatViewState.idleSessionTimer = window.setTimeout(() => {
+    void pollIdleSessionOnce();
+  }, immediate ? 0 : SESSION_POLL_MS);
+}
+
+function startIdleSessionWatch() {
+  if (chatViewState.idleSessionTimer) {
+    return;
+  }
+  scheduleIdleSessionPoll(true);
+}
+
+async function pollIdleSessionOnce() {
+  if (!isChatRouteActive()) {
+    clearIdleSessionTimer();
+    return;
+  }
+  if (chatViewState.polling) {
+    scheduleIdleSessionPoll(false);
+    return;
+  }
+  if (chatViewState.idleSessionInFlight) {
+    scheduleIdleSessionPoll(false);
+    return;
+  }
+
+  chatViewState.idleSessionInFlight = true;
+  try {
+    let sessionID = safeText(chatViewState.currentSessionID);
+    if (!sessionID) {
+      sessionID = await ensureCurrentSessionID();
+    }
+    if (sessionID) {
+      const payload = await chatViewState.apiClient.get(pollSessionMessagesPath(sessionID));
+      applySessionMessagesPayload(payload);
+      rerenderIfActive();
+    }
+  } finally {
+    chatViewState.idleSessionInFlight = false;
+    scheduleIdleSessionPoll(false);
+  }
+}
+
 async function pollRunOnce(token) {
   if (!isChatRouteActive()) {
     stopPolling();
@@ -492,6 +627,36 @@ async function pollRunOnce(token) {
   scheduleRunPoll(token, false);
 }
 
+function applySessionMessagesPayload(payload) {
+  const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+  syncTranscriptFromSession(messages);
+
+  const toolEvents = normalizeToolEvents(messages);
+  const latest = toolEvents.length ? toolEvents[toolEvents.length - 1] : null;
+  chatViewState.latestToolActivity = latest;
+  chatViewState.loopRisk = buildLoopRisk(toolEvents);
+
+  const latestFailed = toolEvents
+    .slice()
+    .reverse()
+    .find((event) => event.status === "failed" && safeText(event.errorText));
+  if (latestFailed) {
+    chatViewState.lastErrorSummary = compactText(latestFailed.errorText, 280);
+    updateLastError(
+      chatViewState.store,
+      toErrorPayload(
+        "chat.tool_activity",
+        { message: latestFailed.errorText },
+        {
+          run_id: latestFailed.runID || chatViewState.currentRunID,
+          session_id: safeText(payload?.session_id) || chatViewState.currentSessionID,
+          tool: latestFailed.tool,
+        }
+      )
+    );
+  }
+}
+
 async function pollSessionMessagesOnce(token) {
   if (!isChatRouteActive()) {
     stopPolling();
@@ -509,35 +674,11 @@ async function pollSessionMessagesOnce(token) {
     return;
   }
 
-  chatViewState.sessionPollInFlight = true;
-  try {
-    const payload = await chatViewState.apiClient.get(pollSessionMessagesPath(sessionID));
-    const messages = Array.isArray(payload?.messages) ? payload.messages : [];
-    const toolEvents = normalizeToolEvents(messages);
-    const latest = toolEvents.length ? toolEvents[toolEvents.length - 1] : null;
-    chatViewState.latestToolActivity = latest;
-    chatViewState.loopRisk = buildLoopRisk(toolEvents);
-
-    const latestFailed = toolEvents
-      .slice()
-      .reverse()
-      .find((event) => event.status === "failed" && safeText(event.errorText));
-    if (latestFailed) {
-      chatViewState.lastErrorSummary = compactText(latestFailed.errorText, 280);
-      updateLastError(
-        chatViewState.store,
-        toErrorPayload(
-          "chat.tool_activity",
-          { message: latestFailed.errorText },
-          {
-            run_id: latestFailed.runID || chatViewState.currentRunID,
-            session_id: sessionID,
-            tool: latestFailed.tool,
-          }
-        )
-      );
-    }
-  } catch (err) {
+	chatViewState.sessionPollInFlight = true;
+	try {
+		const payload = await chatViewState.apiClient.get(pollSessionMessagesPath(sessionID));
+		applySessionMessagesPayload(payload);
+	} catch (err) {
     chatViewState.lastErrorSummary = compactText(err?.message || String(err), 280);
     updateLastError(
       chatViewState.store,
@@ -806,6 +947,7 @@ export const chatPage = {
     chatViewState.store = store;
 
     renderChatPage();
+    startIdleSessionWatch();
 
     if (
       chatViewState.currentRunID &&

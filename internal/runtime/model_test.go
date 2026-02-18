@@ -1321,6 +1321,12 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 	if !isToolAllowed("session.close", []string{"session.close"}) {
 		t.Fatal("expected session.close to be allowed when explicitly granted")
 	}
+	if !isToolAllowed("skill.list", []string{"skill.list"}) {
+		t.Fatal("expected skill.list to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("skill.read", []string{"skill.get"}) {
+		t.Fatal("expected skill.get alias to allow canonical skill.read")
+	}
 	if !isToolAllowed("agent.list", []string{"agent.list"}) {
 		t.Fatal("expected agent.list to be allowed when explicitly granted")
 	}
@@ -1345,6 +1351,9 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 
 	if canonical, ok := canonicalToolName("terminal.run"); !ok || canonical != "shell.exec" {
 		t.Fatalf("unexpected canonical alias mapping: ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("skill.get"); !ok || canonical != "skill.read" {
+		t.Fatalf("expected skill.get alias to canonicalize to skill.read, got ok=%v canonical=%q", ok, canonical)
 	}
 	if canonical, ok := canonicalToolName("fs.delete"); !ok || canonical != "fs.delete" {
 		t.Fatalf("expected fs.delete canonical mapping, got ok=%v canonical=%q", ok, canonical)

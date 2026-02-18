@@ -1138,6 +1138,89 @@ func setupSecretsConfigFixture(t *testing.T) (string, string) {
 	return ws, cfgPath
 }
 
+func TestSkillToolsDiscoverAndReadWorkspaceSkillWithSecrets(t *testing.T) {
+	ws, cfgPath := setupSecretsConfigFixture(t)
+	skillsDir := filepath.Join(ws, "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir skills dir: %v", err)
+	}
+	skillBody := "# Perplexity Skill\n\nUse `PERPLEXITY_API_KEY` with http.request to query Perplexity."
+	if err := os.WriteFile(filepath.Join(skillsDir, "perplexity.md"), []byte(skillBody), 0o600); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	if _, err := reg.Execute(context.Background(), "agent", "secrets.set", ws, map[string]any{"key": "PERPLEXITY_API_KEY", "value": "secret-value"}); err != nil {
+		t.Fatalf("secrets.set: %v", err)
+	}
+
+	listRes, err := reg.Execute(context.Background(), "agent", "skill.list", ws, map[string]any{})
+	if err != nil {
+		t.Fatalf("skill.list: %v", err)
+	}
+	skills, ok := listRes["skills"].([]map[string]any)
+	if !ok {
+		raw, okAny := listRes["skills"].([]any)
+		if !okAny {
+			t.Fatalf("expected skills array, got %#v", listRes["skills"])
+		}
+		skills = make([]map[string]any, 0, len(raw))
+		for _, item := range raw {
+			obj, ok := item.(map[string]any)
+			if ok {
+				skills = append(skills, obj)
+			}
+		}
+	}
+	if len(skills) != 1 {
+		t.Fatalf("expected one discovered skill, got %#v", listRes["skills"])
+	}
+	if skills[0]["name"] != "perplexity" {
+		t.Fatalf("expected perplexity skill, got %#v", skills[0]["name"])
+	}
+	if missing, ok := skills[0]["missing_secrets"].([]any); ok && len(missing) != 0 {
+		t.Fatalf("expected no missing secrets, got %#v", skills[0]["missing_secrets"])
+	}
+
+	readRes, err := reg.Execute(context.Background(), "agent", "skill.read", ws, map[string]any{"name": "perplexity"})
+	if err != nil {
+		t.Fatalf("skill.read: %v", err)
+	}
+	if content, _ := readRes["content"].(string); !strings.Contains(content, "PERPLEXITY_API_KEY") {
+		t.Fatalf("expected skill content to include required key, got %#v", readRes["content"])
+	}
+	if ready, _ := readRes["ready"].(bool); !ready {
+		t.Fatalf("expected ready=true, got %#v", readRes["ready"])
+	}
+}
+
+func TestSkillReadReturnsActionableErrorWhenSecretMissing(t *testing.T) {
+	ws, cfgPath := setupSecretsConfigFixture(t)
+	skillsDir := filepath.Join(ws, "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir skills dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "perplexity.md"), []byte("requires PERPLEXITY_API_KEY"), 0o600); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "skill.read", ws, map[string]any{"name": "perplexity"})
+	if err == nil {
+		t.Fatal("expected missing secret error")
+	}
+	if !strings.Contains(err.Error(), "missing required secrets for skill perplexity") || !strings.Contains(err.Error(), "PERPLEXITY_API_KEY") {
+		t.Fatalf("expected explicit missing secret guidance, got %q", err.Error())
+	}
+}
+
 func TestHTTPRequestToolAllowsLocalhostAndTruncatesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

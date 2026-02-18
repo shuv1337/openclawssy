@@ -14,6 +14,7 @@ import (
 	"openclawssy/internal/channels/discord"
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
+	"openclawssy/internal/scheduler"
 )
 
 func TestChatAdaptersRouteBySource(t *testing.T) {
@@ -154,5 +155,49 @@ func TestScopedChatAdapterRateLimitIncludesCooldown(t *testing.T) {
 	}
 	if rateErr.RetryAfterSeconds < 1 {
 		t.Fatalf("expected cooldown seconds, got %+v", rateErr)
+	}
+}
+
+func TestResolveScheduledJobSessionUsesActivePointer(t *testing.T) {
+	store, err := chatstore.NewStore(filepath.Join(t.TempDir(), ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := store.SetActiveSessionPointer("default", "dashboard", "dashboard_user", "dashboard", session.SessionID); err != nil {
+		t.Fatalf("set active pointer: %v", err)
+	}
+
+	resolved, err := resolveScheduledJobSession(store, scheduler.Job{AgentID: "default", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("resolve session: %v", err)
+	}
+	if resolved != session.SessionID {
+		t.Fatalf("expected existing active session %q, got %q", session.SessionID, resolved)
+	}
+}
+
+func TestResolveScheduledJobSessionCreatesSessionWhenMissing(t *testing.T) {
+	store, err := chatstore.NewStore(filepath.Join(t.TempDir(), ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+
+	resolved, err := resolveScheduledJobSession(store, scheduler.Job{AgentID: "default", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("resolve session: %v", err)
+	}
+	if strings.TrimSpace(resolved) == "" {
+		t.Fatal("expected created session id")
+	}
+	session, err := store.GetSession(resolved)
+	if err != nil {
+		t.Fatalf("get created session: %v", err)
+	}
+	if session.Channel != "dashboard" || session.UserID != "dashboard_user" || session.RoomID != "dashboard" {
+		t.Fatalf("unexpected created session metadata: %+v", session)
 	}
 }
