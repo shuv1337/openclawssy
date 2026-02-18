@@ -23,11 +23,15 @@ func registerSchedulerTools(reg *Registry, configuredPath string) error {
 		Description: "Add scheduler job",
 		Required:    []string{"schedule", "message"},
 		ArgTypes: map[string]ArgType{
-			"id":       ArgTypeString,
-			"schedule": ArgTypeString,
-			"message":  ArgTypeString,
-			"agent_id": ArgTypeString,
-			"enabled":  ArgTypeBool,
+			"id":         ArgTypeString,
+			"schedule":   ArgTypeString,
+			"message":    ArgTypeString,
+			"agent_id":   ArgTypeString,
+			"enabled":    ArgTypeBool,
+			"channel":    ArgTypeString,
+			"user_id":    ArgTypeString,
+			"room_id":    ArgTypeString,
+			"session_id": ArgTypeString,
 		},
 	}, schedulerAdd(configuredPath)); err != nil {
 		return err
@@ -92,21 +96,51 @@ func schedulerAdd(configuredPath string) Handler {
 			agentID = "default"
 		}
 		enabled := getBoolArg(req.Args, "enabled", true)
+		channel := strings.TrimSpace(fmt.Sprintf("%v", req.Args["channel"]))
+		if channel == "<nil>" {
+			channel = ""
+		}
+		userID := strings.TrimSpace(fmt.Sprintf("%v", req.Args["user_id"]))
+		if userID == "<nil>" {
+			userID = ""
+		}
+		roomID := strings.TrimSpace(fmt.Sprintf("%v", req.Args["room_id"]))
+		if roomID == "<nil>" {
+			roomID = ""
+		}
+		sessionID := strings.TrimSpace(fmt.Sprintf("%v", req.Args["session_id"]))
+		if sessionID == "<nil>" {
+			sessionID = ""
+		}
 
 		store, err := openSchedulerStore(req.Workspace, configuredPath)
 		if err != nil {
 			return nil, err
 		}
-		job := scheduler.Job{ID: jobID, Schedule: schedule, AgentID: agentID, Message: message, Enabled: enabled}
+		job := scheduler.Job{
+			ID:        jobID,
+			Schedule:  schedule,
+			AgentID:   agentID,
+			Message:   message,
+			Channel:   channel,
+			UserID:    userID,
+			RoomID:    roomID,
+			SessionID: sessionID,
+			Enabled:   enabled,
+		}
 		if err := store.Add(job); err != nil {
 			return nil, err
 		}
 		return map[string]any{
-			"added":    true,
-			"id":       jobID,
-			"agent_id": agentID,
-			"schedule": schedule,
-			"enabled":  enabled,
+			"added":      true,
+			"id":         jobID,
+			"agent_id":   agentID,
+			"schedule":   schedule,
+			"enabled":    enabled,
+			"channel":    channel,
+			"user_id":    userID,
+			"room_id":    roomID,
+			"session_id": sessionID,
 		}, nil
 	}
 }

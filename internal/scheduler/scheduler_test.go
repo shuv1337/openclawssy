@@ -75,6 +75,40 @@ func TestStorePersistenceReload(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateAfterRunPreservesJobsAddedByOtherStoreInstance(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "jobs.json")
+	storeA, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store A: %v", err)
+	}
+	storeB, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("new store B: %v", err)
+	}
+
+	job1 := Job{ID: "job-1", Schedule: "@every 1m", AgentID: "agent", Message: "one", Enabled: true}
+	if err := storeA.Add(job1); err != nil {
+		t.Fatalf("add job-1: %v", err)
+	}
+	job2 := Job{ID: "job-2", Schedule: "@every 1m", AgentID: "agent", Message: "two", Enabled: true}
+	if err := storeB.Add(job2); err != nil {
+		t.Fatalf("add job-2 from separate store: %v", err)
+	}
+
+	if err := storeA.updateAfterRun(job1, time.Now().UTC(), false); err != nil {
+		t.Fatalf("updateAfterRun: %v", err)
+	}
+
+	reloaded, err := NewStore(storePath)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+	jobs := reloaded.List()
+	if len(jobs) != 2 {
+		t.Fatalf("expected both jobs after cross-instance update, got %#v", jobs)
+	}
+}
+
 func TestExecutorTriggerExecution(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "jobs.json")
 	store, err := NewStore(storePath)

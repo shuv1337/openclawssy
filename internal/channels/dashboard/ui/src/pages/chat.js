@@ -584,7 +584,9 @@ async function pollRunOnce(token) {
 
     if (isTerminalStatus(status)) {
       if (status === "completed") {
-        replacePendingAssistant(safeText(run?.output) || "(completed with no output)");
+        replacePendingAssistant(
+          safeText(run?.output) || "Run completed without assistant output. Open trace or tool activity for details."
+        );
       } else if (status === "failed") {
         const message = safeText(run?.error) || "Run failed.";
         replacePendingAssistant(`Error: ${message}`);

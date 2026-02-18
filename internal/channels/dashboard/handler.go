@@ -1616,7 +1616,7 @@ loadStatus();
 return;
 }
 if(run.status==='completed'){
-const output=(run.output&&run.output.trim())?run.output:'(completed with no output)';
+const output=(run.output&&run.output.trim())?run.output:'Run completed without assistant output. Open trace or tool activity for details.';
 chatMessages[thinkingIdx]={role:'assistant',content:output};
 appendToolActivityFromRun(run);
 renderChat();

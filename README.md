@@ -266,6 +266,25 @@ Provider key precedence:
 2. provider env var (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, etc.)
 3. `providers.<provider>.api_key` in config (discouraged)
 
+## Skills and Secrets
+
+- Skills are discovered from `<workspace>/skills` (default workspace: `./workspace`).
+- Supported skill file extensions: `.md`, `.txt`, `.json`, `.yml`, `.yaml`.
+- Use `skill.list` to discover skills and readiness; use `skill.read` to load a specific skill.
+- Secret references in skills are normalized to secret-store naming (for example `PERPLEXITY_API_KEY` resolves to `provider/perplexity/api_key`).
+- For missing required secrets, set the exact key reported by `skill.read`:
+
+```bash
+openclawssy run --agent default --message '/tool secrets.set {"key":"provider/perplexity/api_key","value":"<token>"}'
+```
+
+## Debug Logging and Traces
+
+- Server foreground logs: run `openclawssy serve ... 2>&1 | tee ./_debug_logs/server_console.log`.
+- Run status + output: `GET /v1/runs/{id}`.
+- Run trace payload (dashboard debug endpoint): `GET /api/admin/debug/runs/{id}/trace`.
+- Persisted artifacts per run: `.openclawssy/agents/<agent>/runs/<run-id>/` (`input.json`, `prompt.md`, `toolcalls.jsonl`, `output.md`, `meta.json`).
+
 ## Shell Exec and Sandbox
 
 `shell.exec` stays disabled unless all are true:

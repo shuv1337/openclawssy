@@ -67,6 +67,9 @@ func (s *Store) Add(job Job) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return err
+	}
 	s.jobs[job.ID] = job
 	return s.saveLocked()
 }
@@ -74,6 +77,7 @@ func (s *Store) Add(job Job) error {
 func (s *Store) List() []Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.reloadLocked()
 
 	jobs := make([]Job, 0, len(s.jobs))
 	for _, job := range s.jobs {
@@ -88,6 +92,9 @@ func (s *Store) List() []Job {
 func (s *Store) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return err
+	}
 	if _, ok := s.jobs[id]; !ok {
 		return ErrJobNotFound
 	}
@@ -96,24 +103,37 @@ func (s *Store) Remove(id string) error {
 }
 
 func (s *Store) load() error {
+	return s.reloadLocked()
+}
+
+func (s *Store) reloadLocked() error {
+	jobs := make(map[string]Job)
+	paused := false
+
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			s.jobs = jobs
+			s.paused = paused
 			return nil
 		}
 		return fmt.Errorf("scheduler: read store: %w", err)
 	}
 	var p persistedJobs
 	if len(data) == 0 {
+		s.jobs = jobs
+		s.paused = paused
 		return nil
 	}
 	if err := json.Unmarshal(data, &p); err != nil {
 		return fmt.Errorf("scheduler: parse store: %w", err)
 	}
 	for _, job := range p.Jobs {
-		s.jobs[job.ID] = job
+		jobs[job.ID] = job
 	}
-	s.paused = p.Paused
+	paused = p.Paused
+	s.jobs = jobs
+	s.paused = paused
 	return nil
 }
 
@@ -138,6 +158,9 @@ func (s *Store) saveLocked() error {
 func (s *Store) updateAfterRun(job Job, runAt time.Time, disable bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return err
+	}
 	cur, ok := s.jobs[job.ID]
 	if !ok {
 		return ErrJobNotFound
@@ -153,6 +176,9 @@ func (s *Store) updateAfterRun(job Job, runAt time.Time, disable bool) error {
 func (s *Store) SetPaused(paused bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return err
+	}
 	s.paused = paused
 	return s.saveLocked()
 }
@@ -160,12 +186,16 @@ func (s *Store) SetPaused(paused bool) error {
 func (s *Store) IsPaused() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	_ = s.reloadLocked()
 	return s.paused
 }
 
 func (s *Store) SetJobEnabled(id string, enabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return err
+	}
 	job, ok := s.jobs[id]
 	if !ok {
 		return ErrJobNotFound

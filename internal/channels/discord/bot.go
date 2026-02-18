@@ -293,7 +293,7 @@ func (b *Bot) awaitAndPostResult(s *discordgo.Session, m *discordgo.MessageCreat
 
 	final := strings.TrimSpace(run.Output)
 	if final == "" {
-		final = "(completed with no output)"
+		final = "run completed without assistant output; check run trace/tool activity for details"
 	}
 	if strings.TrimSpace(run.ArtifactPath) != "" {
 		final = fmt.Sprintf("%s\n\nartifact: `%s`", final, run.ArtifactPath)

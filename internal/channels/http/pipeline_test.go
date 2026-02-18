@@ -155,6 +155,35 @@ func TestQueueRunRetriesRetryableExecutorFailureOnce(t *testing.T) {
 	}
 }
 
+func TestQueueRunWritesFallbackOutputWhenExecutorReturnsEmptyText(t *testing.T) {
+	store := NewInMemoryRunStore()
+	queued, err := QueueRun(context.Background(), store, traceExecutor{result: ExecutionResult{Output: "   ", Trace: map[string]any{"run_id": "trace-empty"}}}, "agent-1", "hello", "dashboard", "chat_123", "")
+	if err != nil {
+		t.Fatalf("queue run: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		run, getErr := store.Get(context.Background(), queued.ID)
+		if getErr != nil {
+			t.Fatalf("get run: %v", getErr)
+		}
+		if run.Status == "completed" {
+			if run.Output == "" || run.Output == "(completed with no output)" {
+				t.Fatalf("expected explicit non-empty fallback output, got %q", run.Output)
+			}
+			if run.Trace == nil || run.Trace["run_id"] != "trace-empty" {
+				t.Fatalf("expected trace to persist, got %#v", run.Trace)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run did not complete in time, last status=%q", run.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestQueueRunRejectsWhenQueueLimitReached(t *testing.T) {
 	store := NewInMemoryRunStore()
 

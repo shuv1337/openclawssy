@@ -70,7 +70,11 @@ func executeQueuedRun(ctx context.Context, store RunStore, executor RunExecutor,
 		run.ToolCalls = result.ToolCalls
 	} else {
 		run.Status = "completed"
-		run.Output = result.Output
+		output := strings.TrimSpace(result.Output)
+		if output == "" {
+			output = "Run completed without assistant output. Check run trace/tool activity for details."
+		}
+		run.Output = output
 		run.ArtifactPath = result.ArtifactPath
 		run.DurationMS = result.DurationMS
 		run.ToolCalls = result.ToolCalls

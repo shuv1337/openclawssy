@@ -29,6 +29,7 @@ var skillFileExtensions = map[string]bool{
 var secretTokenPattern = regexp.MustCompile(`\b[A-Z][A-Z0-9_]{2,}_(?:API_KEY|TOKEN|SECRET|KEY)\b`)
 var providerSecretPattern = regexp.MustCompile(`provider/[a-z0-9._-]+/api_key`)
 var quotedSecretKeyPattern = regexp.MustCompile(`(?i)"key"\s*:\s*"([^"]+)"`)
+var apiKeyTokenPattern = regexp.MustCompile(`^([A-Z][A-Z0-9_]*)_API_KEY$`)
 
 type workspaceSkill struct {
 	Name            string
@@ -88,10 +89,11 @@ func skillList(configuredPath string) Handler {
 		items := make([]map[string]any, 0, len(skills))
 		for _, skill := range skills {
 			missing := missingSecrets(skill.RequiredSecrets, secretFound)
+			required := standardizeRequiredSecrets(skill.RequiredSecrets)
 			items = append(items, map[string]any{
 				"name":             skill.Name,
 				"path":             skill.Path,
-				"required_secrets": append([]string(nil), skill.RequiredSecrets...),
+				"required_secrets": required,
 				"missing_secrets":  missing,
 				"ready":            len(missing) == 0,
 			})
@@ -146,13 +148,14 @@ func skillRead(configuredPath string) Handler {
 		if len(missing) > 0 {
 			return nil, fmt.Errorf("missing required secrets for skill %s: %s (set via /api/admin/secrets or secrets.set)", selected.Name, strings.Join(missing, ", "))
 		}
+		required := standardizeRequiredSecrets(selected.RequiredSecrets)
 
 		res := map[string]any{
 			"name":             selected.Name,
 			"path":             selected.Path,
 			"content":          selected.Content,
 			"truncated":        selected.Truncated,
-			"required_secrets": append([]string(nil), selected.RequiredSecrets...),
+			"required_secrets": required,
 			"missing_secrets":  []string{},
 			"ready":            true,
 		}
@@ -383,15 +386,102 @@ func missingSecrets(required []string, found map[string]bool) []string {
 	if len(required) == 0 {
 		return []string{}
 	}
-	missing := make([]string, 0, len(required))
+	missingSet := map[string]struct{}{}
 	for _, key := range required {
-		if found[key] {
+		candidates := secretKeyCandidates(key)
+		if len(candidates) == 0 {
+			candidates = []string{strings.TrimSpace(key)}
+		}
+		present := false
+		for _, candidate := range candidates {
+			if found[candidate] {
+				present = true
+				break
+			}
+		}
+		if present {
 			continue
 		}
+		missingSet[canonicalSecretKey(key)] = struct{}{}
+	}
+	missing := make([]string, 0, len(missingSet))
+	for key := range missingSet {
 		missing = append(missing, key)
 	}
 	sort.Strings(missing)
 	return missing
+}
+
+func standardizeRequiredSecrets(required []string) []string {
+	if len(required) == 0 {
+		return []string{}
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(required))
+	for _, key := range required {
+		canonical := canonicalSecretKey(key)
+		if canonical == "" {
+			continue
+		}
+		if _, ok := seen[canonical]; ok {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func canonicalSecretKey(key string) string {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	if providerSecretPattern.MatchString(lower) {
+		return lower
+	}
+	match := apiKeyTokenPattern.FindStringSubmatch(strings.ToUpper(trimmed))
+	if len(match) == 2 {
+		provider := strings.ToLower(strings.ReplaceAll(match[1], "_", "-"))
+		return fmt.Sprintf("provider/%s/api_key", provider)
+	}
+	return trimmed
+}
+
+func secretKeyCandidates(key string) []string {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 2)
+	add := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	add(trimmed)
+	canonical := canonicalSecretKey(trimmed)
+	add(canonical)
+	if providerSecretPattern.MatchString(strings.ToLower(trimmed)) {
+		parts := strings.Split(strings.ToLower(trimmed), "/")
+		if len(parts) >= 3 {
+			name := strings.ToUpper(strings.ReplaceAll(parts[1], "-", "_"))
+			add(name + "_API_KEY")
+		}
+	}
+	if len(out) > 1 {
+		sort.Strings(out)
+	}
+	return out
 }
 
 func inferSkillName(filename string) string {

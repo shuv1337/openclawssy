@@ -1216,8 +1216,36 @@ func TestSkillReadReturnsActionableErrorWhenSecretMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing secret error")
 	}
-	if !strings.Contains(err.Error(), "missing required secrets for skill perplexity") || !strings.Contains(err.Error(), "PERPLEXITY_API_KEY") {
+	if !strings.Contains(err.Error(), "missing required secrets for skill perplexity") || !strings.Contains(err.Error(), "provider/perplexity/api_key") {
 		t.Fatalf("expected explicit missing secret guidance, got %q", err.Error())
+	}
+}
+
+func TestSkillReadAcceptsProviderSecretAlias(t *testing.T) {
+	ws, cfgPath := setupSecretsConfigFixture(t)
+	skillsDir := filepath.Join(ws, "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir skills dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "perplexity.md"), []byte("requires PERPLEXITY_API_KEY"), 0o600); err != nil {
+		t.Fatalf("write skill file: %v", err)
+	}
+
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	if _, err := reg.Execute(context.Background(), "agent", "secrets.set", ws, map[string]any{"key": "provider/perplexity/api_key", "value": "secret-value"}); err != nil {
+		t.Fatalf("secrets.set: %v", err)
+	}
+
+	readRes, err := reg.Execute(context.Background(), "agent", "skill.read", ws, map[string]any{"name": "perplexity"})
+	if err != nil {
+		t.Fatalf("skill.read: %v", err)
+	}
+	required, _ := readRes["required_secrets"].([]string)
+	if len(required) != 1 || required[0] != "provider/perplexity/api_key" {
+		t.Fatalf("expected canonical required secret key, got %#v", readRes["required_secrets"])
 	}
 }
 
@@ -1845,10 +1873,14 @@ func TestSchedulerToolsLifecycle(t *testing.T) {
 	ws, _, reg := setupSchedulerToolRegistry(t, fakePolicy{})
 
 	if _, err := reg.Execute(context.Background(), "agent", "scheduler.add", ws, map[string]any{
-		"id":       "job-1",
-		"schedule": "@every 1m",
-		"message":  "ping",
-		"agent_id": "default",
+		"id":         "job-1",
+		"schedule":   "@every 1m",
+		"message":    "ping",
+		"agent_id":   "default",
+		"channel":    "dashboard",
+		"user_id":    "u1",
+		"room_id":    "room-a",
+		"session_id": "chat-1",
 	}); err != nil {
 		t.Fatalf("scheduler.add: %v", err)
 	}
@@ -1863,6 +1895,9 @@ func TestSchedulerToolsLifecycle(t *testing.T) {
 	}
 	if jobs[0].ID != "job-1" {
 		t.Fatalf("unexpected job id: %+v", jobs[0])
+	}
+	if jobs[0].Channel != "dashboard" || jobs[0].UserID != "u1" || jobs[0].RoomID != "room-a" || jobs[0].SessionID != "chat-1" {
+		t.Fatalf("expected scheduler destination metadata to persist, got %+v", jobs[0])
 	}
 
 	if _, err := reg.Execute(context.Background(), "agent", "scheduler.pause", ws, map[string]any{}); err != nil {
