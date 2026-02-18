@@ -1,3 +1,5 @@
+import { captureFocusSnapshot, restoreFocusSnapshot } from "../ui/focus_restore.js";
+
 const CATEGORY_DEFS = [
   { key: "general", title: "General", summary: "Server, workspace, and output defaults." },
   { key: "model", title: "Model Provider", summary: "Model selection and provider endpoint settings." },
@@ -394,7 +396,7 @@ function updateDraft(path, value, options = {}) {
   setByPath(settingsState.draftConfig, path, value, options);
   settingsState.draftConfig = normalizeConfigShape(settingsState.draftConfig);
   settingsState.advancedRaw = `${JSON.stringify(settingsState.draftConfig, null, 2)}\n`;
-  rerender();
+  rerender({ preserveFocus: true });
 }
 
 function categoryMatchesSearch(category, query, draft) {
@@ -479,6 +481,7 @@ function appendTextField({ parent, query, title, path, helpText = "", placeholde
   const input = document.createElement("input");
   input.type = inputType;
   input.className = "settings-input";
+  input.setAttribute("data-focus-id", `settings:${path}`);
   input.value = asString(getByPath(settingsState.draftConfig, path));
   input.placeholder = placeholder;
   input.readOnly = readOnly;
@@ -510,6 +513,7 @@ function appendNumberField({
   const input = document.createElement("input");
   input.type = "number";
   input.className = "settings-input";
+  input.setAttribute("data-focus-id", `settings:${path}`);
   input.step = step;
   const value = getByPath(settingsState.draftConfig, path);
   input.value = value === undefined || value === null ? "" : String(value);
@@ -538,6 +542,7 @@ function appendSelectField({ parent, query, title, path, options, helpText = "",
   const field = createField({ title, path, helpText, errorText });
   const select = document.createElement("select");
   select.className = "settings-select";
+  select.setAttribute("data-focus-id", `settings:${path}`);
   const current = asTrimmedString(getByPath(settingsState.draftConfig, path)).toLowerCase();
   options.forEach((option) => {
     const entry = document.createElement("option");
@@ -584,6 +589,7 @@ function appendListField({ parent, query, title, path, helpText = "", placeholde
   const field = createField({ title, path, helpText, errorText });
   const input = document.createElement("textarea");
   input.className = "settings-textarea";
+  input.setAttribute("data-focus-id", `settings:${path}`);
   input.rows = 4;
   input.placeholder = placeholder;
   input.value = toLineList(getByPath(settingsState.draftConfig, path));
@@ -1048,6 +1054,7 @@ function buildAdvancedCategory(panel, diffRows) {
 
   const rawInput = document.createElement("textarea");
   rawInput.className = "settings-raw-editor";
+  rawInput.setAttribute("data-focus-id", "settings:advanced.raw");
   rawInput.rows = 20;
   rawInput.value = settingsState.advancedRaw;
   rawInput.addEventListener("input", () => {
@@ -1231,11 +1238,15 @@ function renderCategoryPanel(categoryKey, fieldErrors, diffRows) {
   return panel;
 }
 
-function rerender() {
+function rerender(options = {}) {
   if (!settingsState.container || !settingsState.container.isConnected) {
     return;
   }
+  const focusSnapshot = options.preserveFocus ? captureFocusSnapshot(settingsState.container) : null;
   renderSettingsPage();
+  if (focusSnapshot) {
+    restoreFocusSnapshot(settingsState.container, focusSnapshot);
+  }
 }
 
 async function loadConfig() {
@@ -1354,11 +1365,12 @@ function renderSettingsPage() {
   const searchInput = document.createElement("input");
   searchInput.type = "search";
   searchInput.className = "settings-input";
+  searchInput.setAttribute("data-focus-id", "settings:search");
   searchInput.placeholder = "Search categories, fields, or values";
   searchInput.value = settingsState.searchQuery;
   searchInput.addEventListener("input", () => {
     settingsState.searchQuery = searchInput.value;
-    rerender();
+    rerender({ preserveFocus: true });
   });
   searchField.append(searchLabel, searchInput);
 

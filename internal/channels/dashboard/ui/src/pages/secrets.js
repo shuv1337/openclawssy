@@ -1,3 +1,5 @@
+import { captureFocusSnapshot, restoreFocusSnapshot } from "../ui/focus_restore.js";
+
 const CONVENTIONS = [
   {
     key: "PERPLEXITY_API_KEY",
@@ -82,11 +84,15 @@ async function copyText(value) {
   document.body.removeChild(input);
 }
 
-function rerender() {
+function rerender(options = {}) {
   if (!secretsState.container || !secretsState.container.isConnected) {
     return;
   }
+  const focusSnapshot = options.preserveFocus ? captureFocusSnapshot(secretsState.container) : null;
   renderSecretsPage();
+  if (focusSnapshot) {
+    restoreFocusSnapshot(secretsState.container, focusSnapshot);
+  }
 }
 
 async function loadKeys() {
@@ -195,11 +201,12 @@ function createKeysPanel() {
   const filterInput = document.createElement("input");
   filterInput.type = "search";
   filterInput.className = "settings-input";
+  filterInput.setAttribute("data-focus-id", "secrets:filter");
   filterInput.placeholder = "PERPLEXITY_API_KEY";
   filterInput.value = secretsState.filter;
   filterInput.addEventListener("input", () => {
     secretsState.filter = filterInput.value;
-    rerender();
+    rerender({ preserveFocus: true });
   });
   filterField.append(filterLabel, filterInput);
   panel.append(filterField);
