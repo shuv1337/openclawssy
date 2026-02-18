@@ -1123,6 +1123,22 @@ func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
 				args["pattern"] = value
 			}
 		}
+	case "secrets.get", "secrets.set":
+		aliasKeys := []string{"name", "secret", "secret_key", "secretKey", "env", "env_var", "token"}
+		if getStringArg(args, "key") == "" {
+			for _, key := range aliasKeys {
+				if value := getStringArg(args, key); value != "" {
+					args["key"] = strings.TrimSpace(value)
+					break
+				}
+			}
+		}
+		if key := canonicalRuntimeSecretKey(getStringArg(args, "key")); key != "" {
+			args["key"] = key
+		}
+		for _, alias := range aliasKeys {
+			delete(args, alias)
+		}
 	case "skill.read":
 		if getStringArg(args, "name") == "" {
 			for _, key := range []string{"skill", "skill_name", "skillName", "id"} {
@@ -1219,6 +1235,27 @@ func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
 	}
 
 	return args
+}
+
+func canonicalRuntimeSecretKey(raw string) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return ""
+	}
+	lower := strings.ToLower(key)
+	if strings.HasPrefix(lower, "provider/") && strings.HasSuffix(lower, "/api_key") {
+		return lower
+	}
+	upper := strings.ToUpper(key)
+	if strings.HasSuffix(upper, "_API_KEY") {
+		provider := strings.TrimSuffix(upper, "_API_KEY")
+		provider = strings.ReplaceAll(provider, "_", "-")
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "" {
+			return fmt.Sprintf("provider/%s/api_key", provider)
+		}
+	}
+	return key
 }
 
 func getStringArg(args map[string]any, key string) string {
