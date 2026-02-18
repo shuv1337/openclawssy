@@ -124,6 +124,14 @@ function isTerminalStatus(status) {
   return TERMINAL_RUN_STATUSES.has(safeText(status).toLowerCase());
 }
 
+function transcriptFingerprint() {
+  return chatViewState.transcript
+    .map((item) => `${item?.role}:${item?.pending ? "p" : "d"}:${(item?.content || "").length}`)
+    .join("|");
+}
+
+let lastRenderedFingerprint = "";
+
 function isTranscriptNearBottom(element, threshold = 36) {
   if (!element) {
     return true;
@@ -397,9 +405,13 @@ function isChatRouteActive() {
   return chatViewState.store.getState().route === "/chat";
 }
 
-function rerenderIfActive() {
+function rerenderIfActive(options = {}) {
   const container = chatViewState.container;
   if (!container || !container.isConnected || !isChatRouteActive()) {
+    return;
+  }
+  // Skip re-render if content hasn't changed (avoids unnecessary DOM rebuilds)
+  if (options.skipIfUnchanged && transcriptFingerprint() === lastRenderedFingerprint) {
     return;
   }
   renderChatPage();
@@ -534,7 +546,7 @@ async function pollIdleSessionOnce() {
     if (sessionID) {
       const payload = await chatViewState.apiClient.get(pollSessionMessagesPath(sessionID));
       applySessionMessagesPayload(payload);
-      rerenderIfActive();
+      rerenderIfActive({ skipIfUnchanged: true });
     }
   } finally {
     chatViewState.idleSessionInFlight = false;
@@ -754,6 +766,17 @@ function renderChatPage() {
   if (!container) {
     return;
   }
+
+  // Save focus state before destroying DOM
+  const activeEl = document.activeElement;
+  const hadInputFocus = activeEl && activeEl.classList.contains("chat-input");
+  let selStart = 0;
+  let selEnd = 0;
+  if (hadInputFocus) {
+    selStart = activeEl.selectionStart || 0;
+    selEnd = activeEl.selectionEnd || 0;
+  }
+
   const previousTranscript = container.querySelector(".chat-transcript");
   if (previousTranscript) {
     chatViewState.transcriptPinned = isTranscriptNearBottom(previousTranscript);
@@ -938,6 +961,21 @@ function renderChatPage() {
     const maxScrollTop = Math.max(0, transcript.scrollHeight - transcript.clientHeight);
     transcript.scrollTop = Math.min(chatViewState.transcriptScrollTop, maxScrollTop);
   }
+
+  // Restore focus and cursor position if the textarea had focus before re-render
+  if (hadInputFocus) {
+    const newInput = container.querySelector(".chat-input");
+    if (newInput) {
+      newInput.focus();
+      try {
+        newInput.setSelectionRange(selStart, selEnd);
+      } catch (_e) {
+        // setSelectionRange can throw on some element types; safe to ignore
+      }
+    }
+  }
+
+  lastRenderedFingerprint = transcriptFingerprint();
 }
 
 export const chatPage = {
