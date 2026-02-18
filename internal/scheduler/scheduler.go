@@ -36,6 +36,10 @@ type Store struct {
 	mu     sync.Mutex
 	jobs   map[string]Job
 	paused bool
+
+	// cache invalidation
+	modTime time.Time
+	size    int64
 }
 
 type persistedJobs struct {
@@ -107,33 +111,51 @@ func (s *Store) load() error {
 }
 
 func (s *Store) reloadLocked() error {
-	jobs := make(map[string]Job)
-	paused := false
+	stat, err := os.Stat(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.jobs = make(map[string]Job)
+			s.paused = false
+			s.modTime = time.Time{}
+			s.size = 0
+			return nil
+		}
+		return fmt.Errorf("scheduler: stat store: %w", err)
+	}
+
+	if !stat.ModTime().IsZero() && stat.ModTime().Equal(s.modTime) && stat.Size() == s.size {
+		return nil
+	}
 
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			s.jobs = jobs
-			s.paused = paused
+			s.jobs = make(map[string]Job)
+			s.paused = false
+			s.modTime = time.Time{}
+			s.size = 0
 			return nil
 		}
 		return fmt.Errorf("scheduler: read store: %w", err)
 	}
+
+	jobs := make(map[string]Job)
+	paused := false
 	var p persistedJobs
-	if len(data) == 0 {
-		s.jobs = jobs
-		s.paused = paused
-		return nil
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &p); err != nil {
+			return fmt.Errorf("scheduler: parse store: %w", err)
+		}
+		for _, job := range p.Jobs {
+			jobs[job.ID] = job
+		}
+		paused = p.Paused
 	}
-	if err := json.Unmarshal(data, &p); err != nil {
-		return fmt.Errorf("scheduler: parse store: %w", err)
-	}
-	for _, job := range p.Jobs {
-		jobs[job.ID] = job
-	}
-	paused = p.Paused
+
 	s.jobs = jobs
 	s.paused = paused
+	s.modTime = stat.ModTime()
+	s.size = stat.Size()
 	return nil
 }
 
@@ -152,7 +174,18 @@ func (s *Store) saveLocked() error {
 	}
 	body = append(body, '\n')
 
-	return atomicWriteFile(s.path, body, 0o600)
+	if err := atomicWriteFile(s.path, body, 0o600); err != nil {
+		return err
+	}
+
+	if stat, err := os.Stat(s.path); err == nil {
+		s.modTime = stat.ModTime()
+		s.size = stat.Size()
+	} else {
+		s.modTime = time.Time{}
+		s.size = 0
+	}
+	return nil
 }
 
 func (s *Store) updateAfterRun(job Job, runAt time.Time, disable bool) error {
