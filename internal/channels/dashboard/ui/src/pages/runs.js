@@ -161,6 +161,20 @@ function formatDuration(ms) {
   return `${(value / 1000).toFixed(2)}s`;
 }
 
+function modelIdentityTextForRun(run, adminStatus) {
+  const runProvider = String(run?.provider || "").trim();
+  const runModel = String(run?.model || "").trim();
+  if (runProvider || runModel) {
+    return `Model identity: ${runProvider || "unknown"} / ${runModel || "unknown"} (captured on this run).`;
+  }
+  const provider = String(adminStatus?.provider || "").trim();
+  const model = String(adminStatus?.model || "").trim();
+  if (provider || model) {
+    return `Model identity: ${provider || "unknown"} / ${model || "unknown"} (current config).`;
+  }
+  return "Model identity: unknown.";
+}
+
 function formatArgsPreview(argumentsText) {
   const parsed = parseMaybeJSON(argumentsText);
   if (parsed !== null) {
@@ -286,7 +300,7 @@ function groupedTimelineBlocks(toolEntries) {
 export const runsPage = {
   key: "runs",
   title: "Runs",
-  async render({ container, apiClient, store }) {
+  async render({ container, apiClient, store, state }) {
     container.innerHTML = "";
     const heading = document.createElement("h2");
     heading.textContent = "Runs";
@@ -469,7 +483,10 @@ export const runsPage = {
       const runMeta = document.createElement("p");
       runMeta.className = "muted";
       runMeta.textContent = `Run ${runsViewState.selectedRun.id || "-"} · status ${runsViewState.selectedRun.status || "-"} · updated ${formatDateTime(runsViewState.selectedRun.updated_at)}`;
-      runSummary.append(runMeta);
+      const identityMeta = document.createElement("p");
+      identityMeta.className = "muted";
+      identityMeta.textContent = modelIdentityTextForRun(runsViewState.selectedRun, state?.adminStatus || null);
+      runSummary.append(runMeta, identityMeta);
       renderJSONViewer(runSummary, runsViewState.selectedRun, { title: "Selected Run" });
 
       const trace = runsViewState.selectedTrace;

@@ -77,6 +77,52 @@ func TestDashboardStaticAssetRouteServesEmbeddedFiles(t *testing.T) {
 	}
 }
 
+func TestDashboardStaticAssetRouteServesToolSchemasJSON(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/static/src/data/tool_schemas.json", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("expected json content type, got %q", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode schema payload: %v", err)
+	}
+	if _, ok := payload["fs.read"].(map[string]any); !ok {
+		t.Fatalf("expected fs.read schema entry, got %#v", payload["fs.read"])
+	}
+	if _, ok := payload["shell.exec"].(map[string]any); !ok {
+		t.Fatalf("expected shell.exec schema entry, got %#v", payload["shell.exec"])
+	}
+	fsRead := payload["fs.read"].(map[string]any)
+	required, ok := fsRead["required"].([]any)
+	if !ok || len(required) == 0 || required[0] != "path" {
+		t.Fatalf("expected fs.read.required to include path, got %#v", fsRead["required"])
+	}
+}
+
+func TestDashboardStaticAssetRouteMissingToolSchemasFileNotFound(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/static/src/data/tool_schemas_missing.json", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected %d, got %d", http.StatusNotFound, rr.Code)
+	}
+}
+
 func TestDebugRunTraceEndpoint(t *testing.T) {
 	store := httpchannel.NewInMemoryRunStore()
 	_, err := store.Create(context.Background(), httpchannel.Run{
@@ -141,6 +187,39 @@ func TestAdminStatusEndpoint(t *testing.T) {
 	}
 	if payload["run_count"] != float64(1) {
 		t.Fatalf("expected run_count=1, got %#v", payload["run_count"])
+	}
+}
+
+func TestAdminStatusEndpointIncludesConfiguredModelStamp(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.Model.Provider = "openai"
+	cfg.Model.Name = "gpt-4.1-mini"
+	if err := config.Save(filepath.Join(root, ".openclawssy", "config.json"), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	model, ok := payload["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected model map in payload, got %#v", payload["model"])
+	}
+	if model["provider"] != "openai" || model["name"] != "gpt-4.1-mini" {
+		t.Fatalf("unexpected model stamp: %#v", model)
 	}
 }
 

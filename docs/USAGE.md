@@ -164,3 +164,26 @@ openclawssy serve --token change-me 2>&1 | tee ./_debug_logs/server_console.log
 - Writes are workspace-bound and path-guarded.
 - Secret values are write-only in dashboard/API surfaces.
 - This project remains prototype-grade: use isolated environments.
+
+## Dashboard E2E QA (Playwright)
+
+A lightweight browser e2e harness lives under `internal/channels/dashboard/ui` and is kept separate from Go CI.
+
+Run from that directory:
+
+```bash
+npm install
+npm run e2e:install:linux
+npm run e2e:test
+```
+
+If your environment already has browser dependencies:
+
+```bash
+npm run e2e:install
+npm run e2e:test
+```
+
+Current spec file `tests/e2e/qa_scripts.spec.js` maps to devplan QA script flows (tool failure visibility, python guidance, secrets workflow, scheduler usability) with deterministic mocked API responses.
+
+If Playwright fails with missing shared libraries (for example `libnspr4.so`), run `npm run e2e:install:linux` and retry.

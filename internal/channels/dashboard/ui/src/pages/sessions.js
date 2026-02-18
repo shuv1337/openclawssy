@@ -262,6 +262,18 @@ function sortSessions(items, sortMode) {
   return sorted;
 }
 
+function currentModelIdentityText(adminStatus) {
+  const provider = String(adminStatus?.provider || "").trim();
+  const model = String(adminStatus?.model || "").trim();
+  if (provider || model) {
+    return `Model identity: ${provider || "unknown"} / ${model || "unknown"} (current config).`;
+  }
+  if (adminStatus?.loading) {
+    return "Model identity: loading current config...";
+  }
+  return "Model identity: unknown.";
+}
+
 function filteredSortedSessions() {
   const query = normalizeSearch(sessionsViewState.searchQuery);
   const filtered = query
@@ -273,7 +285,7 @@ function filteredSortedSessions() {
 export const sessionsPage = {
   key: "sessions",
   title: "Sessions",
-  async render({ container, apiClient, store }) {
+  async render({ container, apiClient, store, state }) {
     container.innerHTML = "";
 
     const heading = document.createElement("h2");
@@ -450,6 +462,9 @@ export const sessionsPage = {
       const summary = document.createElement("p");
       summary.className = "muted";
       summary.textContent = `Session ${sessionsViewState.selectedSessionID} · updated ${formatDateTime(selected?.updated_at)} · messages ${sessionsViewState.messages.length}`;
+      const identitySummary = document.createElement("p");
+      identitySummary.className = "muted";
+      identitySummary.textContent = currentModelIdentityText(state?.adminStatus || null);
 
       const messageLimitLabel = document.createElement("label");
       messageLimitLabel.className = "sessions-control";
@@ -465,7 +480,7 @@ export const sessionsPage = {
         messageLimitSelect.append(item);
       }
       messageLimitLabel.append(messageLimitSelect);
-      header.append(summary, messageLimitLabel);
+      header.append(summary, identitySummary, messageLimitLabel);
       selectionWrap.append(header);
 
       messageLimitSelect.addEventListener("change", () => {

@@ -1,7 +1,3 @@
-import { renderFixSuggestions } from "../ux/fix_suggestions.js";
-import { renderVenvPanel } from "../ux/venv_panel.js";
-import { renderToolSchemaPanel } from "../ux/tool_schema_panel.js";
-
 const LAYOUT_STORAGE_KEY = "dashboard.layout.p1.2";
 const NARROW_SCREEN_QUERY = "(max-width: 900px)";
 const RESIZE_STEP = 16;
@@ -70,7 +66,8 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
   const titleWrap = createElement("div", "shell-header-title");
   const title = createElement("h1", "", "Openclawssy Dashboard");
   const subtitle = createElement("p", "muted", "Phase 1 modular shell foundation");
-  titleWrap.append(title, subtitle);
+  const statusStamp = createElement("p", "muted", "Runtime: loading...");
+  titleWrap.append(title, subtitle, statusStamp);
 
   const headerActions = createElement("div", "shell-header-actions");
   const navToggle = createElement("button", "layout-toggle nav-toggle", "Toggle Nav");
@@ -121,7 +118,10 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
   const footer = createElement("footer", "shell-footer");
   const legacyLink = createElement("a", "", "Open Legacy Dashboard");
   legacyLink.href = "/dashboard-legacy";
-  footer.append(legacyLink);
+  const bugLink = createElement("a", "", "Report bug");
+  bugLink.target = "_blank";
+  bugLink.rel = "noopener noreferrer";
+  footer.append(legacyLink, document.createTextNode(" · "), bugLink);
 
   root.append(header, shellGrid, footer, inspectorBackdrop);
 
@@ -272,10 +272,55 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
   }
 
   window.addEventListener("keydown", (event) => {
+    const tag = String(document.activeElement?.tagName || "").toLowerCase();
+    const isTypingContext =
+      tag === "input" || tag === "textarea" || document.activeElement?.getAttribute?.("contenteditable") === "true";
+
     if (event.key === "Escape" && isNarrowScreen && layoutPrefs.inspectorDrawerOpen) {
       layoutPrefs.inspectorDrawerOpen = false;
       applyLayoutPrefs();
       persistLayoutPrefs(layoutPrefs);
+      return;
+    }
+
+    if (event.key === "/" && !isTypingContext) {
+      event.preventDefault();
+      const searchInput =
+        content.querySelector('input[type="search"]') ||
+        content.querySelector(".settings-search") ||
+        content.querySelector('input[placeholder*="Search"]');
+      if (searchInput) {
+        searchInput.focus();
+      }
+      return;
+    }
+
+    if (isTypingContext || event.altKey || event.ctrlKey || event.metaKey) {
+      return;
+    }
+
+    const now = Date.now();
+    if (!window.__dashboardChordState || now - window.__dashboardChordState.ts > 1200) {
+      window.__dashboardChordState = { key: "", ts: now };
+    }
+    const chord = window.__dashboardChordState;
+    const key = String(event.key || "").toLowerCase();
+    if (chord.key === "g") {
+      if (key === "c") {
+        event.preventDefault();
+        router.navigate("/chat");
+      } else if (key === "r") {
+        event.preventDefault();
+        router.navigate("/runs");
+      } else if (key === "s") {
+        event.preventDefault();
+        router.navigate("/scheduler");
+      }
+      window.__dashboardChordState = { key: "", ts: now };
+      return;
+    }
+    if (key === "g") {
+      window.__dashboardChordState = { key: "g", ts: now };
     }
   });
 
@@ -298,6 +343,28 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
     nav.append(list);
   }
 
+  function renderAdminStatusStamp(state) {
+    const runtime = state?.adminStatus || {};
+    if (runtime.loading) {
+      statusStamp.textContent = "Runtime: loading status...";
+      return;
+    }
+    if (runtime.error) {
+      statusStamp.textContent = `Runtime status unavailable: ${runtime.error}`;
+      return;
+    }
+
+    const provider = String(runtime.provider || "").trim();
+    const model = String(runtime.model || "").trim();
+    const runCount = Number(runtime.run_count) || 0;
+
+    if (!provider && !model) {
+      statusStamp.textContent = "Runtime: provider/model unknown";
+      return;
+    }
+    statusStamp.textContent = `Runtime: ${provider || "unknown"} / ${model || "unknown"} · runs ${runCount}`;
+  }
+
   async function renderContent(state) {
     const selected = routes.find((route) => route.path === state.route) || routes[0];
     if (!selected) {
@@ -307,7 +374,39 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
     await selected.page.render({ container: content, state, store, apiClient, router });
   }
 
-  function renderInspector(state) {
+  function buildBugReportURL(state) {
+    const lastError = state?.lastError || null;
+    const selectedTrace = state?.selectedTrace || null;
+    const selectedTool = state?.selectedTool || null;
+    const runID = String(selectedTrace?.run_id || selectedTool?.run_id || "").trim();
+    const sessionID = String(lastError?.session_id || "").trim();
+    const errorSummary = String(lastError?.message || "No error captured.").trim();
+
+    const body = [
+      "## Dashboard Bug Report",
+      "",
+      `- Route: ${state?.route || ""}`,
+      `- Run ID: ${runID || "(unknown)"}`,
+      `- Session ID: ${sessionID || "(unknown)"}`,
+      `- Error: ${errorSummary}`,
+      "",
+      "## Reproduction",
+      "1. ...",
+      "2. ...",
+      "",
+      "## Notes",
+      "Add screenshots or extra context here.",
+    ].join("\n");
+
+    const params = new URLSearchParams({
+      title: `dashboard: ${state?.route || "route"} issue`,
+      body,
+      labels: "dashboard,bug",
+    });
+    return `https://github.com/mojomast/openclawssy/issues/new?${params.toString()}`;
+  }
+
+  async function renderInspector(state) {
     inspector.innerHTML = "";
 
     const tabs = createElement("div", "inspector-tabs");
@@ -323,21 +422,19 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
 
     const active = inspectors.find((item) => item.key === state.inspectorTab) || inspectors[0];
     if (active) {
-      active.render({ container: body, state, store });
+      await active.render({ container: body, state, store });
     }
-
-    renderFixSuggestions(body, state.lastError);
-    renderVenvPanel(body);
-    renderToolSchemaPanel(body);
 
     inspector.append(tabs, body);
   }
 
   async function render(state) {
     applyLayoutPrefs();
+    renderAdminStatusStamp(state);
     renderNav(state);
+    bugLink.href = buildBugReportURL(state);
     await renderContent(state);
-    renderInspector(state);
+    await renderInspector(state);
   }
 
   return {

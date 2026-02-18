@@ -228,59 +228,59 @@ Acceptance:
 This phase MUST cover all “problems the first devplan addressed”.
 
 ## P4.1 Tool Schema Viewer (UI now, backend later)
-Status: ⬜  PR: _______
+Status: 🟦  PR: _______
 UI now:
-- [ ] Add “Tool Schema” inspector tab with placeholder data model:
-  - show required fields
-  - show example payload
-- [ ] For now: hardcode schemas for built-in tools in a JSON file:
-  - `ui/src/data/tool_schemas.json`
+- [x] Add “Tool Schema” inspector tab with placeholder data model:
+   - show required fields
+   - show example payload
+- [x] For now: hardcode schemas for built-in tools in a JSON file:
+   - `ui/src/data/tool_schemas.json`
 
 Later (backend wiring):
 - Replace hardcoded schemas with a `/api/admin/tools` endpoint.
 
 Acceptance:
-- [ ] When user clicks `fs.edit`, UI shows “requires edits[]”
-- [ ] Prevents the exact schema misuse that caused `missing argument: edits`
+- [x] When user clicks `fs.edit`, UI shows “requires edits[]”
+- [x] Prevents the exact schema misuse that caused `missing argument: edits`
 
 ## P4.2 Fix Suggestions Panel (error classifier)
-Status: ⬜  PR: _______
+Status: 🟦  PR: _______
 Detect and display “suggested next step” actions when errors appear in:
 - tool outputs
 - run trace errors
 - API errors
 
 Rules (initial):
-- [ ] `tool.input_invalid` → show schema + highlight missing fields
-- [ ] `externally-managed-environment` → suggest venv creation and always use `.venv/bin/python`
-- [ ] `ModuleNotFoundError` → suggest “install requirements in venv”
-- [ ] “env var not set” → suggest check Secrets page and later “inject/export to run env”
-- [ ] `context deadline exceeded` → show provider request info and suggest retry/backoff (UI only)
+- [x] `tool.input_invalid` → show schema + highlight missing fields
+- [x] `externally-managed-environment` → suggest venv creation and always use `.venv/bin/python`
+- [x] `ModuleNotFoundError` → suggest “install requirements in venv”
+- [x] “env var not set” → suggest check Secrets page and later “inject/export to run env”
+- [x] `context deadline exceeded` → show provider request info and suggest retry/backoff (UI only)
 
 Acceptance:
-- [ ] When pip fails with externally-managed-environment, UI suggests venv workflow immediately
-- [ ] When `requests` missing, UI suggests installing into venv and running with venv python
+- [x] When pip fails with externally-managed-environment, UI suggests venv workflow immediately
+- [x] When `requests` missing, UI suggests installing into venv and running with venv python
 
 ## P4.3 Venv Manager Pane (UI-only for now)
-Status: ⬜  PR: _______
-- [ ] Add an inspector tab “Python Env”
-- [ ] Provide UI fields/buttons (no backend required yet):
-  - venv path input (default: `./.venv`)
-  - “suggested commands” generator:
-    - create venv
-    - install requirements
-    - run script using `.venv/bin/python`
-- [ ] Copy-to-clipboard buttons for commands
+Status: 🟦  PR: _______
+- [x] Add an inspector tab “Python Env”
+- [x] Provide UI fields/buttons (no backend required yet):
+   - venv path input (default: `./.venv`)
+   - “suggested commands” generator:
+     - create venv
+     - install requirements
+     - run script using `.venv/bin/python`
+- [x] Copy-to-clipboard buttons for commands
 
 Acceptance:
-- [ ] User can copy the correct venv commands without the bot guessing wrong
+- [x] User can copy the correct venv commands without the bot guessing wrong
 
 ## P4.4 Run controls: Stop polling + “soft cancel”
-Status: ⬜  PR: _______
+Status: 🟦  PR: _______
 Frontend-only:
-- [ ] “Stop polling” button (halts UI polling and clears “Thinking…”)
-- [ ] “Retry” button (re-send last prompt)
-- [ ] “Copy debug bundle” (selected run/session ids + errors)
+- [x] “Stop polling” button (halts UI polling and clears “Thinking…”)
+- [x] “Retry” button (re-send last prompt)
+- [x] “Copy debug bundle” (selected run/session ids + errors)
 
 Later (backend wiring):
 - Add true cancel endpoint.
@@ -289,40 +289,43 @@ Acceptance:
 - [ ] User can stop the UI from spinning forever when iteration caps happen
 
 ## P4.5 Provider/model identity stamp everywhere
-Status: ⬜  PR: _______
-- [ ] Display provider/model from `/api/admin/status` in header
-- [ ] When rendering run/session, display provider/model for that run if available in trace; otherwise label as “current config”
+Status: 🟦  PR: _______
+- [x] Display provider/model from `/api/admin/status` in header
+- [x] When rendering run/session, display provider/model for that run if available in trace; otherwise label as “current config”
 
 Acceptance:
-- [ ] If bot claims “I’m Claude”, user can see the actual configured model/provider at all times
+- [x] If bot claims “I’m Claude”, user can see the actual configured model/provider at all times
 
 ---
 
 # Phase 5 — Polish (space, speed, and maintainability)
 
 ## P5.1 JSON viewer + truncation + streaming-friendly UI
-Status: ⬜  PR: _______
-- [ ] Reusable JSON viewer component (collapse/expand)
-- [ ] Truncate huge outputs with “expand”
-- [ ] Search within JSON text
+Status: 🟦  PR: _______
+- [x] Reusable JSON viewer component (collapse/expand)
+- [x] Truncate huge outputs with “expand”
+- [x] Search within JSON text
 
 ## P5.2 Theming + accessibility + keyboard shortcuts
-Status: ⬜  PR: _______
+Status: 🟦  PR: _______
 - [ ] Improve contrast and spacing
 - [ ] Shortcuts:
-  - `g c` chat, `g r` runs, `g s` scheduler
-  - `/` focus search
-  - `Esc` close drawer
+  - [x] `g c` chat, `g r` runs, `g s` scheduler
+  - [x] `/` focus search
+  - [x] `Esc` close drawer
 
 ---
 
 # Legacy Fallback UX Requirement (must-have)
 - [x] New UI footer contains: **“Open Legacy Dashboard”** linking to `/dashboard-legacy`
-- [ ] Optional: “Report bug” link to prefill run/session id in issue template
+- [x] Optional: “Report bug” link to prefill run/session id in issue template
 
 ---
 
 # QA Checklist (manual scripts)
+
+Automation note:
+- Added handler-level automated checks for `/api/admin/status` model stamp payload and static tool schema catalog serving/missing-file behavior in `internal/channels/dashboard/handler_test.go`.
 
 ## Script 1: Tool failure visibility
 - [ ] Trigger a known tool input error (e.g., bad payload)
@@ -359,11 +362,11 @@ Status: ⬜  PR: _______
 | P3.1 | settings pages + diff | 🟦 | `settings.js` now provides category workspace (General/Model/Chat/Sandbox/Network/Scheduler/Capabilities/Advanced), config draft vs baseline handling, inline validation, clear server save errors, search + breadcrumbs, and diff-before-save with changed path table plus raw JSON editor; acceptance still needs manual UX verification. |
 | P3.2 | secrets page | 🟦 | `secrets.js` now uses a modular UI with GET key loading, search + copy-name controls, write-only POST set/rotate form, and a naming-conventions helper block (including PERPLEXITY_API_KEY and Discord token patterns); acceptance still needs manual UX verification. |
 | P3.3 | scheduler page | 🟦 | `/scheduler` now has modular controls for global paused/running state, refresh, add-job form (`agent_id`, `schedule`, `message`, optional `id`, optional explicit `enabled`), per-job enable/disable via scheduler control, delete actions, and clear success/error banners; acceptance still needs manual UI walkthrough. |
-| P4.1 | tool schema viewer (hardcoded first) | ⬜ | |
-| P4.2 | fix suggestions | ⬜ | |
-| P4.3 | python env pane | ⬜ | |
-| P4.4 | stop polling + soft controls | ⬜ | |
-| P4.5 | provider/model stamp everywhere | ⬜ | |
-| P5.* | polish | ⬜ | |
+| P4.1 | tool schema viewer (hardcoded first) | 🟦 | Added dedicated Schema inspector tab, loaded hardcoded schema catalog from `ui/src/data/tool_schemas.json`, and highlighted missing required fields with targeted `fs.edit` guidance. |
+| P4.2 | fix suggestions | 🟦 | Expanded classifier rules (`tool.input_invalid`, externally managed env, missing module, env/secret missing, timeout) and added one-click actions to open Schema/Tool/Python/Secrets/Settings views. |
+| P4.3 | python env pane | 🟦 | Added dedicated Python Env inspector tab with editable venv path, generated commands, and copy buttons. |
+| P4.4 | stop polling + soft controls | 🟦 | `/chat` now includes Stop polling, Retry (re-send last prompt), and Copy debug bundle actions; backend true-cancel endpoint remains future work. |
+| P4.5 | provider/model stamp everywhere | 🟦 | Header now fetches `/api/admin/status` and shows runtime provider/model; runs/sessions render model identity using run metadata when present or fallback to current config. |
+| P5.* | polish | 🟦 | Added global keyboard shortcuts (`g c`, `g r`, `g s`, `/`, `Esc`), JSON viewer search, and footer bug-report link with prefilled context; contrast/spacing polish remains. |
 
 ---
