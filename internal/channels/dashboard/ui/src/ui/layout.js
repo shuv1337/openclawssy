@@ -3,6 +3,23 @@ import { renderVenvPanel } from "../ux/venv_panel.js";
 import { renderToolSchemaPanel } from "../ux/tool_schema_panel.js";
 
 const LAYOUT_STORAGE_KEY = "dashboard.layout.p1.2";
+const THEME_STORAGE_KEY = "dashboard.theme";
+
+function getCurrentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+}
+
+function toggleTheme() {
+  const isDark = getCurrentTheme() === "dark";
+  if (isDark) {
+    document.documentElement.removeAttribute("data-theme");
+    localStorage.setItem(THEME_STORAGE_KEY, "light");
+    return "light";
+  }
+  document.documentElement.setAttribute("data-theme", "dark");
+  localStorage.setItem(THEME_STORAGE_KEY, "dark");
+  return "dark";
+}
 const NARROW_SCREEN_QUERY = "(max-width: 900px)";
 const RESIZE_STEP = 16;
 const PANE_LIMITS = {
@@ -92,7 +109,15 @@ export function createLayout({ root, routes, store, router, apiClient, inspector
     applyLayoutPrefs();
     persistLayoutPrefs(layoutPrefs);
   });
-  headerActions.append(navToggle, inspectorToggle);
+  let currentTheme = getCurrentTheme();
+  const themeToggle = createElement("button", "layout-toggle theme-toggle", currentTheme === "dark" ? "Light Mode" : "Dark Mode");
+  themeToggle.type = "button";
+  themeToggle.addEventListener("click", () => {
+    currentTheme = toggleTheme();
+    themeToggle.textContent = currentTheme === "dark" ? "Light Mode" : "Dark Mode";
+  });
+
+  headerActions.append(navToggle, inspectorToggle, themeToggle);
   header.append(titleWrap, headerActions);
 
   const shellGrid = createElement("div", "shell-grid");
