@@ -50,6 +50,13 @@ const chatViewState = {
   container: null,
   apiClient: null,
   store: null,
+  availableAgents: [CHAT_DEFAULTS.agentID],
+  selectedAgentID: CHAT_DEFAULTS.agentID,
+  activeAgentID: CHAT_DEFAULTS.agentID,
+  switchAgentPending: false,
+  switchAgentError: "",
+  agentProfileContext: null,
+  agentGlobalConfig: null,
 };
 
 function safeText(value) {
@@ -124,6 +131,16 @@ function isTerminalStatus(status) {
   return TERMINAL_RUN_STATUSES.has(safeText(status).toLowerCase());
 }
 
+function settingsProfileHash(agentID) {
+  const params = new URLSearchParams();
+  params.set("category", "agents");
+  const selected = safeText(agentID);
+  if (selected) {
+    params.set("profile", selected);
+  }
+  return `#/settings?${params.toString()}`;
+}
+
 function transcriptFingerprint() {
   return chatViewState.transcript
     .map((item) => `${item?.role}:${item?.pending ? "p" : "d"}:${(item?.content || "").length}`)
@@ -172,7 +189,7 @@ function pollSessionMessagesPath(sessionID) {
 
 function listSessionsPath() {
   const params = new URLSearchParams({
-    agent_id: CHAT_DEFAULTS.agentID,
+    agent_id: safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID,
     user_id: CHAT_DEFAULTS.userID,
     room_id: CHAT_DEFAULTS.roomID,
     channel: "dashboard",
@@ -180,6 +197,119 @@ function listSessionsPath() {
     offset: "0",
   });
   return `/api/admin/chat/sessions?${params.toString()}`;
+}
+
+async function refreshAvailableAgents() {
+  try {
+    const params = new URLSearchParams({
+      channel: "dashboard",
+      user_id: CHAT_DEFAULTS.userID,
+      room_id: CHAT_DEFAULTS.roomID,
+    });
+    const requestedAgent = safeText(chatViewState.selectedAgentID);
+    if (requestedAgent) {
+      params.set("agent_id", requestedAgent);
+    }
+    const payload = await chatViewState.apiClient.get(
+      `/api/admin/agents?${params.toString()}`
+    );
+
+    const agents = Array.isArray(payload?.agents)
+      ? payload.agents.map((item) => safeText(item)).filter((item) => !!item)
+      : [];
+    if (agents.length) {
+      chatViewState.availableAgents = agents;
+    }
+    const active = safeText(payload?.active_agent);
+    if (active) {
+      chatViewState.activeAgentID = active;
+    }
+
+    const selected = safeText(payload?.selected_agent) || active;
+    chatViewState.agentProfileContext =
+      payload?.profile_context && typeof payload.profile_context === "object" ? payload.profile_context : null;
+    chatViewState.agentGlobalConfig =
+      payload?.agents_config && typeof payload.agents_config === "object" ? payload.agents_config : null;
+
+    if (selected) {
+      chatViewState.selectedAgentID = selected;
+    } else if (!chatViewState.availableAgents.includes(chatViewState.selectedAgentID)) {
+      chatViewState.selectedAgentID = chatViewState.availableAgents[0] || CHAT_DEFAULTS.agentID;
+    }
+  } catch (_error) {
+    if (!chatViewState.availableAgents.length) {
+      chatViewState.availableAgents = [CHAT_DEFAULTS.agentID];
+    }
+  }
+}
+
+function resetViewForAgentSwitch() {
+  stopPolling();
+  clearIdleSessionTimer();
+  chatViewState.currentRunID = "";
+  chatViewState.currentRunStatus = "idle";
+  chatViewState.currentRunStartedAtMs = 0;
+  chatViewState.currentRunLastUpdatedAt = "";
+  chatViewState.currentRunLastOutput = "";
+  chatViewState.currentSessionID = "";
+  chatViewState.latestToolActivity = null;
+  chatViewState.lastErrorSummary = "";
+  chatViewState.sendError = null;
+  chatViewState.transcript = [];
+  chatViewState.loopRisk = {
+    level: "low",
+    score: 0,
+    reasons: [],
+    repeatCount: 0,
+    failureCount: 0,
+    windowSize: 0,
+  };
+}
+
+async function switchAgent(nextAgentID) {
+  const agentID = safeText(nextAgentID) || CHAT_DEFAULTS.agentID;
+  if (chatViewState.switchAgentPending) {
+    return;
+  }
+  chatViewState.switchAgentPending = true;
+  chatViewState.switchAgentError = "";
+  rerenderIfActive();
+
+  try {
+    const payload = await chatViewState.apiClient.post("/api/admin/agents", {
+      channel: "dashboard",
+      user_id: CHAT_DEFAULTS.userID,
+      room_id: CHAT_DEFAULTS.roomID,
+      agent_id: agentID,
+    });
+
+    const agents = Array.isArray(payload?.agents)
+      ? payload.agents.map((item) => safeText(item)).filter((item) => !!item)
+      : [];
+    if (agents.length) {
+      chatViewState.availableAgents = agents;
+    }
+    chatViewState.selectedAgentID = safeText(payload?.selected_agent) || safeText(payload?.active_agent) || agentID;
+    chatViewState.activeAgentID = safeText(payload?.active_agent) || chatViewState.selectedAgentID;
+    chatViewState.agentProfileContext =
+      payload?.profile_context && typeof payload.profile_context === "object" ? payload.profile_context : null;
+    chatViewState.agentGlobalConfig =
+      payload?.agents_config && typeof payload.agents_config === "object" ? payload.agents_config : null;
+
+    resetViewForAgentSwitch();
+
+    const sessionID = await ensureCurrentSessionID();
+    if (sessionID) {
+      const sessionPayload = await chatViewState.apiClient.get(pollSessionMessagesPath(sessionID));
+      applySessionMessagesPayload(sessionPayload);
+    }
+    startIdleSessionWatch();
+  } catch (err) {
+    chatViewState.switchAgentError = err?.message || String(err);
+  } finally {
+    chatViewState.switchAgentPending = false;
+    rerenderIfActive();
+  }
 }
 
 function normalizeSessionTranscript(messages) {
@@ -725,7 +855,7 @@ async function sendMessage() {
     const payload = await chatViewState.apiClient.post("/v1/chat/messages", {
       user_id: CHAT_DEFAULTS.userID,
       room_id: CHAT_DEFAULTS.roomID,
-      agent_id: CHAT_DEFAULTS.agentID,
+      agent_id: safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID,
       message,
     });
 
@@ -854,14 +984,40 @@ function renderChatPage() {
   composerActions.className = "chat-composer-actions";
   const defaultsMeta = document.createElement("span");
   defaultsMeta.className = "muted";
-  defaultsMeta.textContent = `Defaults: ${CHAT_DEFAULTS.userID} / ${CHAT_DEFAULTS.roomID} / ${CHAT_DEFAULTS.agentID}`;
+  defaultsMeta.textContent = `Context: ${CHAT_DEFAULTS.userID} / ${CHAT_DEFAULTS.roomID} / ${safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID}`;
+
+  const agentPicker = document.createElement("select");
+  agentPicker.className = "settings-select";
+  chatViewState.availableAgents.forEach((agentID) => {
+    const option = document.createElement("option");
+    option.value = agentID;
+    option.textContent = agentID;
+    option.selected = agentID === (safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID);
+    agentPicker.append(option);
+  });
+  agentPicker.addEventListener("change", () => {
+    void switchAgent(agentPicker.value);
+  });
+  agentPicker.disabled = chatViewState.switchAgentPending || chatViewState.sendPending;
+
+  const refreshAgentsButton = document.createElement("button");
+  refreshAgentsButton.type = "button";
+  refreshAgentsButton.className = "layout-toggle";
+  refreshAgentsButton.textContent = "Refresh agents";
+  refreshAgentsButton.addEventListener("click", () => {
+    void (async () => {
+      await refreshAvailableAgents();
+      rerenderIfActive();
+    })();
+  });
+  refreshAgentsButton.disabled = chatViewState.switchAgentPending;
 
   const sendButton = document.createElement("button");
   sendButton.type = "submit";
   sendButton.className = "chat-send-button";
   sendButton.textContent = chatViewState.sendPending ? "Sending..." : "Send";
   sendButton.disabled = chatViewState.sendPending;
-  composerActions.append(defaultsMeta, sendButton);
+  composerActions.append(defaultsMeta, agentPicker, refreshAgentsButton, sendButton);
 
   if (chatViewState.sendError) {
     const sendError = document.createElement("p");
@@ -872,12 +1028,58 @@ function renderChatPage() {
     composer.append(input, composerActions);
   }
 
+  if (chatViewState.switchAgentError) {
+    const switchError = document.createElement("p");
+    switchError.className = "chat-send-error";
+    switchError.textContent = `Agent switch failed: ${chatViewState.switchAgentError}`;
+    composer.append(switchError);
+  }
+
   transcriptPane.append(transcriptTitle, transcript, composer);
 
   const activityPane = document.createElement("aside");
   activityPane.className = "chat-activity-pane";
   const activityTitle = document.createElement("h3");
   activityTitle.textContent = "Live Activity";
+
+  const agentControlCard = document.createElement("section");
+  agentControlCard.className = "chat-activity-card";
+  const agentControlTitle = document.createElement("h4");
+  agentControlTitle.textContent = "Agent Control";
+  const selectedMeta = document.createElement("p");
+  selectedMeta.className = "chat-activity-meta";
+  selectedMeta.textContent = `Selected: ${safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID} · Active pointer: ${safeText(chatViewState.activeAgentID) || "-"}`;
+  const profileContext = chatViewState.agentProfileContext || {};
+  const profileInfo = document.createElement("p");
+  profileInfo.className = "muted";
+  const profileEnabled =
+    typeof profileContext.enabled === "boolean" ? String(profileContext.enabled) : "(inherit true)";
+  const profileSelfImprovement =
+    typeof profileContext.self_improvement === "boolean" ? String(profileContext.self_improvement) : "false";
+  const hasProfile = Boolean(profileContext.exists);
+  profileInfo.textContent = `Profile: ${hasProfile ? "explicit" : "inherited"} · enabled=${profileEnabled} · self_improvement=${profileSelfImprovement}`;
+  const modelInfo = document.createElement("p");
+  modelInfo.className = "muted";
+  const provider = safeText(profileContext.model_provider);
+  const name = safeText(profileContext.model_name);
+  const maxTokens = Number(profileContext.model_max_tokens) || 0;
+  if (provider || name || maxTokens > 0) {
+    modelInfo.textContent = `Model override: ${provider || "(provider unset)"} / ${name || "(name unset)"}${maxTokens > 0 ? ` · max_tokens ${maxTokens}` : ""}`;
+  } else {
+    modelInfo.textContent = "Model override: none (uses global model).";
+  }
+  const globalInfo = document.createElement("p");
+  globalInfo.className = "muted";
+  const globalConfig = chatViewState.agentGlobalConfig || {};
+  globalInfo.textContent = `Global: model_overrides=${String(Boolean(globalConfig.allow_agent_model_overrides))} · inter_agent_messaging=${String(Boolean(globalConfig.allow_inter_agent_messaging))} · self_improvement_global=${String(Boolean(globalConfig.self_improvement_enabled))}`;
+  const openSettingsButton = document.createElement("button");
+  openSettingsButton.type = "button";
+  openSettingsButton.className = "layout-toggle";
+  openSettingsButton.textContent = "Edit profile in Settings";
+  openSettingsButton.addEventListener("click", () => {
+    window.location.hash = settingsProfileHash(chatViewState.selectedAgentID);
+  });
+  agentControlCard.append(agentControlTitle, selectedMeta, profileInfo, modelInfo, globalInfo, openSettingsButton);
 
   const runID = safeText(chatViewState.currentRunID);
   const status = safeText(chatViewState.currentRunStatus) || "idle";
@@ -950,7 +1152,7 @@ function renderChatPage() {
     riskCard.append(reasonList);
   }
 
-  activityPane.append(activityTitle, runMeta, sessionMeta, latestToolCard, errorCard, riskCard);
+  activityPane.append(activityTitle, agentControlCard, runMeta, sessionMeta, latestToolCard, errorCard, riskCard);
 
   page.append(transcriptPane, activityPane);
   container.append(heading, note, page);
@@ -986,6 +1188,7 @@ export const chatPage = {
     chatViewState.apiClient = apiClient;
     chatViewState.store = store;
 
+    await refreshAvailableAgents();
     renderChatPage();
     startIdleSessionWatch();
 

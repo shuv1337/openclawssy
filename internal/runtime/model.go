@@ -48,47 +48,55 @@ const (
 )
 
 var toolNameAliases = map[string]string{
-	"fs.read":          "fs.read",
-	"fs.list":          "fs.list",
-	"fs.write":         "fs.write",
-	"fs.append":        "fs.append",
-	"fs.delete":        "fs.delete",
-	"fs.move":          "fs.move",
-	"fs.rename":        "fs.move",
-	"fs.edit":          "fs.edit",
-	"code.search":      "code.search",
-	"config.get":       "config.get",
-	"config.set":       "config.set",
-	"secrets.get":      "secrets.get",
-	"secrets.set":      "secrets.set",
-	"secrets.list":     "secrets.list",
-	"skill.list":       "skill.list",
-	"skill.read":       "skill.read",
-	"skill.get":        "skill.read",
-	"scheduler.list":   "scheduler.list",
-	"scheduler.add":    "scheduler.add",
-	"scheduler.remove": "scheduler.remove",
-	"scheduler.pause":  "scheduler.pause",
-	"scheduler.resume": "scheduler.resume",
-	"session.list":     "session.list",
-	"session.close":    "session.close",
-	"agent.list":       "agent.list",
-	"agent.create":     "agent.create",
-	"agent.switch":     "agent.switch",
-	"policy.list":      "policy.list",
-	"policy.grant":     "policy.grant",
-	"policy.revoke":    "policy.revoke",
-	"run.list":         "run.list",
-	"run.get":          "run.get",
-	"run.cancel":       "run.cancel",
-	"metrics.get":      "metrics.get",
-	"http.request":     "http.request",
-	"net.fetch":        "http.request",
-	"time.now":         "time.now",
-	"shell.exec":       "shell.exec",
-	"bash.exec":        "shell.exec",
-	"terminal.exec":    "shell.exec",
-	"terminal.run":     "shell.exec",
+	"fs.read":              "fs.read",
+	"fs.list":              "fs.list",
+	"fs.write":             "fs.write",
+	"fs.append":            "fs.append",
+	"fs.delete":            "fs.delete",
+	"fs.move":              "fs.move",
+	"fs.rename":            "fs.move",
+	"fs.edit":              "fs.edit",
+	"code.search":          "code.search",
+	"config.get":           "config.get",
+	"config.set":           "config.set",
+	"secrets.get":          "secrets.get",
+	"secrets.set":          "secrets.set",
+	"secrets.list":         "secrets.list",
+	"skill.list":           "skill.list",
+	"skill.read":           "skill.read",
+	"skill.get":            "skill.read",
+	"scheduler.list":       "scheduler.list",
+	"scheduler.add":        "scheduler.add",
+	"scheduler.remove":     "scheduler.remove",
+	"scheduler.pause":      "scheduler.pause",
+	"scheduler.resume":     "scheduler.resume",
+	"session.list":         "session.list",
+	"session.close":        "session.close",
+	"agent.list":           "agent.list",
+	"agent.create":         "agent.create",
+	"agent.switch":         "agent.switch",
+	"agent.profile.get":    "agent.profile.get",
+	"agent.profile.set":    "agent.profile.set",
+	"agent.message.send":   "agent.message.send",
+	"agent.message.inbox":  "agent.message.inbox",
+	"agent.run":            "agent.run",
+	"agent.prompt.read":    "agent.prompt.read",
+	"agent.prompt.update":  "agent.prompt.update",
+	"agent.prompt.suggest": "agent.prompt.suggest",
+	"policy.list":          "policy.list",
+	"policy.grant":         "policy.grant",
+	"policy.revoke":        "policy.revoke",
+	"run.list":             "run.list",
+	"run.get":              "run.get",
+	"run.cancel":           "run.cancel",
+	"metrics.get":          "metrics.get",
+	"http.request":         "http.request",
+	"net.fetch":            "http.request",
+	"time.now":             "time.now",
+	"shell.exec":           "shell.exec",
+	"bash.exec":            "shell.exec",
+	"terminal.exec":        "shell.exec",
+	"terminal.run":         "shell.exec",
 }
 
 var toolNotAllowedReasonRE = regexp.MustCompile(`tool "([^"]+)" not allowed`)
@@ -96,7 +104,11 @@ var toolNotAllowedReasonRE = regexp.MustCompile(`tool "([^"]+)" not allowed`)
 type SecretLookup func(name string) (string, bool, error)
 
 func NewProviderModel(cfg config.Config, lookup SecretLookup) (*ProviderModel, error) {
-	pName := strings.ToLower(strings.TrimSpace(cfg.Model.Provider))
+	return NewProviderModelForConfig(cfg, cfg.Model, lookup)
+}
+
+func NewProviderModelForConfig(cfg config.Config, modelCfg config.ModelConfig, lookup SecretLookup) (*ProviderModel, error) {
+	pName := strings.ToLower(strings.TrimSpace(modelCfg.Provider))
 	endpoint, err := providerEndpoint(cfg, pName)
 	if err != nil {
 		return nil, err
@@ -127,14 +139,14 @@ func NewProviderModel(cfg config.Config, lookup SecretLookup) (*ProviderModel, e
 		headers[k] = v
 	}
 
-	responseMaxTokens := cfg.Model.MaxTokens
+	responseMaxTokens := modelCfg.MaxTokens
 	if responseMaxTokens <= 0 || responseMaxTokens > maxResponseTokens {
 		responseMaxTokens = maxResponseTokens
 	}
 
 	return &ProviderModel{
 		providerName:      pName,
-		modelName:         cfg.Model.Name,
+		modelName:         modelCfg.Name,
 		baseURL:           base,
 		apiKey:            apiKey,
 		headers:           headers,

@@ -68,6 +68,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/scheduler/control", h.handleSchedulerControl)
 	mux.HandleFunc("/api/admin/chat/sessions", h.listChatSessions)
 	mux.HandleFunc("/api/admin/chat/sessions/", h.chatSessionMessages)
+	mux.HandleFunc("/api/admin/agents", h.handleAgents)
 	mux.HandleFunc("/api/admin/agent/docs", h.handleAgentDocs)
 	mux.HandleFunc("/api/admin/debug/runs/", h.getRunTrace)
 }
@@ -500,6 +501,143 @@ func (h *Handler) chatSessionMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"session_id": sessionID, "messages": msgs})
+}
+
+func (h *Handler) handleAgents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	store, err := chatstore.NewStore(filepath.Join(h.rootDir, ".openclawssy", "agents"))
+	if err != nil {
+		http.Error(w, "failed to open chat store", http.StatusInternalServerError)
+		return
+	}
+
+	channel := ""
+	userID := ""
+	roomID := ""
+	selectedAgentID := ""
+	targetAgentID := ""
+	if r.Method == http.MethodGet {
+		channel = strings.TrimSpace(r.URL.Query().Get("channel"))
+		userID = strings.TrimSpace(r.URL.Query().Get("user_id"))
+		roomID = strings.TrimSpace(r.URL.Query().Get("room_id"))
+		selectedAgentID = strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	} else {
+		var req struct {
+			Channel string `json:"channel"`
+			UserID  string `json:"user_id"`
+			RoomID  string `json:"room_id"`
+			AgentID string `json:"agent_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		channel = strings.TrimSpace(req.Channel)
+		userID = strings.TrimSpace(req.UserID)
+		roomID = strings.TrimSpace(req.RoomID)
+		targetAgentID = strings.TrimSpace(req.AgentID)
+		selectedAgentID = targetAgentID
+	}
+
+	if channel == "" {
+		channel = "dashboard"
+	}
+	if userID == "" {
+		userID = "dashboard_user"
+	}
+	if roomID == "" {
+		roomID = "dashboard"
+	}
+
+	if r.Method == http.MethodPost {
+		normalizedAgentID, normErr := normalizeDashboardAgentID(targetAgentID)
+		if normErr != nil {
+			http.Error(w, normErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := store.SetActiveAgentPointer(channel, userID, roomID, normalizedAgentID); err != nil {
+			http.Error(w, "failed to set active agent", http.StatusInternalServerError)
+			return
+		}
+		targetAgentID = normalizedAgentID
+		selectedAgentID = normalizedAgentID
+	}
+
+	if selectedAgentID != "" {
+		normalizedAgentID, normErr := normalizeDashboardAgentID(selectedAgentID)
+		if normErr != nil {
+			http.Error(w, normErr.Error(), http.StatusBadRequest)
+			return
+		}
+		selectedAgentID = normalizedAgentID
+	}
+
+	active := ""
+	if agentID, err := store.GetActiveAgentPointer(channel, userID, roomID); err == nil {
+		active = agentID
+	}
+	if active == "" {
+		active = targetAgentID
+	}
+	if selectedAgentID == "" {
+		selectedAgentID = active
+	}
+	if selectedAgentID == "" {
+		selectedAgentID = "default"
+	}
+
+	profileContext := map[string]any{
+		"agent_id":         selectedAgentID,
+		"exists":           false,
+		"enabled":          true,
+		"self_improvement": false,
+		"model_provider":   "",
+		"model_name":       "",
+		"model_max_tokens": 0,
+		"model_override":   false,
+	}
+	agentsConfig := map[string]any{}
+	cfgPath := filepath.Join(h.rootDir, ".openclawssy", "config.json")
+	if cfg, err := config.LoadOrDefault(cfgPath); err == nil {
+		agentsConfig = map[string]any{
+			"allow_inter_agent_messaging": cfg.Agents.AllowInterAgentMessaging,
+			"allow_agent_model_overrides": cfg.Agents.AllowAgentModelOverrides,
+			"self_improvement_enabled":    cfg.Agents.SelfImprovementEnabled,
+			"enabled_agent_ids":           cfg.Agents.EnabledAgentIDs,
+		}
+		if profile, ok := cfg.Agents.Profiles[selectedAgentID]; ok {
+			profileContext["exists"] = true
+			if profile.Enabled != nil {
+				profileContext["enabled"] = *profile.Enabled
+			}
+			profileContext["self_improvement"] = profile.SelfImprovement
+			if provider := strings.TrimSpace(profile.Model.Provider); provider != "" {
+				profileContext["model_provider"] = provider
+				profileContext["model_override"] = true
+			}
+			if name := strings.TrimSpace(profile.Model.Name); name != "" {
+				profileContext["model_name"] = name
+				profileContext["model_override"] = true
+			}
+			if profile.Model.MaxTokens > 0 {
+				profileContext["model_max_tokens"] = profile.Model.MaxTokens
+				profileContext["model_override"] = true
+			}
+		}
+	}
+	writeJSON(w, map[string]any{
+		"agents":          h.listDashboardAgentIDs(),
+		"active_agent":    active,
+		"selected_agent":  selectedAgentID,
+		"channel":         channel,
+		"user_id":         userID,
+		"room_id":         roomID,
+		"profile_context": profileContext,
+		"agents_config":   agentsConfig,
+	})
 }
 
 func (h *Handler) handleAgentDocs(w http.ResponseWriter, r *http.Request) {

@@ -40,6 +40,8 @@ type CoreOptions struct {
 	DefaultGrants   []string
 	RunsPath        string
 	RunTracker      RunCanceller
+	WorkspaceRoot   string
+	AgentRunner     AgentRunner
 }
 
 func RegisterCore(reg *Registry) error {
@@ -89,7 +91,7 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := registerSessionTools(reg, opts.ChatstorePath); err != nil {
 		return err
 	}
-	if err := registerAgentTools(reg, opts.AgentsPath, opts.ConfigPath); err != nil {
+	if err := registerAgentTools(reg, opts.AgentsPath, opts.ConfigPath, opts.WorkspaceRoot, opts.AgentRunner); err != nil {
 		return err
 	}
 	if err := registerPolicyTools(reg, opts.PolicyPath, opts.DefaultGrants); err != nil {

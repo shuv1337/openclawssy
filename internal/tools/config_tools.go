@@ -214,6 +214,30 @@ func applyConfigFieldUpdate(cfg *config.Config, field string, value any) error {
 			return errors.New("shell.enable_exec cannot be true when sandbox.active is false")
 		}
 		cfg.Shell.EnableExec = b
+	case "agents.self_improvement_enabled":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.SelfImprovementEnabled = b
+	case "agents.allow_inter_agent_messaging":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.AllowInterAgentMessaging = b
+	case "agents.allow_agent_model_overrides":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.AllowAgentModelOverrides = b
+	case "agents.enabled_agent_ids":
+		items, err := requireStringSlice(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.EnabledAgentIDs = items
 	default:
 		return fmt.Errorf("field is not mutable: %s", field)
 	}
@@ -247,6 +271,14 @@ func configGetField(cfg config.Config, field string) (any, bool) {
 		return cfg.Network.AllowLocalhosts, true
 	case "shell.enable_exec":
 		return cfg.Shell.EnableExec, true
+	case "agents.self_improvement_enabled":
+		return cfg.Agents.SelfImprovementEnabled, true
+	case "agents.allow_inter_agent_messaging":
+		return cfg.Agents.AllowInterAgentMessaging, true
+	case "agents.allow_agent_model_overrides":
+		return cfg.Agents.AllowAgentModelOverrides, true
+	case "agents.enabled_agent_ids":
+		return cfg.Agents.EnabledAgentIDs, true
 	case "config":
 		return cfg, true
 	default:

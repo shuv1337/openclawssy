@@ -418,6 +418,100 @@ func TestListChatSessionsEndpointPagination(t *testing.T) {
 	}
 }
 
+func TestAdminAgentsEndpointListAndSetActive(t *testing.T) {
+	root := t.TempDir()
+	enabled := true
+	cfg := config.Default()
+	cfg.Agents.AllowInterAgentMessaging = true
+	cfg.Agents.AllowAgentModelOverrides = true
+	cfg.Agents.SelfImprovementEnabled = true
+	cfg.Agents.Profiles = map[string]config.AgentProfile{
+		"alpha": {
+			Enabled:         &enabled,
+			SelfImprovement: true,
+			Model: config.ModelConfig{
+				Provider:  "openai",
+				Name:      "gpt-4.1-mini",
+				MaxTokens: 1024,
+			},
+		},
+	}
+	if err := config.Save(filepath.Join(root, ".openclawssy", "config.json"), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	store, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	if _, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"}); err != nil {
+		t.Fatalf("create default session: %v", err)
+	}
+	if _, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "alpha", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"}); err != nil {
+		t.Fatalf("create alpha session: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/admin/agents?channel=dashboard&user_id=dashboard_user&room_id=dashboard", nil)
+	listResp := httptest.NewRecorder()
+	mux.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list agents status 200, got %d (%s)", listResp.Code, listResp.Body.String())
+	}
+	var listed map[string]any
+	if err := json.Unmarshal(listResp.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list payload: %v", err)
+	}
+	if listed["selected_agent"] != "default" {
+		t.Fatalf("expected selected_agent default on first list, got %#v", listed["selected_agent"])
+	}
+
+	setReq := httptest.NewRequest(http.MethodPost, "/api/admin/agents", bytes.NewBufferString(`{"channel":"dashboard","user_id":"dashboard_user","room_id":"dashboard","agent_id":"alpha"}`))
+	setReq.Header.Set("Content-Type", "application/json")
+	setResp := httptest.NewRecorder()
+	mux.ServeHTTP(setResp, setReq)
+	if setResp.Code != http.StatusOK {
+		t.Fatalf("expected set active agent status 200, got %d (%s)", setResp.Code, setResp.Body.String())
+	}
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "/api/admin/agents?channel=dashboard&user_id=dashboard_user&room_id=dashboard", nil)
+	verifyResp := httptest.NewRecorder()
+	mux.ServeHTTP(verifyResp, verifyReq)
+	if verifyResp.Code != http.StatusOK {
+		t.Fatalf("expected verify status 200, got %d", verifyResp.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(verifyResp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode verify payload: %v", err)
+	}
+	if payload["active_agent"] != "alpha" {
+		t.Fatalf("expected active_agent alpha, got %#v", payload["active_agent"])
+	}
+	if payload["selected_agent"] != "alpha" {
+		t.Fatalf("expected selected_agent alpha, got %#v", payload["selected_agent"])
+	}
+	profileContext, ok := payload["profile_context"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected profile_context object, got %#v", payload["profile_context"])
+	}
+	if profileContext["agent_id"] != "alpha" || profileContext["exists"] != true {
+		t.Fatalf("unexpected profile context header: %#v", profileContext)
+	}
+	if profileContext["model_provider"] != "openai" || profileContext["model_name"] != "gpt-4.1-mini" {
+		t.Fatalf("expected profile model override fields, got %#v", profileContext)
+	}
+	agentsConfig, ok := payload["agents_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected agents_config object, got %#v", payload["agents_config"])
+	}
+	if agentsConfig["allow_agent_model_overrides"] != true || agentsConfig["self_improvement_enabled"] != true {
+		t.Fatalf("unexpected agents_config payload: %#v", agentsConfig)
+	}
+}
+
 func TestListChatSessionsEndpointInvalidLimit(t *testing.T) {
 	root := t.TempDir()
 	h := New(root, httpchannel.NewInMemoryRunStore())

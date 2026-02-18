@@ -454,6 +454,92 @@ func (s *Store) SetActiveSessionPointer(agentID, channel, userID, roomID, sessio
 	})
 }
 
+func (s *Store) SetActiveAgentPointer(channel, userID, roomID, agentID string) error {
+	if err := validateSegment("channel", channel); err != nil {
+		return err
+	}
+	if err := validateSegment("user_id", userID); err != nil {
+		return err
+	}
+	if err := validateSegment("room_id", roomID); err != nil {
+		return err
+	}
+	if err := validateSegment("agent_id", agentID); err != nil {
+		return err
+	}
+
+	path := s.activeAgentPointerPath(channel, userID, roomID)
+	payload := map[string]string{"agent_id": agentID}
+	return withCrossProcessLock(path+".lock", lockAcquireTimeout, func() error {
+		return writeJSONFile(path, payload)
+	})
+}
+
+func (s *Store) GetActiveAgentPointer(channel, userID, roomID string) (string, error) {
+	if err := validateSegment("channel", channel); err != nil {
+		return "", err
+	}
+	if err := validateSegment("user_id", userID); err != nil {
+		return "", err
+	}
+	if err := validateSegment("room_id", roomID); err != nil {
+		return "", err
+	}
+
+	path := s.activeAgentPointerPath(channel, userID, roomID)
+	lockPath := path + ".lock"
+	var b []byte
+	if err := withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		readBytes, err := readFileWithBackup(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ErrSessionNotFound
+			}
+			return fmt.Errorf("chatstore: read active agent pointer: %w", err)
+		}
+		b = readBytes
+		return nil
+	}); err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return "", ErrSessionNotFound
+		}
+		return "", err
+	}
+	var payload struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return "", fmt.Errorf("chatstore: parse active agent pointer: %w", err)
+	}
+	if strings.TrimSpace(payload.AgentID) == "" {
+		return "", ErrSessionNotFound
+	}
+	return payload.AgentID, nil
+}
+
+func (s *Store) ListAgents() ([]string, error) {
+	entries, err := os.ReadDir(s.agentsRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || strings.HasPrefix(name, "_") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *Store) GetActiveSessionPointer(agentID, channel, userID, roomID string) (string, error) {
 	if err := validateSegment("agent_id", agentID); err != nil {
 		return "", err
@@ -536,6 +622,10 @@ func (s *Store) chatRoot(agentID string) string {
 
 func (s *Store) activePointerPath(agentID, channel, userID, roomID string) string {
 	return filepath.Join(s.chatRoot(agentID), "_active", channel, userID, roomID+".json")
+}
+
+func (s *Store) activeAgentPointerPath(channel, userID, roomID string) string {
+	return filepath.Join(s.agentsRoot, "_routing", "active_agents", channel, userID, roomID+".json")
 }
 
 func (s *Store) sessionDirByIDLocked(sessionID string) (string, error) {
