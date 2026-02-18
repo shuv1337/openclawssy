@@ -91,6 +91,61 @@ func TestRunnerBasicLoopWithTools(t *testing.T) {
 	}
 }
 
+func TestRunnerRepromptsWhenModelDefersWithoutToolCall(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{FinalText: "Let me check that right now."},
+		{ToolCalls: []ToolCallRequest{{ID: "call-1", Name: "secrets.get", Arguments: []byte(`{"name":"PERPLEXITY_API_KEY"}`)}}},
+		{FinalText: "I checked it and the key exists."},
+	}}
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"call-1": {ID: "call-1", Output: `{"ok":true}`},
+	}}
+
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 8}
+	out, err := runner.Run(context.Background(), RunInput{
+		Message:      "can you verify the perplexity key",
+		AllowedTools: []string{"secrets.get"},
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "I checked it and the key exists." {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call after reprompt, got %d", len(out.ToolCalls))
+	}
+	if len(model.reqs) != 3 {
+		t.Fatalf("expected 3 model requests including reprompt, got %d", len(model.reqs))
+	}
+	if !strings.Contains(model.reqs[1].SystemPrompt, "ACTION_EXECUTION_MODE") {
+		t.Fatalf("expected follow-through directive in reprompt, got %q", model.reqs[1].SystemPrompt)
+	}
+}
+
+func TestRunnerReplacesRepeatedDeferralWithConcreteFallback(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{FinalText: "Let me check that right now."},
+		{FinalText: "Okay, let me do that now."},
+		{FinalText: "Let me actually execute it."},
+	}}
+	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 8}
+
+	out, err := runner.Run(context.Background(), RunInput{
+		Message:      "please verify the key",
+		AllowedTools: []string{"secrets.get"},
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !strings.Contains(out.FinalText, "did not complete an actionable step") {
+		t.Fatalf("expected non-actionable fallback final text, got %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls in fallback case, got %d", len(out.ToolCalls))
+	}
+}
+
 func TestRunnerPassesRunMetadataAndContextToModelRequests(t *testing.T) {
 	history := []ChatMessage{
 		{Role: "user", Content: "first question"},

@@ -74,6 +74,8 @@ const (
 	maxSessionContextMessageCap    = 200
 	maxParseDiagnosticSnippetChars = 260
 	maxParseDiagnosticReasonChars  = 180
+	defaultRunTimeout              = 20 * time.Minute
+	maxRunErrorUserMessageChars    = 320
 )
 
 type RunLimitError struct {
@@ -192,8 +194,15 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	runID := fmt.Sprintf("run_%d", time.Now().UTC().UnixNano())
 
 	// Create cancellable context for this run and track it
-	runCtx, cancelRun := context.WithCancel(ctx)
+	runCtxBase, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	runCtx := runCtxBase
+	runTimeout := resolveRunTimeout(cfg.Engine)
+	cancelTimeout := func() {}
+	if runTimeout > 0 {
+		runCtx, cancelTimeout = context.WithTimeout(runCtxBase, runTimeout)
+	}
+	defer cancelTimeout()
 	if e.runTracker != nil {
 		e.runTracker.Track(runID, cancelRun)
 		defer e.runTracker.Remove(runID)
@@ -375,6 +384,11 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		}
 	}
 	logToolCallbackFailures(runCtx, aud, runID, agentID, out.ToolCalls, source, sessionID)
+	if runErr != nil && sessionID != "" {
+		if err := e.appendRunFailureConversation(sessionID, runID, out, appendToolsAfterRun, runErr); err != nil {
+			log.Printf("runtime: failed to append run failure conversation (run=%s session=%s): %v", runID, sessionID, err)
+		}
+	}
 
 	fields := map[string]any{"run_id": runID, "agent_id": agentID}
 	if source != "" {
@@ -453,6 +467,84 @@ func sanitizedPersistedThinking(thinking string, present bool, maxChars int) (st
 		redacted = strings.TrimSpace(truncateRunes(redacted, maxChars)) + "..."
 	}
 	return redacted, true
+}
+
+func resolveRunTimeout(engineCfg config.EngineConfig) time.Duration {
+	defaultMS := engineCfg.DefaultRunTimeoutMS
+	maxMS := engineCfg.MaxRunTimeoutMS
+
+	if maxMS > 0 && defaultMS > maxMS {
+		defaultMS = maxMS
+	}
+	if defaultMS <= 0 {
+		if maxMS > 0 {
+			defaultMS = maxMS
+		} else {
+			defaultMS = int(defaultRunTimeout / time.Millisecond)
+		}
+	}
+	if maxMS > 0 && defaultMS > maxMS {
+		defaultMS = maxMS
+	}
+	if defaultMS <= 0 {
+		return 0
+	}
+
+	return time.Duration(defaultMS) * time.Millisecond
+}
+
+func (e *Engine) appendRunFailureConversation(sessionID, runID string, out agent.RunOutput, includeToolMessages bool, runErr error) error {
+	failureMessage := strings.TrimSpace(out.FinalText)
+	if failureMessage == "" {
+		failureMessage = formatRunFailureUserMessage(runErr)
+	} else {
+		errSummary := summarizeRunErrorForUser(runErr)
+		if errSummary != "" {
+			failureMessage += "\n\nI also hit an error and need your attention:\n" + errSummary
+		}
+	}
+	if strings.TrimSpace(failureMessage) == "" {
+		return nil
+	}
+
+	out.FinalText = failureMessage
+	return e.appendRunConversation(sessionID, runID, out, includeToolMessages)
+}
+
+func summarizeRunErrorForUser(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := policy.RedactString(strings.TrimSpace(err.Error()))
+	if text == "" {
+		return ""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > maxRunErrorUserMessageChars {
+		if maxRunErrorUserMessageChars <= 3 {
+			return text[:maxRunErrorUserMessageChars]
+		}
+		return strings.TrimSpace(text[:maxRunErrorUserMessageChars-3]) + "..."
+	}
+	return text
+}
+
+func formatRunFailureUserMessage(err error) string {
+	summary := summarizeRunErrorForUser(err)
+	lower := strings.ToLower(summary)
+	isTimeout := errors.Is(err, context.DeadlineExceeded) || strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded")
+
+	if isTimeout {
+		if summary == "" {
+			summary = "run timed out"
+		}
+		return "I ran into a timeout while working on that and need your attention.\n\nPlease reply with one of:\n- \"retry\" to try again\n- a narrower request\n- config/secrets changes if needed\n\nDetails: " + summary
+	}
+
+	if summary == "" {
+		summary = "run failed"
+	}
+	return "I hit an error and need your attention before I can continue.\n\nDetails: " + summary + "\n\nReply \"retry\" if you want me to try again."
 }
 
 func (e *Engine) acquireRunSlot(limit int) (func(), error) {

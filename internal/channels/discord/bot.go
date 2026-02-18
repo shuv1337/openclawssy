@@ -142,7 +142,9 @@ func (b *Bot) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-	_, _ = s.ChannelMessageSendReply(m.ChannelID, "queued run `"+res.ID+"`", m.Reference())
+	if strings.TrimSpace(res.Response) == "" {
+		_, _ = s.ChannelMessageSendReply(m.ChannelID, "queued run `"+res.ID+"`", m.Reference())
+	}
 	if b.runStatus == nil {
 		return
 	}

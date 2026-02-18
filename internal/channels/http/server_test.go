@@ -397,3 +397,43 @@ func TestServer_ChatRejectsInvalidThinkingMode(t *testing.T) {
 		t.Fatalf("unexpected error code: %#v", resp)
 	}
 }
+
+func TestServer_AuthAllowsOnlyDashboardGetHeadPathsWithoutToken(t *testing.T) {
+	s := NewServer(Config{
+		BearerToken: "secret",
+		Store:       NewInMemoryRunStore(),
+		RegisterMux: func(mux *http.ServeMux) {
+			mux.HandleFunc("/dashboard", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+			mux.HandleFunc("/dashboard-legacy", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+			mux.HandleFunc("/dashboard/static/app.js", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+		},
+	})
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		want   int
+	}{
+		{name: "dashboard get allowed", method: http.MethodGet, path: "/dashboard", want: http.StatusOK},
+		{name: "dashboard head allowed", method: http.MethodHead, path: "/dashboard", want: http.StatusOK},
+		{name: "dashboard legacy get allowed", method: http.MethodGet, path: "/dashboard-legacy", want: http.StatusOK},
+		{name: "dashboard static get allowed", method: http.MethodGet, path: "/dashboard/static/app.js", want: http.StatusOK},
+		{name: "dashboard static head allowed", method: http.MethodHead, path: "/dashboard/static/app.js", want: http.StatusOK},
+		{name: "dashboard post blocked", method: http.MethodPost, path: "/dashboard", want: http.StatusUnauthorized},
+		{name: "dashboard legacy post blocked", method: http.MethodPost, path: "/dashboard-legacy", want: http.StatusUnauthorized},
+		{name: "dashboard static post blocked", method: http.MethodPost, path: "/dashboard/static/app.js", want: http.StatusUnauthorized},
+		{name: "other path blocked", method: http.MethodGet, path: "/api/admin/status", want: http.StatusUnauthorized},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rr := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rr, req)
+			if rr.Code != tc.want {
+				t.Fatalf("expected %d, got %d", tc.want, rr.Code)
+			}
+		})
+	}
+}

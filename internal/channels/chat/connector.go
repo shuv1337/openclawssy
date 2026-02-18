@@ -158,7 +158,24 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		return Result{}, err
 	}
 
-	return Result{ID: queued.ID, Status: queued.Status, SessionID: session.SessionID}, nil
+	return Result{
+		ID:        queued.ID,
+		Status:    queued.Status,
+		SessionID: session.SessionID,
+		Response:  queuedStatusMessage(queued.ID, queued.Status),
+	}, nil
+}
+
+func queuedStatusMessage(runID, status string) string {
+	runID = strings.TrimSpace(runID)
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "queued"
+	}
+	if runID == "" {
+		return "Working on it now. I will follow up here when it completes or if it fails."
+	}
+	return "Working on it now. Run " + runID + " is " + status + ". I will follow up here when it completes or if it fails."
 }
 
 func (c *Connector) createAndSetActiveSession(agentID, source, userID, roomID string) (chatstore.Session, error) {

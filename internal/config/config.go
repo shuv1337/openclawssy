@@ -157,7 +157,9 @@ func Default() Config {
 			Provider: "none",
 		},
 		Engine: EngineConfig{
-			MaxConcurrentRuns: 64,
+			MaxConcurrentRuns:   64,
+			DefaultRunTimeoutMS: 20 * 60 * 1000,
+			MaxRunTimeoutMS:     2 * 60 * 60 * 1000,
 		},
 		Scheduler: SchedulerConfig{
 			CatchUp:           true,
@@ -360,6 +362,21 @@ func (c Config) Validate() error {
 	}
 	if c.Engine.MaxConcurrentRuns < 1 || c.Engine.MaxConcurrentRuns > 10000 {
 		return errors.New("engine.max_concurrent_runs must be between 1 and 10000")
+	}
+	if c.Engine.DefaultRunTimeoutMS < 0 {
+		return errors.New("engine.default_run_timeout_ms must be >= 0")
+	}
+	if c.Engine.MaxRunTimeoutMS < 0 {
+		return errors.New("engine.max_run_timeout_ms must be >= 0")
+	}
+	if c.Engine.DefaultRunTimeoutMS > 0 && (c.Engine.DefaultRunTimeoutMS < 1000 || c.Engine.DefaultRunTimeoutMS > 24*60*60*1000) {
+		return errors.New("engine.default_run_timeout_ms must be between 1000 and 86400000 when set")
+	}
+	if c.Engine.MaxRunTimeoutMS > 0 && (c.Engine.MaxRunTimeoutMS < 1000 || c.Engine.MaxRunTimeoutMS > 24*60*60*1000) {
+		return errors.New("engine.max_run_timeout_ms must be between 1000 and 86400000 when set")
+	}
+	if c.Engine.MaxRunTimeoutMS > 0 && c.Engine.DefaultRunTimeoutMS > 0 && c.Engine.DefaultRunTimeoutMS > c.Engine.MaxRunTimeoutMS {
+		return errors.New("engine.default_run_timeout_ms cannot exceed engine.max_run_timeout_ms")
 	}
 	if c.Scheduler.MaxConcurrentJobs < 1 || c.Scheduler.MaxConcurrentJobs > 1000 {
 		return errors.New("scheduler.max_concurrent_jobs must be between 1 and 1000")

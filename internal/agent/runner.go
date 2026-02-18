@@ -21,6 +21,7 @@ const (
 	repeatedNoProgressLoopCapTrigger = 6
 	failureRecoveryTrigger           = 2
 	failureGuidanceEscalation        = 3
+	followThroughRepromptCap         = 2
 )
 
 // Runner executes the model/tool loop for a single run.
@@ -78,6 +79,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	latestThinking := ""
 	thinkingPresent := false
 	toolParseFailure := false
+	followThroughReprompts := 0
 
 	registerToolOutcome := func(errText string) {
 		if strings.TrimSpace(errText) == "" {
@@ -118,6 +120,9 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		if failureRecoveryActive {
 			systemPrompt = appendPromptDirective(systemPrompt, "# ERROR_RECOVERY_MODE\n- Recent tool calls failed. Analyze the latest errors and outputs before choosing the next action.\n- Try a materially different approach to resolve the error.\n- Do not repeat the same failing command/arguments unless you explain why it should now work.")
 		}
+		if followThroughReprompts > 0 {
+			systemPrompt = appendPromptDirective(systemPrompt, "# ACTION_EXECUTION_MODE\n- You previously replied with intent to act but did not execute.\n- In this turn, either call required tools now or provide a concrete final answer from existing evidence.\n- Do not defer with phrases like 'let me check' or promise future action without execution.")
+		}
 
 		resp, err := r.Model.Generate(ctx, ModelRequest{
 			AgentID:       input.AgentID,
@@ -153,6 +158,21 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			if shouldForceFollowThrough(resp.FinalText, input.AllowedTools, toolResults) {
+				if followThroughReprompts < followThroughRepromptCap {
+					followThroughReprompts++
+					if text := strings.TrimSpace(resp.FinalText); text != "" {
+						messages = append(messages, ChatMessage{Role: "assistant", Content: text})
+					}
+					continue
+				}
+				out.FinalText = nonActionableFinalText(resp.FinalText)
+				out.Thinking = latestThinking
+				out.ThinkingPresent = thinkingPresent
+				out.ToolParseFailure = toolParseFailure
+				out.CompletedAt = time.Now().UTC()
+				return out, nil
+			}
 			out.FinalText = resp.FinalText
 			out.Thinking = latestThinking
 			out.ThinkingPresent = thinkingPresent
@@ -309,6 +329,54 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 		toolIterations++
 	}
+}
+
+func shouldForceFollowThrough(finalText string, allowedTools []string, toolResults []ToolCallResult) bool {
+	if len(allowedTools) == 0 || len(toolResults) > 0 {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(finalText))
+	if text == "" || len(text) > 480 {
+		return false
+	}
+
+	if strings.Contains(text, "can't") ||
+		strings.Contains(text, "cannot") ||
+		strings.Contains(text, "unable") ||
+		strings.Contains(text, "permission") ||
+		strings.Contains(text, "missing") ||
+		strings.Contains(text, "blocked") {
+		return false
+	}
+
+	deferralPhrases := []string{
+		"let me",
+		"let me try",
+		"let me check",
+		"let me verify",
+		"let me look",
+		"i will",
+		"i'll",
+		"i am going to",
+		"i'm going to",
+		"give me a moment",
+		"hold on",
+	}
+	for _, phrase := range deferralPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func nonActionableFinalText(lastText string) string {
+	trimmed := strings.TrimSpace(lastText)
+	if trimmed == "" {
+		return "I need to actually execute the requested checks, but I could not produce a concrete execution step. Please retry and I will run it directly."
+	}
+	return "I need to actually execute the requested checks, but I did not complete an actionable step in time. Please retry and I will run it directly.\n\nLast draft response: " + trimmed
 }
 
 func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extraDirective string) string {

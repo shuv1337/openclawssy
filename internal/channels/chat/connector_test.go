@@ -49,6 +49,9 @@ func TestConnectorQueuesAllowedMessage(t *testing.T) {
 	if run.ID != "run-1" {
 		t.Fatalf("unexpected run id: %s", run.ID)
 	}
+	if !strings.Contains(run.Response, "run-1") || !strings.Contains(strings.ToLower(run.Response), "working on it") {
+		t.Fatalf("expected working status response, got %q", run.Response)
+	}
 	if strings.TrimSpace(run.SessionID) == "" {
 		t.Fatal("expected session id in connector result")
 	}
@@ -156,7 +159,8 @@ func TestConnectorQueuesRawMessageAndStoresHistory(t *testing.T) {
 	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "first", ThinkingMode: "always"}); err != nil {
 		t.Fatalf("first message: %v", err)
 	}
-	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "second", ThinkingMode: "always"}); err != nil {
+	second, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "second", ThinkingMode: "always"})
+	if err != nil {
 		t.Fatalf("second message: %v", err)
 	}
 
@@ -165,6 +169,9 @@ func TestConnectorQueuesRawMessageAndStoresHistory(t *testing.T) {
 	}
 	if queuedSessionID == "" {
 		t.Fatal("expected queued session id")
+	}
+	if strings.TrimSpace(second.Response) == "" {
+		t.Fatal("expected non-empty queued response message")
 	}
 
 	sessions, err := store.ListSessions("default", "u1", "dashboard", "dashboard")

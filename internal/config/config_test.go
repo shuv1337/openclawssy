@@ -117,6 +117,12 @@ func TestDefaultConfigSetsConcurrencyAndSchedulerDefaults(t *testing.T) {
 	if cfg.Engine.MaxConcurrentRuns != 64 {
 		t.Fatalf("expected engine.max_concurrent_runs=64, got %d", cfg.Engine.MaxConcurrentRuns)
 	}
+	if cfg.Engine.DefaultRunTimeoutMS != 20*60*1000 {
+		t.Fatalf("expected engine.default_run_timeout_ms=1200000, got %d", cfg.Engine.DefaultRunTimeoutMS)
+	}
+	if cfg.Engine.MaxRunTimeoutMS != 2*60*60*1000 {
+		t.Fatalf("expected engine.max_run_timeout_ms=7200000, got %d", cfg.Engine.MaxRunTimeoutMS)
+	}
 	if cfg.Scheduler.MaxConcurrentJobs != 4 {
 		t.Fatalf("expected scheduler.max_concurrent_jobs=4, got %d", cfg.Scheduler.MaxConcurrentJobs)
 	}
@@ -138,6 +144,27 @@ func TestValidateRejectsEmptyShellAllowedCommand(t *testing.T) {
 	cfg.Shell.AllowedCommands = []string{"git", "   "}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for empty shell.allowed_commands entry")
+	}
+}
+
+func TestValidateRejectsInvalidRunTimeoutConfig(t *testing.T) {
+	cfg := Default()
+	cfg.Engine.DefaultRunTimeoutMS = 500
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for default run timeout below minimum")
+	}
+
+	cfg = Default()
+	cfg.Engine.MaxRunTimeoutMS = 500
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for max run timeout below minimum")
+	}
+
+	cfg = Default()
+	cfg.Engine.DefaultRunTimeoutMS = 3000
+	cfg.Engine.MaxRunTimeoutMS = 2000
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error when default run timeout exceeds max run timeout")
 	}
 }
 

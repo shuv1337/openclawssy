@@ -419,8 +419,7 @@ func (s *Server) handleRunByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Allow dashboard HTML to load without auth (token will be provided via URL param or prompt)
-		if r.URL.Path == "/dashboard" && r.Method == http.MethodGet {
+		if isUnauthenticatedDashboardRoute(r.Method, r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -445,6 +444,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isUnauthenticatedDashboardRoute(method, requestPath string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false
+	}
+	if requestPath == "/dashboard" || requestPath == "/dashboard-legacy" {
+		return true
+	}
+	if strings.HasPrefix(requestPath, "/dashboard/static/") && strings.TrimPrefix(requestPath, "/dashboard/static/") != "" {
+		return true
+	}
+	return false
 }
 
 func newRunID() string {

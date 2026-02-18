@@ -1801,6 +1801,66 @@ func TestAppendRunConversationPersistsToolAndAssistantMessages(t *testing.T) {
 	}
 }
 
+func TestResolveRunTimeout(t *testing.T) {
+	if got := resolveRunTimeout(config.EngineConfig{}); got != defaultRunTimeout {
+		t.Fatalf("expected default run timeout %v, got %v", defaultRunTimeout, got)
+	}
+	if got := resolveRunTimeout(config.EngineConfig{DefaultRunTimeoutMS: 5000, MaxRunTimeoutMS: 3000}); got != 3*time.Second {
+		t.Fatalf("expected clamped timeout 3s, got %v", got)
+	}
+	if got := resolveRunTimeout(config.EngineConfig{DefaultRunTimeoutMS: 0, MaxRunTimeoutMS: 1500}); got != 1500*time.Millisecond {
+		t.Fatalf("expected max-based timeout 1500ms, got %v", got)
+	}
+}
+
+func TestExecuteWithInputAppendsFailureMessageToSession(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ZAI_API_KEY", "test-key")
+
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init engine: %v", err)
+	}
+
+	store, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	session, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = e.ExecuteWithInput(canceledCtx, ExecuteInput{AgentID: "default", Message: "check perplexity secret", Source: "dashboard", SessionID: session.SessionID})
+	if err == nil {
+		t.Fatal("expected run error from canceled context")
+	}
+
+	msgs, err := store.ReadRecentMessages(session.SessionID, 20)
+	if err != nil {
+		t.Fatalf("read messages: %v", err)
+	}
+
+	foundAttention := false
+	for _, msg := range msgs {
+		if msg.Role != "assistant" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(msg.Content), "need your attention") {
+			foundAttention = true
+			break
+		}
+	}
+	if !foundAttention {
+		t.Fatalf("expected assistant failure attention message, got messages: %+v", msgs)
+	}
+}
+
 func TestFormatFinalOutputWithThinking(t *testing.T) {
 	if got := formatFinalOutputWithThinking("answer", "thought"); got != "answer\n\nThinking:\nthought" {
 		t.Fatalf("unexpected formatted output with text: %q", got)

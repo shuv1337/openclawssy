@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,64 @@ import (
 	"openclawssy/internal/scheduler"
 	"openclawssy/internal/secrets"
 )
+
+func TestDashboardRouteServesStaticShell(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Open Legacy Dashboard") {
+		t.Fatalf("expected shell footer link in body, got %q", body)
+	}
+	if strings.Contains(body, dashboardHTML) {
+		t.Fatal("expected /dashboard to serve new shell, not legacy HTML")
+	}
+}
+
+func TestDashboardLegacyRouteServesExistingHTMLExactly(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard-legacy", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	if rr.Body.String() != dashboardHTML {
+		t.Fatal("expected /dashboard-legacy body to exactly match legacy dashboard HTML")
+	}
+}
+
+func TestDashboardStaticAssetRouteServesEmbeddedFiles(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/static/styles.css", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/css") {
+		t.Fatalf("expected css content type, got %q", got)
+	}
+	if !strings.Contains(rr.Body.String(), ".shell-grid") {
+		t.Fatalf("expected stylesheet content, got %q", rr.Body.String())
+	}
+}
 
 func TestDebugRunTraceEndpoint(t *testing.T) {
 	store := httpchannel.NewInMemoryRunStore()
@@ -158,6 +218,111 @@ func TestAdminSecretsEndpointSetAndList(t *testing.T) {
 	}
 	if keys[0] != "discord/token" {
 		t.Fatalf("unexpected key entry: %#v", keys[0])
+	}
+}
+
+func TestAdminAgentDocsEndpointListAndSave(t *testing.T) {
+	root := t.TempDir()
+	agentDir := filepath.Join(root, ".openclawssy", "agents", "default")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatalf("mkdir agent dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "SOUL.md"), []byte("# SOUL\nold"), 0o600); err != nil {
+		t.Fatalf("write soul doc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "HANDOFF.md"), []byte("# HANDOFF\nold"), 0o600); err != nil {
+		t.Fatalf("write handoff doc: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/admin/agent/docs?agent_id=default", nil)
+	listResp := httptest.NewRecorder()
+	mux.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d (%s)", http.StatusOK, listResp.Code, listResp.Body.String())
+	}
+	var listPayload struct {
+		AgentID   string            `json:"agent_id"`
+		Documents []agentDocPayload `json:"documents"`
+	}
+	if err := json.Unmarshal(listResp.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("decode docs list: %v", err)
+	}
+	if listPayload.AgentID != "default" {
+		t.Fatalf("unexpected agent id: %q", listPayload.AgentID)
+	}
+	if len(listPayload.Documents) < 7 {
+		t.Fatalf("expected editable docs payload, got %d docs", len(listPayload.Documents))
+	}
+
+	var heartbeatDoc *agentDocPayload
+	for i := range listPayload.Documents {
+		doc := &listPayload.Documents[i]
+		if doc.Name == "HEARTBEAT.md" {
+			heartbeatDoc = doc
+			break
+		}
+	}
+	if heartbeatDoc == nil {
+		t.Fatal("expected HEARTBEAT.md entry in documents")
+	}
+	if heartbeatDoc.AliasFor != "HANDOFF.md" {
+		t.Fatalf("expected heartbeat alias to handoff, got %q", heartbeatDoc.AliasFor)
+	}
+
+	setHeartbeatReq := httptest.NewRequest(http.MethodPost, "/api/admin/agent/docs", bytes.NewBufferString(`{"agent_id":"default","name":"HEARTBEAT.md","content":"# HEARTBEAT\nupdated"}`))
+	setHeartbeatReq.Header.Set("Content-Type", "application/json")
+	setHeartbeatResp := httptest.NewRecorder()
+	mux.ServeHTTP(setHeartbeatResp, setHeartbeatReq)
+	if setHeartbeatResp.Code != http.StatusOK {
+		t.Fatalf("expected set heartbeat status %d, got %d (%s)", http.StatusOK, setHeartbeatResp.Code, setHeartbeatResp.Body.String())
+	}
+
+	rawHandoff, err := os.ReadFile(filepath.Join(agentDir, "HANDOFF.md"))
+	if err != nil {
+		t.Fatalf("read handoff after heartbeat update: %v", err)
+	}
+	if string(rawHandoff) != "# HEARTBEAT\nupdated" {
+		t.Fatalf("expected heartbeat write to update HANDOFF.md, got %q", string(rawHandoff))
+	}
+
+	setSoulReq := httptest.NewRequest(http.MethodPost, "/api/admin/agent/docs", bytes.NewBufferString(`{"agent_id":"default","name":"SOUL.md","content":"# SOUL\nnew"}`))
+	setSoulReq.Header.Set("Content-Type", "application/json")
+	setSoulResp := httptest.NewRecorder()
+	mux.ServeHTTP(setSoulResp, setSoulReq)
+	if setSoulResp.Code != http.StatusOK {
+		t.Fatalf("expected set soul status %d, got %d (%s)", http.StatusOK, setSoulResp.Code, setSoulResp.Body.String())
+	}
+	rawSoul, err := os.ReadFile(filepath.Join(agentDir, "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read soul after update: %v", err)
+	}
+	if string(rawSoul) != "# SOUL\nnew" {
+		t.Fatalf("unexpected SOUL.md content: %q", string(rawSoul))
+	}
+}
+
+func TestAdminAgentDocsEndpointRejectsInvalidInput(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	invalidDocReq := httptest.NewRequest(http.MethodPost, "/api/admin/agent/docs", bytes.NewBufferString(`{"agent_id":"default","name":"README.md","content":"x"}`))
+	invalidDocReq.Header.Set("Content-Type", "application/json")
+	invalidDocResp := httptest.NewRecorder()
+	mux.ServeHTTP(invalidDocResp, invalidDocReq)
+	if invalidDocResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid doc status %d, got %d", http.StatusBadRequest, invalidDocResp.Code)
+	}
+
+	invalidAgentReq := httptest.NewRequest(http.MethodGet, "/api/admin/agent/docs?agent_id=../../etc", nil)
+	invalidAgentResp := httptest.NewRecorder()
+	mux.ServeHTTP(invalidAgentResp, invalidAgentReq)
+	if invalidAgentResp.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid agent status %d, got %d", http.StatusBadRequest, invalidAgentResp.Code)
 	}
 }
 

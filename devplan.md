@@ -1,4 +1,4 @@
-# Openclawssy Dev Plan (Actionable + Trackable)
+# Openclawssy Dashboard Rewrite Dev Plan (Modular UI + Legacy Fallback)
 
 Owner: ____________________  
 Start date: _______________  
@@ -8,351 +8,362 @@ Status key: ⬜ Not started · 🟦 In progress · 🟩 Done · 🟥 Blocked
 
 ---
 
-## 0) Quick Goals
+## Goals (must-hit)
+1) **Space used properly**: multi-pane layout (no endless vertical stacking).
+2) **Granular visibility**: user can see “everything pertinent” the bot is doing, down to tool call args/output/errors and traces.
+3) **All settings available + easy**: settings are discoverable and editable from the UI.
+4) **Usability improvements**: the UI actively prevents the failure patterns we saw (schema mismatch, venv confusion, secrets confusion, iteration loops).
+5) **Modular**: easy to extend/replace panes, endpoints, and renderers later without editing a single giant string.
 
-**Goal A — “Bot can manage itself”**
-- The agent can safely modify its workspace, its config, its scheduler, and (optionally) fetch remote info under a strict allowlist.
-
-**Goal B — “Tooling is complete + policy enforced”**
-- Every new tool is wired into: tool registry → policy/capability enforcement → tool parsing allowlist → docs → tests.
-
-**Goal C — “Ops confidence”**
-- CI/tests cover the critical flows, and there’s a minimal “smoke run” to verify wiring.
+> Legacy fallback requirement: keep the old dashboard reachable, and add a **link at the bottom** of the new dashboard to open it.
 
 ---
 
-## 1) Current Observations (What to Fix)
-
-### Missing / incomplete “self-management” tools
-- No metadata/append operations yet (`fs.append`, metadata helpers)
-- No network request tool even though `network` config exists
-- No session / run trace / audit retrieval tools
-
-### Reliability / safety gaps
-- No first-class run cancellation / timeout controls
-- Tool parsing and capability enforcement exist, but coverage should be validated end-to-end for new tools
-
-### Docs/tests
-- Documentation referenced by README may be missing/out of date
-- Tests likely thin around policy enforcement, scheduler catch-up, error recovery
+## Non-goals (for this phase)
+- Fixing backend behavior (secrets injection, cancellation endpoints, tool catalog endpoints, etc.)  
+  We will still **design UI hooks** so backend can be wired later with minimal churn.
 
 ---
 
-## 2) Execution Checklist (Do These First)
+## Architecture Decision: Static Assets + Tiny Client Router
+Current dashboard is embedded HTML (`dashboardHTML`) served from `internal/channels/dashboard/handler.go` at `/dashboard`.  
+Rewrite will:
+- Serve new UI as static files from `internal/channels/dashboard/ui/`
+- Keep legacy UI served at `/dashboard-legacy`
+- Provide link in new UI footer: “Open Legacy Dashboard”
 
-⬜ **E1: Confirm baseline build & run**
-- [ ] `go test ./...`
-- [ ] run a minimal local start (engine + dashboard if enabled)
-- [ ] verify existing tools: `fs.read/fs.list/fs.write/fs.edit/code.search/time.now` and `shell.exec` gating
-
-⬜ **E2: Map tool wiring**
-- [ ] Identify where tools are registered (registry/builtins)
-- [ ] Identify capability enforcement points (policy enforcer)
-- [ ] Identify tool parsing allowlist usage (toolparse)
-- [ ] Document the “add a tool” workflow in CONTRIBUTING
-
----
-
-## 3) High Priority Features (Self-Management Tool Coverage)
-
-### H1 — File deletion tool: `fs.delete`
-Status: 🟩  
-Owner: _______  
-PR: _______  
-
-**Definition**
-- Delete a file or directory within workspace.
-- Must **refuse control-plane paths** (e.g., `.openclawssy`, secrets/master key files, SOUL/RULES if those are treated as control-plane).
-- Must enforce workspace boundary checks consistent with other fs tools.
-
-**Tasks**
-- [x] Implement tool handler (args: `path`, optional `recursive`, optional `force`)
-- [x] Add to tool registry + builtins
-- [x] Add capability name mapping (canonicalization / alias if needed)
-- [x] Add tests: boundary escape attempts, control-plane refusal, dir recursive, non-existent path behavior
-- [x] Add docs + example prompts
-
-**Acceptance**
-- [x] Attempt to delete `../` path fails
-- [x] Attempt to delete `.openclawssy/*` fails (or your chosen protected set)
-- [x] Deletes normal workspace file successfully
+Backend APIs to use now (already exist):
+- `/api/admin/status` (provider/model)  
+- `/api/admin/config` (GET/POST)  
+- `/api/admin/secrets` (GET keys / POST set)  
+- `/api/admin/scheduler/*` (jobs + control)  
+- `/api/admin/chat/sessions` + `/messages`  
+- `/api/admin/debug/runs/{id}/trace`  
+- `/v1/chat/messages`, `/v1/runs`, `/v1/runs/{id}`
 
 ---
 
-### H2 — File move/rename tool: `fs.move` (or `fs.rename`)
-Status: 🟩  
-Owner: _______  
-PR: _______  
-
-**Definition**
-- Move/rename files/dirs inside workspace with safe constraints.
-
-**Tasks**
-- [x] Implement handler (args: `src`, `dst`, optional `overwrite`)
-- [x] Enforce workspace bounds for both src/dst
-- [x] Refuse control-plane paths
-- [x] Tests: overwrite false/true, dst exists, src missing, path traversal
-- [x] Docs
-
-**Acceptance**
-- [x] `fs.move a.txt b.txt` works
-- [x] `fs.move ../../etc/passwd` is refused
+## Deliverables
+- New dashboard at `/dashboard`
+- Legacy dashboard at `/dashboard-legacy`
+- New UI footer link: `/dashboard-legacy`
+- Modular file layout with clear ownership boundaries
+- “MVP parity” with current features + adds missing UI for scheduler/sessions/runs/trace + inspector panes + fix-suggestion UX
 
 ---
 
-### H3 — Config introspection & mutation: `config.get`, `config.set`
-Status: 🟩  
-Owner: _______  
-PR: _______  
+# Phase 0 — Safe Setup: Legacy fallback + new UI scaffolding
 
-**Definition**
-- `config.get` returns a filtered view of config (no secrets).
-- `config.set` updates *only safe mutable fields* and persists with existing validation.
+## P0.1 Add legacy route
+Status: 🟩  PR: _______
+- [x] Serve current monolithic HTML at **`/dashboard-legacy`**
+- [x] Keep `/dashboard` temporarily as-is until new UI is ready (or flip immediately if comfortable)
 
-**Recommended safe-set table (initial)**
-- `output.thinking_mode`, `output.max_thinking_chars`
-- `chat.rate_limit_per_min`, `chat.global_rate_limit_per_min`
-- `discord.rate_limit_per_min`, `discord.command_prefix` (if enabled)
-- `engine.max_concurrent_runs`, `scheduler.max_concurrent_jobs`
-- `network.enabled`, `network.allowed_domains`, `network.allow_localhosts`
-- `shell.enable_exec` (but only if sandbox.active == true)
+Acceptance:
+- [x] `/dashboard-legacy` loads the existing UI exactly as before.
 
-**Tasks**
-- [x] Add config tool module with whitelist of fields
-- [x] Use existing `Validate` and atomic write logic when persisting
-- [x] Ensure `config.get` redacts secrets/tokens/API keys
-- [x] Tests: invalid set rejected, valid set applied, persisted, and reloaded
-- [x] Docs: schema + examples
+## P0.2 Create static UI directory + asset server
+Status: 🟩  PR: _______
+Create:
+- [x] `internal/channels/dashboard/ui/index.html`
+- [x] `internal/channels/dashboard/ui/styles.css`
+- [x] `internal/channels/dashboard/ui/app.js`
 
-**Acceptance**
-- [x] `config.set` rejects out-of-range values
-- [x] `config.get` never returns API keys / master key / secret store plaintext
+And in Go:
+- [x] Add static serving route for `/dashboard/static/*` → serves files from that folder
+- [x] Update `/dashboard` handler to serve the new `index.html`
+
+Acceptance:
+- [x] `/dashboard` loads new blank UI shell (header/nav/main panes)
+- [x] Footer includes link: **Open Legacy Dashboard** → `/dashboard-legacy`
 
 ---
 
-### H4 — Secrets lifecycle: `secrets.get`, `secrets.set` (and optionally `secrets.list`)
-Status: 🟩  
-Owner: _______  
-PR: _______  
+# Phase 1 — Modular Frontend Foundation
 
-**Definition**
-- Enable agents to read/write secrets by key.
-- Enforce access control: at minimum, allow only specific agents or require capability grant.
-- Redact secrets from logs/tool results unless explicitly requested.
+## P1.1 Frontend module layout (no framework required)
+Status: 🟦  PR: _______
+Create `internal/channels/dashboard/ui/src/` modules (bundling optional; can also be plain JS modules):
+- [x] `src/api/client.js` (fetch wrapper + auth + JSON parsing + consistent error objects)
+- [x] `src/router/router.js` (hash router or simple in-app router)
+- [x] `src/state/store.js` (single store + subscriptions; no global spaghetti)
+- [x] `src/ui/layout.js` (3-pane grid + resizers)
+- [ ] `src/ui/components/` (reusable: tabs, tables, json viewer, toast, modal) - json viewer added, others pending
+- [x] `src/pages/` (chat, sessions, runs, scheduler, settings, secrets)
+- [ ] `src/inspectors/` (tool-call inspector, trace inspector, run meta, config diff) - tool + trace inspectors added
+- [x] `src/ux/fix_suggestions.js` (error classifiers + suggested actions)
+- [x] `src/ux/venv_panel.js` (UI-only for now; backend wiring later)
+- [x] `src/ux/tool_schema_panel.js` (UI-only for now; backend wiring later)
 
-**Tasks**
-- [x] Identify existing encrypted secret store interface (dashboard uses it)
-- [x] Implement tools:
-  - `secrets.set { key, value }`
-  - `secrets.get { key }` (returns value)
-  - `secrets.list` (returns keys only)
-- [x] Ensure audit logging does not leak secret values
-- [x] Tests: set/get roundtrip, missing key, permission denied, redaction behavior
-- [x] Docs: secure usage patterns
+Acceptance:
+- [x] Adding a new page = one new file in `pages/` + one route entry
+- [x] No giant monolithic HTML/JS strings
 
-**Acceptance**
-- [x] Tool events do not store secret plaintext
-- [x] Capability enforcement works (unauthorized agent denied)
+## P1.2 3-pane layout + resizable panes + persistence
+Status: 🟦  PR: _______
+Layout:
+- Left: nav
+- Center: active view (chat/timeline)
+- Right: inspector tabs
 
----
+Add:
+ - [x] Draggable resizers between panes
+ - [x] LocalStorage persistence of pane sizes + collapsed state
+ - [x] Responsive behavior: right pane becomes drawer on narrow screens
 
-### H5 — Scheduler management tools
-Status: 🟩  
-Owner: _______  
-PR: _______  
-
-**Definition**
-- Let agent manage jobs programmatically.
-- Minimum set:
-  - `scheduler.list`
-  - `scheduler.add`
-  - `scheduler.remove`
-  - `scheduler.pause` / `scheduler.resume` (or `enable/disable`)
-
-**Tasks**
-- [x] Identify scheduler store/struct model
-- [x] Define job schema (cron, agent_id, prompt/payload, enabled, metadata)
-- [x] Implement tools backed by scheduler store
-- [x] Tests: add/list/remove, invalid cron, concurrency, persistence
-- [x] Docs: examples and safe defaults
-
-**Acceptance**
-- [x] Jobs persist restart-to-restart
-- [x] Invalid cron rejected with clear error
+Acceptance:
+ - [x] On wide screens, chat + timeline + inspector are visible simultaneously
+ - [x] No “scroll forever to find tools” experience
 
 ---
 
-### H6 — Network request tool: `http.request` (or `net.fetch`)
-Status: 🟩  
-Owner: _______  
-PR: _______  
+# Phase 2 — “Everything the bot is doing” (granular visibility)
 
-**Definition**
-- Only available when `network.enabled == true`
-- Strict domain allowlist (`network.allowed_domains`)
-- Optional localhost if `network.allow_localhosts == true`
-- Safe limits: timeouts, max response size, content-type controls
+## P2.1 Runs page (list/filter/open)
+Status: 🟩  PR: _______
+- [x] Runs list uses `/v1/runs?status&limit&offset`
+- [x] Filters: status; pagination controls
+- [x] Clicking a run loads `/v1/runs/{id}` and optionally `/api/admin/debug/runs/{id}/trace`
 
-**Minimal API**
-- args: `method`, `url`, optional `headers`, optional `body`, optional `timeout_ms`
-- returns: `status`, `headers` (maybe subset), `body` truncated, `bytes_read`
+Acceptance:
+- [x] User can browse prior runs without copying IDs manually
 
-**Tasks**
-- [x] Implement allowlist hostname matching (exact + optionally subdomains)
-- [x] Enforce scheme (`http/https` only)
-- [x] Add response size cap (e.g. 1–5MB configurable)
-- [x] Add to policy/capabilities
-- [x] Tests: denied domain, allowed domain, redirect handling (suggest: re-check on redirect)
-- [x] Docs: security warnings & configuration
+## P2.2 Run Timeline (trace-first experience)
+Status: 🟦  PR: _______
+- [x] Timeline view for a selected run:
+  - model step(s) (if in trace)
+  - tool calls (name, args preview, duration, status)
+  - error blocks grouped (same tool+same error collapses)
+- [x] Selecting a tool call populates Inspector with:
+  - args JSON (pretty)
+  - output (truncate/expand)
+  - error (if any)
+  - copy buttons
+- [x] Trace inspector shows source metadata (`debug`/`run`/`none`) and trace payload context
 
-**Acceptance**
-- [x] Requests to non-allowed domains are denied
-- [x] Redirects do not bypass allowlist
+Acceptance (must address the earlier failures):
+- [ ] If `fs.edit` fails with “missing edits”, UI highlights tool call payload and error clearly. (pending manual UI walkthrough)
+- [ ] If tool repeats failures, UI groups them so iteration loops are obvious. (pending manual UI walkthrough)
 
----
+## P2.3 Sessions page (browse + open + tool events)
+Status: 🟦  PR: _______
+- [x] Sessions list uses `/api/admin/chat/sessions` (limit/offset)
+- [x] Search box + sort modes
+- [x] Open session → `/api/admin/chat/sessions/{id}/messages?limit=...`
+- [x] Render:
+  - user/assistant messages
+  - tool messages as structured events (not just raw blobs)
 
-### H7 — Session management tools
-Status: 🟩  
-Owner: _______  
-PR: _______  
+Acceptance:
+- [ ] You can inspect a past troubleshooting session and see tool outputs/errors inline. (pending manual UI walkthrough)
 
-**Definition**
-- `session.list`: enumerate active sessions (IDs, user/channel, last active)
-- `session.close`: close a session by ID
-- (Optional) `session.export`: export transcript to file in workspace
+## P2.4 “Live Activity” pane (for current chat)
+Status: 🟦  PR: _______
+- [x] When a chat run is in-flight, show:
+  - “current run id”
+  - latest tool activity (stream/poll via session messages)
+  - last error summary
+- [x] Surface iteration count / “loop risk” indicator (client-only heuristic)
+- [x] Show explicit in-flight heartbeat text in chat transcript and queued/run status handoff messaging
 
-**Tasks**
-- [x] Identify session store in engine/channel
-- [x] Implement tools + tests
-- [x] Docs
-
-**Acceptance**
-- [x] Closing session stops further messages routed to it
-
----
-
-### H8 — Run trace / audit tools
-Status: 🟩  
-Owner: _______  
-PR: _______  
-
-**Definition**
-- `run.list` / `run.get` to retrieve recent run summaries and full traces
-- Pagination and size limits required
-
-**Tasks**
-- [x] Locate trace storage (dashboard already fetches these)
-- [x] Implement tools that return structured summaries
-- [x] Tests: pagination, missing run id
-- [x] Docs
-
-**Acceptance**
-- [x] Large traces are truncated/paginated without crashing
+Acceptance:
+- [ ] User never wonders “what is it doing right now?” (pending manual UX walkthrough)
 
 ---
 
-### H9 — Cancellation & timeouts
-Status: 🟩  
-Owner: _______  
-PR: _______  
+# Phase 3 — Settings: Everything accessible + easy to get to
 
-**Definition**
-- Add a way to cancel a run or tool invocation
-- Add per-tool and global execution timeout config
+> Backend config endpoint exists already; we’ll reorganize the UI to make it discoverable.
 
-**Tasks**
-- [x] Add context cancellation wiring through runner → tool execution
-- [x] Add `run.cancel` tool or channel command
-- [x] Enforce timeouts on `shell.exec` and `http.request`
-- [x] Tests: cancellation stops long-running tool
-- [x] Docs: how to cancel
+## P3.1 Settings Home + categories
+Status: 🟦  PR: _______
+Pages:
+- [x] General
+- [x] Model Provider
+- [x] Chat/Discord
+- [x] Sandbox/Shell
+- [x] Network
+- [x] Scheduler
+- [x] Capabilities (UI-first; backend wiring later if needed)
+- [x] Advanced (raw JSON editor + diff)
 
-**Acceptance**
-- [x] Long shell command is terminated on cancel
+UX:
+- [x] Always show breadcrumbs + search within settings
+- [x] Inline validation messages (client-side basic + show server error on save)
+- [x] “Diff before save” (compare loaded config vs edited config)
 
----
+Acceptance:
+- [ ] A new user can find “model provider” in 1 click
+- [ ] A power user can still edit raw config safely and see diff
 
-## 4) Medium Priority Enhancements
+## P3.2 Secrets page improvements
+Status: 🟦  PR: _______
+- [x] Keys list from `/api/admin/secrets` (GET)
+- [x] Store secret via POST (existing)
+- [x] Quality-of-life:
+  - searchable keys list
+  - copy key name
+  - “conventions” helper block (provider keys, PERPLEXITY_API_KEY, etc.)
+  - never display stored values (only accept new input)
 
-### M1 — Multi-agent management tools
-Status: 🟩  
-Tasks
-- [x] `agent.list`, `agent.create`, `agent.switch`
-- [x] Per-agent capability grants + separate rules/soul docs (or equivalent)
-- [x] Tests
+Acceptance:
+- [ ] User can confirm PERPLEXITY_API_KEY exists (key visible)
+- [ ] No confusing “env | grep” debugging needed from the UI side
 
-### M2 — Better editing ergonomics
-Status: 🟩  
-Tasks
-- [x] `fs.append` tool
-- [x] Diff/patch support in `fs.edit` (unified diff)
-- [x] Tests + docs
+## P3.3 Scheduler page (already supported server-side)
+Status: 🟦  PR: _______
+- [x] List jobs (paused + jobs)
+- [x] Add job form (agent_id, schedule, message, enabled)
+- [x] Delete job
+- [x] Pause/resume scheduler
+- [x] Enable/disable specific job
 
-### M3 — Policy management tools
-Status: 🟩  
-Tasks
-- [x] `policy.list` / `policy.grant` / `policy.revoke`
-- [x] Enforce audit + require elevated capability
-
-### M4 — Metrics
-Status: 🟩  
-Tasks
-- [x] Track tool durations/errors
-- [x] `metrics.get` tool and/or dashboard view
-
----
-
-## 5) Documentation & Quality
-
-### D1 — Documentation audit
-Status: 🟩  
-Tasks
-- [x] Ensure all referenced docs exist (SOUL/RULES/README references)
-- [x] Add “Tool catalog” page: names, args schema, examples, safety rules
-- [x] Add “How to add a tool” contributor guide
-
-### D2 — Test coverage & CI
-Status: ⬜  
-Tasks
-- [ ] Add integration tests for: policy enforcement, scheduler persistence, toolparse parsing, sandbox gating
-- [ ] Add a “smoke workflow” GitHub Action: `go test ./...` + basic lint
-- [ ] Add fuzz tests for toolparse JSON repair/parsing
+Acceptance:
+- [ ] All scheduler functions usable without leaving UI (pending manual UI walkthrough)
 
 ---
 
-## 6) Definition of Done (for each PR)
+# Phase 4 — Usability: Prevent the tool failures you saw
 
-- [ ] Tool is registered and discoverable in registry
-- [ ] Capability enforcement blocks unauthorized usage
-- [ ] Toolparse accepts canonical name + aliases (if any)
-- [ ] Unit tests added (happy path + abuse cases)
-- [ ] Docs updated (tool schema + examples)
-- [ ] No sensitive data leaked in logs/tool results
-- [ ] Verified via local smoke run
+This phase MUST cover all “problems the first devplan addressed”.
+
+## P4.1 Tool Schema Viewer (UI now, backend later)
+Status: ⬜  PR: _______
+UI now:
+- [ ] Add “Tool Schema” inspector tab with placeholder data model:
+  - show required fields
+  - show example payload
+- [ ] For now: hardcode schemas for built-in tools in a JSON file:
+  - `ui/src/data/tool_schemas.json`
+
+Later (backend wiring):
+- Replace hardcoded schemas with a `/api/admin/tools` endpoint.
+
+Acceptance:
+- [ ] When user clicks `fs.edit`, UI shows “requires edits[]”
+- [ ] Prevents the exact schema misuse that caused `missing argument: edits`
+
+## P4.2 Fix Suggestions Panel (error classifier)
+Status: ⬜  PR: _______
+Detect and display “suggested next step” actions when errors appear in:
+- tool outputs
+- run trace errors
+- API errors
+
+Rules (initial):
+- [ ] `tool.input_invalid` → show schema + highlight missing fields
+- [ ] `externally-managed-environment` → suggest venv creation and always use `.venv/bin/python`
+- [ ] `ModuleNotFoundError` → suggest “install requirements in venv”
+- [ ] “env var not set” → suggest check Secrets page and later “inject/export to run env”
+- [ ] `context deadline exceeded` → show provider request info and suggest retry/backoff (UI only)
+
+Acceptance:
+- [ ] When pip fails with externally-managed-environment, UI suggests venv workflow immediately
+- [ ] When `requests` missing, UI suggests installing into venv and running with venv python
+
+## P4.3 Venv Manager Pane (UI-only for now)
+Status: ⬜  PR: _______
+- [ ] Add an inspector tab “Python Env”
+- [ ] Provide UI fields/buttons (no backend required yet):
+  - venv path input (default: `./.venv`)
+  - “suggested commands” generator:
+    - create venv
+    - install requirements
+    - run script using `.venv/bin/python`
+- [ ] Copy-to-clipboard buttons for commands
+
+Acceptance:
+- [ ] User can copy the correct venv commands without the bot guessing wrong
+
+## P4.4 Run controls: Stop polling + “soft cancel”
+Status: ⬜  PR: _______
+Frontend-only:
+- [ ] “Stop polling” button (halts UI polling and clears “Thinking…”)
+- [ ] “Retry” button (re-send last prompt)
+- [ ] “Copy debug bundle” (selected run/session ids + errors)
+
+Later (backend wiring):
+- Add true cancel endpoint.
+
+Acceptance:
+- [ ] User can stop the UI from spinning forever when iteration caps happen
+
+## P4.5 Provider/model identity stamp everywhere
+Status: ⬜  PR: _______
+- [ ] Display provider/model from `/api/admin/status` in header
+- [ ] When rendering run/session, display provider/model for that run if available in trace; otherwise label as “current config”
+
+Acceptance:
+- [ ] If bot claims “I’m Claude”, user can see the actual configured model/provider at all times
 
 ---
 
-## 7) Progress Tracker (Rolling)
+# Phase 5 — Polish (space, speed, and maintainability)
 
-| Week | Focus | Owner | Planned | Done | Notes |
-|------|-------|-------|---------|------|------|
-| W__  | H1–H2 |       | H1,H2   | H1,H2| Added `fs.delete` + `fs.move` with policy/control-plane enforcement, parser wiring, tests, and docs update |
-| W__  | H3–H4 |       | H3,H4   | H3,H4| Added `config.get`/`config.set` plus `secrets.get`/`secrets.set`/`secrets.list`, with audit-safe redaction and capability tests |
-| W__  | H5–H6 |       | H5,H6   | H5,H6| Added scheduler lifecycle tools and `http.request` (`net.fetch` alias) with network allowlist/redirect enforcement, response caps, parser/runtime wiring, tests, and docs updates |
-| W__  | H7–H8 |       | H7,H8   | H7,H8| Added `session.list`/`session.close`, close-state metadata, routing guard to avoid reusing closed sessions, parser/runtime wiring, tests, and docs updates; Added `run.list`/`run.get` run trace tools with filtering, pagination, and capability gating |
-| W__  | H9    |       | H9      | H9   | Added `run.cancel` tool with RunTracker for context-based cancellation; Added shell.exec timeout_ms support; Added timeout config fields to ShellConfig and EngineConfig; Full test coverage and documentation updates |
-| W__  | M1    |       | M1      | M1   | Added `agent.list`/`agent.create`/`agent.switch` with strict `agent_id` validation, config default switching for chat/discord, runtime/parser/model wiring, tests, and docs updates |
-| W__  | M2    |       | M2      | M2   | Added `fs.append` plus `fs.edit` unified-diff patch mode, runtime arg normalization (`unified_diff` alias), guardrail tests, and docs updates |
-| W__  | M3    |       | M3      | M3   | Added `policy.list`/`policy.grant`/`policy.revoke` with persisted grants file support, live enforcer updates, admin capability gating, runtime/parser/model wiring, tests, and docs updates |
-| W__  | M4    |       | M4      | M4   | Added per-tool duration capture in run traces and `metrics.get` aggregation (calls/errors/latency by tool with filters/pagination), plus capability tests and docs updates |
-| W__  | D1    |       | D1      | D1   | Added `docs/TOOL_CATALOG.md`, `CONTRIBUTING.md` tool workflow guidance, and refreshed README docs index |
+## P5.1 JSON viewer + truncation + streaming-friendly UI
+Status: ⬜  PR: _______
+- [ ] Reusable JSON viewer component (collapse/expand)
+- [ ] Truncate huge outputs with “expand”
+- [ ] Search within JSON text
+
+## P5.2 Theming + accessibility + keyboard shortcuts
+Status: ⬜  PR: _______
+- [ ] Improve contrast and spacing
+- [ ] Shortcuts:
+  - `g c` chat, `g r` runs, `g s` scheduler
+  - `/` focus search
+  - `Esc` close drawer
 
 ---
 
-## 8) Notes / Open Questions
+# Legacy Fallback UX Requirement (must-have)
+- [x] New UI footer contains: **“Open Legacy Dashboard”** linking to `/dashboard-legacy`
+- [ ] Optional: “Report bug” link to prefill run/session id in issue template
 
-- Protected paths: confirm exact “control-plane” set (e.g., `.openclawssy/*`, config file, secrets store, master key, agent system prompts)
-- Decide whether secrets should ever be returned as plaintext (default: yes for `secrets.get`, but never logged)
-- Decide whether network tool should support redirects (recommended: yes, but re-check allowlist on every hop)
+---
+
+# QA Checklist (manual scripts)
+
+## Script 1: Tool failure visibility
+- [ ] Trigger a known tool input error (e.g., bad payload)
+- [ ] Confirm: timeline shows error, inspector shows payload, Tool Schema tab shows required args, Fix Suggestions appear
+
+## Script 2: Python dependency failure guidance
+- [ ] Confirm: Fix Suggestions show venv workflow; Python Env tab generates correct commands
+
+## Script 3: Secrets workflow confidence
+- [ ] Store PERPLEXITY_API_KEY
+- [ ] Confirm key appears in list
+- [ ] UI shows “env var missing” guidance that points to Secrets page (until backend injection is wired)
+
+## Script 4: Scheduler usability
+- [ ] Create job
+- [ ] Disable job
+- [ ] Pause scheduler
+- [ ] Delete job
+
+---
+
+# Progress Tracker
+
+| PR | Theme | Status | Notes |
+|----|-------|--------|------|
+| P0.1 | /dashboard-legacy route | 🟩 | |
+| P0.2 | static UI serve + /dashboard new shell | 🟩 | |
+| P1.1 | modular JS layout | 🟦 | Foundation wired; modular pages now include a dashboard Docs editor for core agent markdown files, with remaining component/inspector depth in follow-up slices. |
+| P1.2 | 3-pane resizable layout | 🟦 | Resizers, localStorage pane state, and mobile inspector drawer added in modular shell; verify with manual UX pass. |
+| P2.1 | runs page | 🟩 | `/runs` now supports status filter + pagination, run open, optional debug trace fetch, and inspector state wiring (`selectedTrace`, `selectedTool`, `lastError`). |
+| P2.2 | run timeline + inspector | 🟦 | Runs page now renders trace-first timeline with model-step notes, tool-call blocks, repeated-failure grouping, tool-click inspector wiring, and trace source metadata; acceptance scenarios still need manual walkthrough. |
+| P2.3 | sessions page | 🟦 | `/sessions` now uses paged sessions endpoint, includes client-side search/sort controls, opens session messages with configurable `limit`, renders user/assistant chat items plus structured tool-event cards, and supports optional inspector wiring via `selectedTool`; acceptance still needs manual UX pass. |
+| P2.4 | live activity pane | 🟦 | `/chat` now sends prompts via `/v1/chat/messages` using dashboard defaults, renders user/assistant transcript with sticky-bottom behavior unless user scrolls up, polls `/v1/runs/{id}` and session messages for live tool activity/error summaries, and shows client-side loop-risk heuristics plus explicit in-flight heartbeat text; runtime now also enforces default run timeouts, appends assistant "need your attention" failure messages on run error/timeout, and reprompts deferral-only model replies to reduce "I'll do it" without action outcomes; acceptance needs manual UX pass. |
+| P3.1 | settings pages + diff | 🟦 | `settings.js` now provides category workspace (General/Model/Chat/Sandbox/Network/Scheduler/Capabilities/Advanced), config draft vs baseline handling, inline validation, clear server save errors, search + breadcrumbs, and diff-before-save with changed path table plus raw JSON editor; acceptance still needs manual UX verification. |
+| P3.2 | secrets page | 🟦 | `secrets.js` now uses a modular UI with GET key loading, search + copy-name controls, write-only POST set/rotate form, and a naming-conventions helper block (including PERPLEXITY_API_KEY and Discord token patterns); acceptance still needs manual UX verification. |
+| P3.3 | scheduler page | 🟦 | `/scheduler` now has modular controls for global paused/running state, refresh, add-job form (`agent_id`, `schedule`, `message`, optional `id`, optional explicit `enabled`), per-job enable/disable via scheduler control, delete actions, and clear success/error banners; acceptance still needs manual UI walkthrough. |
+| P4.1 | tool schema viewer (hardcoded first) | ⬜ | |
+| P4.2 | fix suggestions | ⬜ | |
+| P4.3 | python env pane | ⬜ | |
+| P4.4 | stop polling + soft controls | ⬜ | |
+| P4.5 | provider/model stamp everywhere | ⬜ | |
+| P5.* | polish | ⬜ | |
 
 ---

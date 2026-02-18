@@ -1,10 +1,15 @@
 package dashboard
 
 import (
+	"embed"
 	"encoding/json"
 	"errors"
+	"mime"
 	"net/http"
+	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +27,27 @@ type Handler struct {
 	schedulerStore *scheduler.Store
 }
 
+type agentDocPayload struct {
+	Name         string `json:"name"`
+	ResolvedName string `json:"resolved_name"`
+	AliasFor     string `json:"alias_for,omitempty"`
+	Content      string `json:"content"`
+	Exists       bool   `json:"exists"`
+}
+
+var dashboardEditableDocNames = []string{
+	"SOUL.md",
+	"RULES.md",
+	"TOOLS.md",
+	"SPECPLAN.md",
+	"DEVPLAN.md",
+	"HANDOFF.md",
+	"HEARTBEAT.md",
+}
+
+//go:embed ui/*
+var dashboardUIFS embed.FS
+
 func New(rootDir string, store httpchannel.RunStore, schedulerStore ...*scheduler.Store) *Handler {
 	var jobs *scheduler.Store
 	if len(schedulerStore) > 0 {
@@ -32,6 +58,8 @@ func New(rootDir string, store httpchannel.RunStore, schedulerStore ...*schedule
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/dashboard", h.serveDashboard)
+	mux.HandleFunc("/dashboard-legacy", h.serveLegacyDashboard)
+	mux.HandleFunc("/dashboard/static/", h.serveDashboardStatic)
 	mux.HandleFunc("/api/admin/status", h.getStatus)
 	mux.HandleFunc("/api/admin/config", h.handleConfig)
 	mux.HandleFunc("/api/admin/secrets", h.handleSecrets)
@@ -40,6 +68,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/scheduler/control", h.handleSchedulerControl)
 	mux.HandleFunc("/api/admin/chat/sessions", h.listChatSessions)
 	mux.HandleFunc("/api/admin/chat/sessions/", h.chatSessionMessages)
+	mux.HandleFunc("/api/admin/agent/docs", h.handleAgentDocs)
 	mux.HandleFunc("/api/admin/debug/runs/", h.getRunTrace)
 }
 
@@ -171,12 +200,51 @@ func (h *Handler) handleSchedulerControl(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) serveDashboard(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	content, err := dashboardUIFS.ReadFile("ui/index.html")
+	if err != nil {
+		http.Error(w, "dashboard ui not available", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(content)
+}
+
+func (h *Handler) serveLegacyDashboard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(dashboardHTML))
+}
+
+func (h *Handler) serveDashboardStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	assetPath := strings.TrimPrefix(r.URL.Path, "/dashboard/static/")
+	assetPath = path.Clean(strings.TrimSpace(assetPath))
+	if assetPath == "" || assetPath == "." || strings.HasPrefix(assetPath, "../") {
+		http.NotFound(w, r)
+		return
+	}
+
+	content, err := dashboardUIFS.ReadFile("ui/" + assetPath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	if contentType := mime.TypeByExtension(filepath.Ext(assetPath)); contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	_, _ = w.Write(content)
 }
 
 func (h *Handler) getStatus(w http.ResponseWriter, r *http.Request) {
@@ -415,6 +483,167 @@ func (h *Handler) chatSessionMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"session_id": sessionID, "messages": msgs})
+}
+
+func (h *Handler) handleAgentDocs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.getAgentDocs(w, r)
+	case http.MethodPost:
+		h.setAgentDoc(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (h *Handler) getAgentDocs(w http.ResponseWriter, r *http.Request) {
+	agentID, err := normalizeDashboardAgentID(strings.TrimSpace(r.URL.Query().Get("agent_id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	docs := make([]agentDocPayload, 0, len(dashboardEditableDocNames))
+	for _, name := range dashboardEditableDocNames {
+		doc, readErr := h.readAgentDoc(agentID, name)
+		if readErr != nil {
+			http.Error(w, readErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		docs = append(docs, doc)
+	}
+
+	writeJSON(w, map[string]any{
+		"agent_id":         agentID,
+		"available_agents": h.listDashboardAgentIDs(),
+		"documents":        docs,
+	})
+}
+
+func (h *Handler) setAgentDoc(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AgentID string `json:"agent_id"`
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+
+	agentID, err := normalizeDashboardAgentID(req.AgentID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	displayName, resolvedName, aliasFor, ok := resolveDashboardDocNames(req.Name)
+	if !ok {
+		http.Error(w, "unsupported document name", http.StatusBadRequest)
+		return
+	}
+
+	agentDir := filepath.Join(h.rootDir, ".openclawssy", "agents", agentID)
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		http.Error(w, "failed to create agent docs directory", http.StatusInternalServerError)
+		return
+	}
+
+	docPath := filepath.Join(agentDir, resolvedName)
+	if err := os.WriteFile(docPath, []byte(req.Content), 0o600); err != nil {
+		http.Error(w, "failed to save document", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"ok":            true,
+		"agent_id":      agentID,
+		"name":          displayName,
+		"resolved_name": resolvedName,
+		"alias_for":     aliasFor,
+		"stored_bytes":  len(req.Content),
+	})
+}
+
+func (h *Handler) readAgentDoc(agentID, name string) (agentDocPayload, error) {
+	displayName, resolvedName, aliasFor, ok := resolveDashboardDocNames(name)
+	if !ok {
+		return agentDocPayload{}, errors.New("unsupported document name")
+	}
+	docPath := filepath.Join(h.rootDir, ".openclawssy", "agents", agentID, resolvedName)
+	raw, err := os.ReadFile(docPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return agentDocPayload{Name: displayName, ResolvedName: resolvedName, AliasFor: aliasFor, Exists: false}, nil
+		}
+		return agentDocPayload{}, errors.New("failed to read agent document")
+	}
+	return agentDocPayload{Name: displayName, ResolvedName: resolvedName, AliasFor: aliasFor, Content: string(raw), Exists: true}, nil
+}
+
+func (h *Handler) listDashboardAgentIDs() []string {
+	agentsDir := filepath.Join(h.rootDir, ".openclawssy", "agents")
+	entries, err := os.ReadDir(agentsDir)
+	if err != nil {
+		return []string{"default"}
+	}
+
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		id, err := normalizeDashboardAgentID(entry.Name())
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return []string{"default"}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func resolveDashboardDocNames(raw string) (displayName string, resolvedName string, aliasFor string, ok bool) {
+	name := strings.ToUpper(strings.TrimSpace(raw))
+	name = strings.TrimSuffix(name, ".MD")
+	switch name {
+	case "SOUL":
+		return "SOUL.md", "SOUL.md", "", true
+	case "RULES":
+		return "RULES.md", "RULES.md", "", true
+	case "TOOLS":
+		return "TOOLS.md", "TOOLS.md", "", true
+	case "SPECPLAN":
+		return "SPECPLAN.md", "SPECPLAN.md", "", true
+	case "DEVPLAN":
+		return "DEVPLAN.md", "DEVPLAN.md", "", true
+	case "HANDOFF":
+		return "HANDOFF.md", "HANDOFF.md", "", true
+	case "HEARTBEAT":
+		return "HEARTBEAT.md", "HANDOFF.md", "HANDOFF.md", true
+	default:
+		return "", "", "", false
+	}
+}
+
+func normalizeDashboardAgentID(raw string) (string, error) {
+	id := strings.TrimSpace(raw)
+	if id == "" {
+		id = "default"
+	}
+	if strings.Contains(id, "..") || strings.ContainsAny(id, `/\\`) {
+		return "", errors.New("invalid agent id")
+	}
+	for _, r := range id {
+		isAlphaNum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if isAlphaNum || r == '-' || r == '_' {
+			continue
+		}
+		return "", errors.New("invalid agent id")
+	}
+	return id, nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -714,6 +943,8 @@ let toolActivity=[];
 let knownSessions=[];
 let currentActiveSessionID='';
 let currentConfig=null;
+let chatPinnedToBottom=true;
+let chatScrollTop=0;
 const layoutStoragePrefix='dashboard.layout.';
 
 function byId(id){return document.getElementById(id);}
@@ -1060,15 +1291,39 @@ if(value===undefined||value===null)return'';
 return String(value).toLowerCase();
 }
 
+function isChatNearBottom(container){
+if(!container)return true;
+const distance=container.scrollHeight-(container.scrollTop+container.clientHeight);
+return distance<=36;
+}
+
 function renderChat(){
 const container=byId('chatHistory');
+const wasPinned=chatPinnedToBottom||isChatNearBottom(container);
+const previousTop=container.scrollTop;
 container.innerHTML=chatMessages.map(function(m){
 const roleClass=m.role==='user'?'chat-user':'chat-assistant';
 const roleLabel=m.role==='user'?'You':'Bot';
 const content=formatContent(m.content);
 return'<div class="chat-message '+roleClass+'"><strong>'+roleLabel+':</strong><br>'+content+'</div>';
 }).join('');
+if(wasPinned){
 container.scrollTop=container.scrollHeight;
+}else{
+const maxTop=Math.max(0,container.scrollHeight-container.clientHeight);
+container.scrollTop=Math.min(previousTop,maxTop);
+}
+chatPinnedToBottom=isChatNearBottom(container);
+chatScrollTop=container.scrollTop;
+}
+
+function bindChatScrollTracking(){
+const container=byId('chatHistory');
+if(!container)return;
+container.addEventListener('scroll',function(){
+chatPinnedToBottom=isChatNearBottom(container);
+chatScrollTop=container.scrollTop;
+});
 }
 
 function renderToolActivity(){
@@ -1330,7 +1585,7 @@ try{
 if(currentActiveSessionID){
 progress=await loadSessionToolActivity(currentActiveSessionID);
 }
-run=await pollRun(runId,60);
+run=await pollRun(runId,5);
 }catch(e){
 chatMessages[thinkingIdx]={role:'assistant',content:'Run '+runId+' is still processing (temporary status check error: '+e.message+'). I will keep checking automatically.'};
 renderChat();
@@ -1411,17 +1666,10 @@ if(result.session_id&&String(result.session_id).trim()){
 currentActiveSessionID=String(result.session_id).trim();
 if(byId('resumeSessionID'))byId('resumeSessionID').value=currentActiveSessionID;
 }
-const run=await pollRun(result.id,120);
-if(run.status==='failed'){
-chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+(run.error||'Run failed')};
-}else if(run.status==='running'){
-chatMessages[thinkingIdx]={role:'assistant',content:'Run '+result.id+' is still processing. I will keep polling automatically and post the final output here.'};
+const initialStatus=(result.status&&String(result.status).trim())?String(result.status).trim():'queued';
+chatMessages[thinkingIdx]={role:'assistant',content:'Working on it now. Run '+result.id+' is '+initialStatus+'. I will keep polling automatically and post the final output here.'};
+renderChat();
 continuePollingRun(result.id,thinkingIdx,Date.now());
-}else{
-const output=(run.output&&run.output.trim())?run.output:'(completed with no output)';
-chatMessages[thinkingIdx]={role:'assistant',content:output};
-appendToolActivityFromRun(run);
-}
 }else if(result.response){
 chatMessages[thinkingIdx]={role:'assistant',content:result.response};
 const extractedSessionID=maybeExtractSessionID(result.response);
@@ -1459,6 +1707,7 @@ el.addEventListener('change',updateRawPreview);
 wireFormPreviewUpdates();
 applyLayoutPreferences();
 bindChatResizePersistence();
+bindChatScrollTracking();
 renderToolActivity();
 refreshSessions();
 loadStatus();
