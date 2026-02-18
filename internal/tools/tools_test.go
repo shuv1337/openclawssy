@@ -1338,6 +1338,27 @@ func TestHTTPRequestToolRedirectRechecksAllowlist(t *testing.T) {
 	}
 }
 
+func TestHostAllowedByDomainListNormalizesURLStyleCandidates(t *testing.T) {
+	allowed := []string{
+		"https://api.perplexity.ai/chat/completions",
+		"api.openai.com:443",
+		"*.openrouter.ai",
+	}
+
+	if !hostAllowedByDomainList("api.perplexity.ai", allowed) {
+		t.Fatal("expected host to match URL-style allowlist entry")
+	}
+	if !hostAllowedByDomainList("api.openai.com", allowed) {
+		t.Fatal("expected host to match allowlist entry with port")
+	}
+	if !hostAllowedByDomainList("api.openrouter.ai", allowed) {
+		t.Fatal("expected subdomain to match wildcard allowlist entry")
+	}
+	if hostAllowedByDomainList("evil.example.com", allowed) {
+		t.Fatal("did not expect non-allowlisted host to match")
+	}
+}
+
 func setupNetworkToolRegistry(t *testing.T, mutate func(*config.Config)) (string, string, *Registry) {
 	t.Helper()
 	root := t.TempDir()

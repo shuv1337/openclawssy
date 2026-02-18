@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -201,6 +202,10 @@ func appendPromptDirective(prompt, directive string) string {
 }
 
 func requestUserGuidanceFromFailures(userMessage string, records []ToolCallRecord) string {
+	if prompt, ok := networkAllowlistPermissionPrompt(userMessage, records); ok {
+		return prompt
+	}
+
 	var b strings.Builder
 	b.WriteString("I hit repeated tool failures and need your guidance before I continue.\n")
 	goal := strings.TrimSpace(userMessage)
@@ -245,6 +250,75 @@ func requestUserGuidanceFromFailures(userMessage string, records []ToolCallRecor
 	}
 	b.WriteString("Please guide me on the next step (for example: grant capability/permission, provide auth details, or pick a different approach).")
 	return b.String()
+}
+
+func networkAllowlistPermissionPrompt(userMessage string, records []ToolCallRecord) (string, bool) {
+	hostSet := map[string]struct{}{}
+	for _, rec := range records {
+		toolName := strings.TrimSpace(strings.ToLower(rec.Request.Name))
+		if toolName != "http.request" && toolName != "net.fetch" {
+			continue
+		}
+		errText := strings.TrimSpace(rec.Result.Error)
+		if errText == "" {
+			continue
+		}
+		host := extractNetworkAllowlistDeniedHost(errText)
+		if host == "" {
+			continue
+		}
+		hostSet[host] = struct{}{}
+	}
+	if len(hostSet) == 0 {
+		return "", false
+	}
+
+	hosts := make([]string, 0, len(hostSet))
+	for host := range hostSet {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+
+	goal := strings.TrimSpace(userMessage)
+	quoted := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		quoted = append(quoted, "`"+host+"`")
+	}
+
+	var b strings.Builder
+	b.WriteString("I can continue, but I need your permission first.\n")
+	if goal != "" {
+		b.WriteString("Goal: ")
+		b.WriteString(goal)
+		b.WriteString("\n")
+	}
+	b.WriteString("The network tool is blocked because these hosts are not in `network.allowed_domains`: ")
+	b.WriteString(strings.Join(quoted, ", "))
+	b.WriteString(".\n")
+	b.WriteString("If you approve, reply exactly: `yes, add allowed domains` and I will add them via `config.set` and retry immediately.")
+	return b.String(), true
+}
+
+func extractNetworkAllowlistDeniedHost(errText string) string {
+	lower := strings.ToLower(strings.TrimSpace(errText))
+	if !strings.Contains(lower, "is not in network.allowed_domains") {
+		return ""
+	}
+	const prefix = "host \""
+	start := strings.Index(lower, prefix)
+	if start == -1 {
+		return ""
+	}
+	start += len(prefix)
+	endRel := strings.Index(lower[start:], "\"")
+	if endRel <= 0 {
+		return ""
+	}
+	host := strings.TrimSpace(lower[start : start+endRel])
+	if host == "" {
+		return ""
+	}
+	return host
 }
 
 func truncateGuidanceText(value string, maxChars int) string {

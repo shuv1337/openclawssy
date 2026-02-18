@@ -216,16 +216,7 @@ func hostAllowedByDomainList(host string, allowedDomains []string) bool {
 		return false
 	}
 	for _, raw := range allowedDomains {
-		candidate := strings.ToLower(strings.TrimSpace(raw))
-		if candidate == "" {
-			continue
-		}
-		if strings.HasPrefix(candidate, "*.") {
-			candidate = strings.TrimPrefix(candidate, "*.")
-		}
-		if strings.HasPrefix(candidate, ".") {
-			candidate = strings.TrimPrefix(candidate, ".")
-		}
+		candidate := normalizeAllowedDomainCandidate(raw)
 		if candidate == "" {
 			continue
 		}
@@ -234,6 +225,49 @@ func hostAllowedByDomainList(host string, allowedDomains []string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAllowedDomainCandidate(raw string) string {
+	candidate := strings.ToLower(strings.TrimSpace(raw))
+	if candidate == "" {
+		return ""
+	}
+	if strings.HasPrefix(candidate, "*.") {
+		candidate = strings.TrimPrefix(candidate, "*.")
+	}
+	if strings.HasPrefix(candidate, ".") {
+		candidate = strings.TrimPrefix(candidate, ".")
+	}
+
+	if strings.Contains(candidate, "://") {
+		if parsed, err := url.Parse(candidate); err == nil {
+			if host := strings.TrimSpace(parsed.Hostname()); host != "" {
+				candidate = host
+			}
+		}
+	} else {
+		if parsed, err := url.Parse("https://" + candidate); err == nil {
+			if host := strings.TrimSpace(parsed.Hostname()); host != "" {
+				candidate = host
+			}
+		}
+	}
+
+	if host, port, err := net.SplitHostPort(candidate); err == nil {
+		if host != "" && port != "" {
+			candidate = host
+		}
+	} else if idx := strings.LastIndex(candidate, ":"); idx > 0 && !strings.Contains(candidate, "]") {
+		if _, convErr := strconv.Atoi(candidate[idx+1:]); convErr == nil {
+			candidate = candidate[:idx]
+		}
+	}
+
+	candidate = strings.TrimSpace(strings.Trim(candidate, "[]"))
+	if strings.HasPrefix(candidate, ".") {
+		candidate = strings.TrimPrefix(candidate, ".")
+	}
+	return candidate
 }
 
 func parseRequestHeaders(raw any) map[string]string {
