@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"openclawssy/internal/agent"
 )
@@ -62,6 +63,31 @@ func TestRecordToolExecutionIncludesCallbackErrorInTrace(t *testing.T) {
 	}
 	if entry["callback_error"] != "runtime: append tool message: permission denied" {
 		t.Fatalf("expected callback_error in trace entry, got %#v", entry)
+	}
+}
+
+func TestRecordToolExecutionIncludesDurationInTrace(t *testing.T) {
+	collector := newRunTraceCollector("run_d", "session_d", "dashboard", "work")
+	start := time.Now().Add(-125 * time.Millisecond)
+	end := time.Now()
+	collector.RecordToolExecution([]agent.ToolCallRecord{{
+		Request:     agent.ToolCallRequest{ID: "tool-json-3", Name: "fs.read", Arguments: []byte(`{"path":"a.txt"}`)},
+		Result:      agent.ToolCallResult{ID: "tool-json-3", Output: `{"path":"a.txt","content":"x"}`},
+		StartedAt:   start,
+		CompletedAt: end,
+	}})
+
+	snapshot := collector.Snapshot()
+	items, ok := snapshot["tool_execution_results"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("expected one tool trace item, got %#v", snapshot["tool_execution_results"])
+	}
+	entry, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected trace entry shape: %#v", items[0])
+	}
+	if _, ok := entry["duration_ms"]; !ok {
+		t.Fatalf("expected duration_ms in trace entry, got %#v", entry)
 	}
 }
 

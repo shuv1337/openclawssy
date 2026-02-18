@@ -309,6 +309,28 @@ func TestCoreFsTools(t *testing.T) {
 		t.Fatalf("unexpected edited content: %q", string(b))
 	}
 
+	appendRes, err := reg.Execute(context.Background(), "agent", "fs.append", ws, map[string]any{
+		"path":    "hello.txt",
+		"content": "\nagain",
+	})
+	if err != nil {
+		t.Fatalf("fs.append: %v", err)
+	}
+	if got := appendRes["lines_appended"]; got != 2 {
+		t.Fatalf("expected fs.append lines_appended=2, got %#v", got)
+	}
+	if got := appendRes["summary"]; got != "appended 2 line(s) to hello.txt" {
+		t.Fatalf("unexpected fs.append summary: %#v", got)
+	}
+
+	b, err = os.ReadFile(filepath.Join(ws, "hello.txt"))
+	if err != nil {
+		t.Fatalf("read appended file: %v", err)
+	}
+	if string(b) != "hello there\nagain" {
+		t.Fatalf("unexpected appended content: %q", string(b))
+	}
+
 	if _, err := reg.Execute(context.Background(), "agent", "fs.list", ws, map[string]any{"path": "."}); err != nil {
 		t.Fatalf("fs.list: %v", err)
 	}
@@ -434,6 +456,99 @@ func TestFsEditLinePatch(t *testing.T) {
 	}
 }
 
+func TestFsEditUnifiedDiffSingleHunk(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -2,1 +2,1 @@\n-two\n+TWO\n"
+	res, err := reg.Execute(context.Background(), "agent", "fs.edit", ws, map[string]any{
+		"path":  "a.txt",
+		"patch": patch,
+	})
+	if err != nil {
+		t.Fatalf("fs.edit unified diff: %v", err)
+	}
+	if got := res["mode"]; got != "unified_diff" {
+		t.Fatalf("expected unified_diff mode, got %#v", got)
+	}
+	if got := res["applied_edits"]; got != 1 {
+		t.Fatalf("expected applied_edits=1, got %#v", got)
+	}
+	b, _ := os.ReadFile(filepath.Join(ws, "a.txt"))
+	if string(b) != "one\nTWO\nthree\n" {
+		t.Fatalf("unexpected unified-diff content: %q", string(b))
+	}
+}
+
+func TestFsEditUnifiedDiffRejectsMixedModes(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	_, err := reg.Execute(context.Background(), "agent", "fs.edit", ws, map[string]any{
+		"path":  "a.txt",
+		"patch": "@@ -1,1 +1,1 @@\n-one\n+ONE\n",
+		"edits": []any{map[string]any{"startLine": 1, "endLine": 1, "newText": "ONE"}},
+	})
+	if err == nil {
+		t.Fatalf("expected mixed-mode validation error")
+	}
+	if !strings.Contains(err.Error(), "exactly one edit mode") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFsEditUnifiedDiffRejectsContextMismatch(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	_, err := reg.Execute(context.Background(), "agent", "fs.edit", ws, map[string]any{
+		"path":  "a.txt",
+		"patch": "@@ -2,1 +2,1 @@\n-three\n+THREE\n",
+	})
+	if err == nil {
+		t.Fatalf("expected context mismatch error")
+	}
+	if !strings.Contains(err.Error(), "context mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFsEditUnifiedDiffRejectsNoHunks(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "a.txt"), []byte("one\ntwo\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	_, err := reg.Execute(context.Background(), "agent", "fs.edit", ws, map[string]any{
+		"path":  "a.txt",
+		"patch": "--- a/a.txt\n+++ b/a.txt\n",
+	})
+	if err == nil {
+		t.Fatalf("expected no-hunks error")
+	}
+	if !strings.Contains(err.Error(), "does not contain any @@ hunks") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestFsWriteRejectsWorkspaceControlPlaneFilename(t *testing.T) {
 	ws := t.TempDir()
 	reg := NewRegistry(fakePolicy{}, nil)
@@ -442,6 +557,32 @@ func TestFsWriteRejectsWorkspaceControlPlaneFilename(t *testing.T) {
 	}
 
 	_, err := reg.Execute(context.Background(), "agent-123", "fs.write", ws, map[string]any{
+		"path":    filepath.Join("notes", "SOUL.md"),
+		"content": "new content",
+	})
+	if err == nil {
+		t.Fatalf("expected control-plane filename guard error")
+	}
+	msg := err.Error()
+	for _, needle := range []string{
+		"does not control agent behavior",
+		".openclawssy/agents/<agent_id>/SOUL.md",
+		"dashboard Agent Files",
+	} {
+		if !strings.Contains(msg, needle) {
+			t.Fatalf("expected error to contain %q, got %q", needle, msg)
+		}
+	}
+}
+
+func TestFsAppendRejectsWorkspaceControlPlaneFilename(t *testing.T) {
+	ws := t.TempDir()
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent-123", "fs.append", ws, map[string]any{
 		"path":    filepath.Join("notes", "SOUL.md"),
 		"content": "new content",
 	})
@@ -1224,6 +1365,397 @@ func setupSessionToolRegistry(t *testing.T, pol Policy) (string, string, *Regist
 		t.Fatalf("register core: %v", err)
 	}
 	return ws, agentsPath, reg
+}
+
+func TestAgentToolsListCreateSwitchLifecycle(t *testing.T) {
+	ws, root, agentsPath, cfgPath, reg := setupAgentToolRegistry(t, fakePolicy{})
+
+	listRes, err := reg.Execute(context.Background(), "agent", "agent.list", ws, map[string]any{})
+	if err != nil {
+		t.Fatalf("agent.list initial: %v", err)
+	}
+	if total, _ := listRes["total"].(int); total != 0 {
+		t.Fatalf("expected no agents initially, got %#v", listRes)
+	}
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.create", ws, map[string]any{"agent_id": "beta"}); err != nil {
+		t.Fatalf("agent.create beta: %v", err)
+	}
+	if _, err := reg.Execute(context.Background(), "agent", "agent.create", ws, map[string]any{"agent_id": "alpha"}); err != nil {
+		t.Fatalf("agent.create alpha: %v", err)
+	}
+
+	listRes, err = reg.Execute(context.Background(), "agent", "agent.list", ws, map[string]any{"limit": 1, "offset": 1})
+	if err != nil {
+		t.Fatalf("agent.list paginated: %v", err)
+	}
+	if total, _ := listRes["total"].(int); total != 2 {
+		t.Fatalf("expected total=2, got %#v", listRes)
+	}
+	items, ok := listRes["items"].([]string)
+	if !ok || len(items) != 1 || items[0] != "beta" {
+		t.Fatalf("expected sorted/paginated items [beta], got %#v", listRes["items"])
+	}
+
+	for _, p := range []string{
+		filepath.Join(agentsPath, "alpha", "memory"),
+		filepath.Join(agentsPath, "alpha", "audit"),
+		filepath.Join(agentsPath, "alpha", "runs"),
+		filepath.Join(agentsPath, "alpha", "SOUL.md"),
+		filepath.Join(agentsPath, "alpha", "RULES.md"),
+		filepath.Join(agentsPath, "alpha", "TOOLS.md"),
+		filepath.Join(agentsPath, "alpha", "SPECPLAN.md"),
+		filepath.Join(agentsPath, "alpha", "DEVPLAN.md"),
+		filepath.Join(agentsPath, "alpha", "HANDOFF.md"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected scaffold path %s: %v", p, err)
+		}
+	}
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.switch", ws, map[string]any{"agent_id": "beta", "scope": "chat"}); err != nil {
+		t.Fatalf("agent.switch chat: %v", err)
+	}
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Chat.DefaultAgentID != "beta" {
+		t.Fatalf("expected chat default beta, got %q", cfg.Chat.DefaultAgentID)
+	}
+	if cfg.Discord.DefaultAgentID != "default" {
+		t.Fatalf("expected discord default unchanged, got %q", cfg.Discord.DefaultAgentID)
+	}
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.switch", ws, map[string]any{"agent_id": "alpha"}); err != nil {
+		t.Fatalf("agent.switch both: %v", err)
+	}
+	cfg, err = config.LoadOrDefault(filepath.Join(root, ".openclawssy", "config.json"))
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if cfg.Chat.DefaultAgentID != "alpha" || cfg.Discord.DefaultAgentID != "alpha" {
+		t.Fatalf("expected chat+discord defaults switched to alpha, got chat=%q discord=%q", cfg.Chat.DefaultAgentID, cfg.Discord.DefaultAgentID)
+	}
+}
+
+func TestAgentCreateForceOverwriteBehavior(t *testing.T) {
+	ws, _, agentsPath, _, reg := setupAgentToolRegistry(t, fakePolicy{})
+	if _, err := reg.Execute(context.Background(), "agent", "agent.create", ws, map[string]any{"agent_id": "default"}); err != nil {
+		t.Fatalf("agent.create: %v", err)
+	}
+	toolsPath := filepath.Join(agentsPath, "default", "TOOLS.md")
+	if err := os.WriteFile(toolsPath, []byte("custom-tools"), 0o600); err != nil {
+		t.Fatalf("write custom tools fixture: %v", err)
+	}
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.create", ws, map[string]any{"agent_id": "default"}); err != nil {
+		t.Fatalf("agent.create no-force: %v", err)
+	}
+	raw, err := os.ReadFile(toolsPath)
+	if err != nil {
+		t.Fatalf("read tools fixture: %v", err)
+	}
+	if string(raw) != "custom-tools" {
+		t.Fatalf("expected no-force to keep existing seed file, got %q", string(raw))
+	}
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.create", ws, map[string]any{"agent_id": "default", "force": true}); err != nil {
+		t.Fatalf("agent.create force: %v", err)
+	}
+	raw, err = os.ReadFile(toolsPath)
+	if err != nil {
+		t.Fatalf("read tools after force: %v", err)
+	}
+	if !strings.Contains(string(raw), "Enabled core tools") {
+		t.Fatalf("expected force=true to rewrite seed file, got %q", string(raw))
+	}
+}
+
+func TestAgentToolsRejectInvalidAgentID(t *testing.T) {
+	ws, _, _, _, reg := setupAgentToolRegistry(t, fakePolicy{})
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.create", ws, map[string]any{"agent_id": "../evil"}); err == nil {
+		t.Fatal("expected invalid agent_id rejection for create")
+	}
+	if _, err := reg.Execute(context.Background(), "agent", "agent.switch", ws, map[string]any{"agent_id": "a/b"}); err == nil {
+		t.Fatal("expected invalid agent_id rejection for switch")
+	}
+}
+
+func TestAgentSwitchCreateIfMissing(t *testing.T) {
+	ws, _, agentsPath, _, reg := setupAgentToolRegistry(t, fakePolicy{})
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.switch", ws, map[string]any{"agent_id": "new-agent", "scope": "both"}); err == nil {
+		t.Fatal("expected missing agent error when create_if_missing=false")
+	}
+
+	if _, err := reg.Execute(context.Background(), "agent", "agent.switch", ws, map[string]any{"agent_id": "new-agent", "scope": "both", "create_if_missing": true}); err != nil {
+		t.Fatalf("agent.switch create_if_missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(agentsPath, "new-agent", "SOUL.md")); err != nil {
+		t.Fatalf("expected switched missing agent to be scaffolded: %v", err)
+	}
+}
+
+func TestAgentToolsAreCapabilityGated(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Workspace.Root = ws
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config fixture: %v", err)
+	}
+	agentsPath := filepath.Join(root, ".openclawssy", "agents")
+
+	enforcer := policy.NewEnforcer(ws, map[string][]string{"agent": {"fs.read"}})
+	reg := NewRegistry(enforcer, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath, AgentsPath: agentsPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "agent.list", ws, map[string]any{})
+	if err == nil {
+		t.Fatal("expected capability denied for agent.list")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodePolicyDenied {
+		t.Fatalf("expected policy.denied, got %s", toolErr.Code)
+	}
+}
+
+func setupAgentToolRegistry(t *testing.T, pol Policy) (string, string, string, string, *Registry) {
+	t.Helper()
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Workspace.Root = ws
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config fixture: %v", err)
+	}
+	agentsPath := filepath.Join(root, ".openclawssy", "agents")
+
+	reg := NewRegistry(pol, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath, AgentsPath: agentsPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	return ws, root, agentsPath, cfgPath, reg
+}
+
+func TestPolicyToolsGrantRevokeLifecycle(t *testing.T) {
+	ws, policyPath, reg := setupPolicyToolRegistry(t, policy.NewEnforcer("", map[string][]string{
+		"admin": {"policy.list", "policy.grant", "policy.revoke", "policy.admin"},
+	}))
+
+	listRes, err := reg.Execute(context.Background(), "admin", "policy.list", ws, map[string]any{"agent_id": "worker"})
+	if err != nil {
+		t.Fatalf("policy.list default: %v", err)
+	}
+	if src, _ := listRes["source"].(string); src != "default" {
+		t.Fatalf("expected default source before persistence, got %#v", listRes)
+	}
+
+	if _, err := reg.Execute(context.Background(), "admin", "policy.grant", ws, map[string]any{"agent_id": "worker", "capability": "fs.delete"}); err != nil {
+		t.Fatalf("policy.grant: %v", err)
+	}
+
+	listRes, err = reg.Execute(context.Background(), "admin", "policy.list", ws, map[string]any{"agent_id": "worker"})
+	if err != nil {
+		t.Fatalf("policy.list persisted: %v", err)
+	}
+	if src, _ := listRes["source"].(string); src != "persisted" {
+		t.Fatalf("expected persisted source after grant, got %#v", listRes)
+	}
+	caps, ok := listRes["capabilities"].([]string)
+	if !ok {
+		t.Fatalf("expected []string capabilities, got %#v", listRes["capabilities"])
+	}
+	if !containsString(caps, "fs.delete") {
+		t.Fatalf("expected fs.delete in capabilities after grant, got %#v", caps)
+	}
+
+	if _, err := reg.Execute(context.Background(), "admin", "policy.revoke", ws, map[string]any{"agent_id": "worker", "capability": "fs.write"}); err != nil {
+		t.Fatalf("policy.revoke: %v", err)
+	}
+	listRes, err = reg.Execute(context.Background(), "admin", "policy.list", ws, map[string]any{"agent_id": "worker"})
+	if err != nil {
+		t.Fatalf("policy.list after revoke: %v", err)
+	}
+	caps = listRes["capabilities"].([]string)
+	if containsString(caps, "fs.write") {
+		t.Fatalf("expected fs.write revoked, got %#v", caps)
+	}
+
+	stored, err := policy.LoadGrants(policyPath)
+	if err != nil {
+		t.Fatalf("load policy grants: %v", err)
+	}
+	if len(stored["worker"]) == 0 {
+		t.Fatalf("expected persisted grants for worker in %s", policyPath)
+	}
+}
+
+func TestPolicyToolsRequirePolicyAdmin(t *testing.T) {
+	ws, _, reg := setupPolicyToolRegistry(t, policy.NewEnforcer("", map[string][]string{
+		"agent": {"policy.list", "policy.grant", "policy.revoke"},
+	}))
+
+	_, err := reg.Execute(context.Background(), "agent", "policy.list", ws, map[string]any{"agent_id": "worker"})
+	if err == nil {
+		t.Fatal("expected policy.admin denial for policy.list")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodePolicyDenied {
+		t.Fatalf("expected policy.denied, got %s", toolErr.Code)
+	}
+}
+
+func setupPolicyToolRegistry(t *testing.T, pol Policy) (string, string, *Registry) {
+	t.Helper()
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	policyPath := filepath.Join(root, ".openclawssy", "policy", "capabilities.json")
+
+	reg := NewRegistry(pol, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, PolicyPath: policyPath, DefaultGrants: []string{"fs.read", "fs.write", "run.list", "run.get", "run.cancel", "metrics.get"}}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	return ws, policyPath, reg
+}
+
+func TestMetricsGetAggregatesToolDurationsAndErrors(t *testing.T) {
+	ws, runsPath, reg := setupRunToolRegistry(t, fakePolicy{})
+	store, err := httpchannel.NewFileRunStore(runsPath)
+	if err != nil {
+		t.Fatalf("new run store: %v", err)
+	}
+
+	now := time.Now().UTC()
+	_, err = store.Create(context.Background(), httpchannel.Run{
+		ID:        "run_1",
+		AgentID:   "default",
+		Status:    "completed",
+		ToolCalls: 2,
+		CreatedAt: now.Add(-2 * time.Minute),
+		UpdatedAt: now.Add(-2 * time.Minute),
+		Trace: map[string]any{
+			"tool_execution_results": []any{
+				map[string]any{"tool": "fs.read", "duration_ms": 10, "error": ""},
+				map[string]any{"tool": "fs.write", "duration_ms": 20, "error": "boom"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create run_1: %v", err)
+	}
+	_, err = store.Create(context.Background(), httpchannel.Run{
+		ID:        "run_2",
+		AgentID:   "default",
+		Status:    "failed",
+		ToolCalls: 1,
+		CreatedAt: now.Add(-1 * time.Minute),
+		UpdatedAt: now.Add(-1 * time.Minute),
+		Trace: map[string]any{
+			"tool_execution_results": []any{
+				map[string]any{"tool": "fs.read", "duration_ms": 30, "error": ""},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create run_2: %v", err)
+	}
+
+	res, err := reg.Execute(context.Background(), "agent", "metrics.get", ws, map[string]any{"agent_id": "default"})
+	if err != nil {
+		t.Fatalf("metrics.get: %v", err)
+	}
+	if totalCalls, _ := res["tool_calls_total"].(int); totalCalls != 3 {
+		t.Fatalf("expected tool_calls_total=3, got %#v", res["tool_calls_total"])
+	}
+	runs, ok := res["runs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected runs map, got %#v", res["runs"])
+	}
+	statusCounts, ok := runs["status_counts"].(map[string]int)
+	if !ok {
+		t.Fatalf("expected status_counts map, got %#v", runs["status_counts"])
+	}
+	if statusCounts["completed"] != 1 || statusCounts["failed"] != 1 {
+		t.Fatalf("unexpected status counts: %#v", statusCounts)
+	}
+	tools, ok := res["tools"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected tools slice, got %#v", res["tools"])
+	}
+	readStats := map[string]any{}
+	writeStats := map[string]any{}
+	for _, item := range tools {
+		if item["tool"] == "fs.read" {
+			readStats = item
+		}
+		if item["tool"] == "fs.write" {
+			writeStats = item
+		}
+	}
+	if readStats["calls"] != 2 || readStats["errors"] != 0 || readStats["avg_duration_ms"] != int64(20) {
+		t.Fatalf("unexpected fs.read metrics: %#v", readStats)
+	}
+	if writeStats["calls"] != 1 || writeStats["errors"] != 1 {
+		t.Fatalf("unexpected fs.write metrics: %#v", writeStats)
+	}
+}
+
+func TestMetricsGetIsCapabilityGated(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	runsPath := filepath.Join(root, ".openclawssy", "runs.json")
+
+	enforcer := policy.NewEnforcer(ws, map[string][]string{"agent": {"fs.read"}})
+	reg := NewRegistry(enforcer, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, RunsPath: runsPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "metrics.get", ws, map[string]any{})
+	if err == nil {
+		t.Fatal("expected capability denied for metrics.get")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodePolicyDenied {
+		t.Fatalf("expected policy.denied, got %s", toolErr.Code)
+	}
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSchedulerToolsLifecycle(t *testing.T) {

@@ -156,6 +156,9 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(doc.Content, "fs.delete") {
 			t.Fatalf("runtime context missing fs.delete in file tools list: %q", doc.Content)
 		}
+		if !strings.Contains(doc.Content, "fs.append") {
+			t.Fatalf("runtime context missing fs.append in file tools list: %q", doc.Content)
+		}
 		if !strings.Contains(doc.Content, "fs.move") {
 			t.Fatalf("runtime context missing fs.move in file tools list: %q", doc.Content)
 		}
@@ -170,6 +173,18 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		}
 		if !strings.Contains(doc.Content, "session.list/session.close") {
 			t.Fatalf("runtime context missing session tools guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "agent.list/agent.create/agent.switch") {
+			t.Fatalf("runtime context missing agent tools guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "run.list/run.get/run.cancel") {
+			t.Fatalf("runtime context missing run cancel guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "policy.list/policy.grant/policy.revoke") {
+			t.Fatalf("runtime context missing policy tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "metrics.get") {
+			t.Fatalf("runtime context missing metrics tool guidance: %q", doc.Content)
 		}
 		if !strings.Contains(doc.Content, "http.request") {
 			t.Fatalf("runtime context missing network tool guidance: %q", doc.Content)
@@ -194,6 +209,9 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(doc.Content, "fs.delete") {
 			t.Fatalf("tool best practices missing fs.delete guidance: %q", doc.Content)
 		}
+		if !strings.Contains(doc.Content, "fs.append") {
+			t.Fatalf("tool best practices missing fs.append guidance: %q", doc.Content)
+		}
 		if !strings.Contains(doc.Content, "fs.move") {
 			t.Fatalf("tool best practices missing fs.move guidance: %q", doc.Content)
 		}
@@ -208,6 +226,18 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		}
 		if !strings.Contains(doc.Content, "session.list") || !strings.Contains(doc.Content, "session.close") {
 			t.Fatalf("tool best practices missing session tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "agent.list") || !strings.Contains(doc.Content, "agent.switch") {
+			t.Fatalf("tool best practices missing agent tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "run.cancel") {
+			t.Fatalf("tool best practices missing run.cancel guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "policy.grant") || !strings.Contains(doc.Content, "policy.revoke") {
+			t.Fatalf("tool best practices missing policy tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "metrics.get") {
+			t.Fatalf("tool best practices missing metrics guidance: %q", doc.Content)
 		}
 		if !strings.Contains(doc.Content, "http.request") {
 			t.Fatalf("tool best practices missing network tool guidance: %q", doc.Content)
@@ -246,6 +276,13 @@ print("hello")
 	}
 }
 
+func TestNormalizeToolArgsMapsUnifiedDiffAlias(t *testing.T) {
+	args := normalizeToolArgs("fs.edit", map[string]any{"path": "a.txt", "unified_diff": "@@ -1 +1 @@\n-old\n+new"})
+	if args["patch"] != "@@ -1 +1 @@\n-old\n+new" {
+		t.Fatalf("expected unified_diff alias to map to patch, got %#v", args["patch"])
+	}
+}
+
 func TestNormalizeToolArgsSanitizesMarkdownFencePath(t *testing.T) {
 	args := normalizeToolArgs("fs.list", map[string]any{"path": "```"})
 	if args["path"] != "." {
@@ -278,6 +315,16 @@ func TestNormalizeToolArgsSessionCloseIDAliases(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolArgsPolicyGrantAliases(t *testing.T) {
+	args := normalizeToolArgs("policy.grant", map[string]any{"target_agent": "worker", "tool": "fs.read"})
+	if args["agent_id"] != "worker" {
+		t.Fatalf("expected target_agent alias to normalize to agent_id, got %#v", args["agent_id"])
+	}
+	if args["capability"] != "fs.read" {
+		t.Fatalf("expected tool alias to normalize to capability, got %#v", args["capability"])
+	}
+}
+
 func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 	e := &Engine{}
 	cfg := config.Default()
@@ -285,6 +332,12 @@ func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 	tools := e.allowedTools(cfg)
 	hasSessionList := false
 	hasSessionClose := false
+	hasAgentList := false
+	hasAgentCreate := false
+	hasAgentSwitch := false
+	hasPolicyGrant := false
+	hasPolicyRevoke := false
+	hasMetricsGet := false
 	for _, name := range tools {
 		if name == "session.list" {
 			hasSessionList = true
@@ -292,12 +345,46 @@ func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 		if name == "session.close" {
 			hasSessionClose = true
 		}
+		if name == "agent.list" {
+			hasAgentList = true
+		}
+		if name == "agent.create" {
+			hasAgentCreate = true
+		}
+		if name == "agent.switch" {
+			hasAgentSwitch = true
+		}
+		if name == "policy.grant" {
+			hasPolicyGrant = true
+		}
+		if name == "policy.revoke" {
+			hasPolicyRevoke = true
+		}
+		if name == "metrics.get" {
+			hasMetricsGet = true
+		}
 		if name == "http.request" {
 			t.Fatal("did not expect http.request when network is disabled")
 		}
 	}
 	if !hasSessionList || !hasSessionClose {
 		t.Fatalf("expected session tools in allowed list, got %#v", tools)
+	}
+	if !hasAgentList || !hasAgentCreate || !hasAgentSwitch {
+		t.Fatalf("expected agent tools in allowed list, got %#v", tools)
+	}
+	if !hasPolicyGrant || !hasPolicyRevoke || !hasMetricsGet {
+		t.Fatalf("expected policy/metrics tools in allowed list, got %#v", tools)
+	}
+	foundAppend := false
+	for _, name := range tools {
+		if name == "fs.append" {
+			foundAppend = true
+			break
+		}
+	}
+	if !foundAppend {
+		t.Fatalf("expected fs.append in allowed tools, got %#v", tools)
 	}
 
 	cfg.Network.Enabled = true

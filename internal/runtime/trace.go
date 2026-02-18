@@ -44,6 +44,7 @@ type toolExtractionTrace struct {
 type toolExecutionResultLog struct {
 	Tool          string `json:"tool"`
 	ToolCallID    string `json:"tool_call_id,omitempty"`
+	DurationMS    int64  `json:"duration_ms,omitempty"`
 	Arguments     string `json:"arguments,omitempty"`
 	Summary       string `json:"summary,omitempty"`
 	Output        string `json:"output,omitempty"`
@@ -109,9 +110,14 @@ func (c *runTraceCollector) RecordToolExecution(records []agent.ToolCallRecord) 
 	}
 	items := make([]toolExecutionResultLog, 0, len(records))
 	for _, rec := range records {
+		durationMS := rec.CompletedAt.Sub(rec.StartedAt).Milliseconds()
+		if durationMS < 0 {
+			durationMS = 0
+		}
 		item := toolExecutionResultLog{
 			Tool:          strings.TrimSpace(rec.Request.Name),
 			ToolCallID:    strings.TrimSpace(rec.Request.ID),
+			DurationMS:    durationMS,
 			Summary:       summarizeToolExecution(rec.Request.Name, rec.Result.Output, rec.Result.Error),
 			Output:        strings.TrimSpace(rec.Result.Output),
 			Error:         strings.TrimSpace(rec.Result.Error),

@@ -1245,6 +1245,9 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 	if !isToolAllowed("fs.delete", []string{"fs.delete"}) {
 		t.Fatal("expected fs.delete to be allowed when explicitly granted")
 	}
+	if !isToolAllowed("fs.append", []string{"fs.append"}) {
+		t.Fatal("expected fs.append to be allowed when explicitly granted")
+	}
 	if !isToolAllowed("fs.move", []string{"fs.rename"}) {
 		t.Fatal("expected fs.rename alias to allow canonical fs.move")
 	}
@@ -1260,6 +1263,24 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 	if !isToolAllowed("session.close", []string{"session.close"}) {
 		t.Fatal("expected session.close to be allowed when explicitly granted")
 	}
+	if !isToolAllowed("agent.list", []string{"agent.list"}) {
+		t.Fatal("expected agent.list to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("agent.create", []string{"agent.create"}) {
+		t.Fatal("expected agent.create to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("agent.switch", []string{"agent.switch"}) {
+		t.Fatal("expected agent.switch to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("policy.grant", []string{"policy.grant"}) {
+		t.Fatal("expected policy.grant to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("run.cancel", []string{"run.cancel"}) {
+		t.Fatal("expected run.cancel to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("metrics.get", []string{"metrics.get"}) {
+		t.Fatal("expected metrics.get to be allowed when explicitly granted")
+	}
 	if !isToolAllowed("http.request", []string{"net.fetch"}) {
 		t.Fatal("expected net.fetch alias to allow canonical http.request")
 	}
@@ -1269,6 +1290,9 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 	}
 	if canonical, ok := canonicalToolName("fs.delete"); !ok || canonical != "fs.delete" {
 		t.Fatalf("expected fs.delete canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("fs.append"); !ok || canonical != "fs.append" {
+		t.Fatalf("expected fs.append canonical mapping, got ok=%v canonical=%q", ok, canonical)
 	}
 	if canonical, ok := canonicalToolName("fs.rename"); !ok || canonical != "fs.move" {
 		t.Fatalf("expected fs.rename alias to canonicalize to fs.move, got ok=%v canonical=%q", ok, canonical)
@@ -1284,6 +1308,24 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 	}
 	if canonical, ok := canonicalToolName("session.list"); !ok || canonical != "session.list" {
 		t.Fatalf("expected session.list canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("agent.list"); !ok || canonical != "agent.list" {
+		t.Fatalf("expected agent.list canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("agent.create"); !ok || canonical != "agent.create" {
+		t.Fatalf("expected agent.create canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("agent.switch"); !ok || canonical != "agent.switch" {
+		t.Fatalf("expected agent.switch canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("policy.revoke"); !ok || canonical != "policy.revoke" {
+		t.Fatalf("expected policy.revoke canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("run.cancel"); !ok || canonical != "run.cancel" {
+		t.Fatalf("expected run.cancel canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("metrics.get"); !ok || canonical != "metrics.get" {
+		t.Fatalf("expected metrics.get canonical mapping, got ok=%v canonical=%q", ok, canonical)
 	}
 	if canonical, ok := canonicalToolName("net.fetch"); !ok || canonical != "http.request" {
 		t.Fatalf("expected net.fetch alias to canonicalize to http.request, got ok=%v canonical=%q", ok, canonical)

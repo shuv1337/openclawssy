@@ -29,7 +29,7 @@ Welcome to the **Ussyverse**: the tiny but principled corner of agent tooling wh
 - CLI: `init`, `setup`, `ask`, `run`, `serve`, `cron`, `doctor`
 - Channels: local HTTP API + Discord bot bridge
 - Dashboard: HTTPS admin panel for status/config/secrets ingestion
-- Tooling: fs/code tools (`fs.read`, `fs.list`, `fs.write`, `fs.delete`, `fs.move`, `fs.edit`), config tools (`config.get`, `config.set`), secret tools (`secrets.get`, `secrets.set`, `secrets.list`), scheduler tools (`scheduler.list`, `scheduler.add`, `scheduler.remove`, `scheduler.pause`, `scheduler.resume`), session tools (`session.list`, `session.close`), run management tools (`run.list`, `run.get`, `run.cancel`), network tool (`http.request`), `time.now`, sandbox-gated `shell.exec`
+- Tooling: fs/code tools (`fs.read`, `fs.list`, `fs.write`, `fs.append`, `fs.delete`, `fs.move`, `fs.edit`), config tools (`config.get`, `config.set`), secret tools (`secrets.get`, `secrets.set`, `secrets.list`), scheduler tools (`scheduler.list`, `scheduler.add`, `scheduler.remove`, `scheduler.pause`, `scheduler.resume`), session tools (`session.list`, `session.close`), agent management tools (`agent.list`, `agent.create`, `agent.switch`), policy tools (`policy.list`, `policy.grant`, `policy.revoke`), run management tools (`run.list`, `run.get`, `run.cancel`), metrics tool (`metrics.get`), network tool (`http.request`), `time.now`, sandbox-gated `shell.exec`
 - Security: encrypted secret store, append-only audit logs, path/symlink guards
 - Providers: OpenAI, OpenRouter, Requesty, ZAI, generic OpenAI-compatible endpoints
 
@@ -124,6 +124,12 @@ openclawssy run --agent default --message '/tool fs.delete {"path":"scratch.txt"
 # safe rename/move example
 openclawssy run --agent default --message '/tool fs.move {"src":"draft.txt","dst":"final.txt"}'
 
+# append content without overwriting file
+openclawssy run --agent default --message '/tool fs.append {"path":"notes.txt","content":"\nnew line"}'
+
+# apply unified-diff patch to a file
+openclawssy run --agent default --message '/tool fs.edit {"path":"notes.txt","patch":"@@ -1,1 +1,1 @@\n-old\n+new\n"}'
+
 # safe config mutation example (allowlisted fields only)
 openclawssy run --agent default --message '/tool config.set {"updates":{"output.thinking_mode":"on_error","engine.max_concurrent_runs":32}}'
 
@@ -144,10 +150,22 @@ openclawssy run --agent default --message '/tool scheduler.pause {"id":"job_1"}'
 openclawssy run --agent default --message '/tool session.list {"agent_id":"default","limit":10}'
 openclawssy run --agent default --message '/tool session.close {"session_id":"chat_123"}'
 
+# agent management examples
+openclawssy run --agent default --message '/tool agent.list {"limit":20,"offset":0}'
+openclawssy run --agent default --message '/tool agent.create {"agent_id":"research"}'
+openclawssy run --agent default --message '/tool agent.switch {"agent_id":"research","scope":"both","create_if_missing":true}'
+
 # run management examples
 openclawssy run --agent default --message '/tool run.list {"agent_id":"default","limit":20}'
 openclawssy run --agent default --message '/tool run.get {"run_id":"run_1234567890"}'
 openclawssy run --agent default --message '/tool run.cancel {"run_id":"run_1234567890"}'
+
+# policy management examples (requires policy.admin capability)
+openclawssy run --agent default --message '/tool policy.list {"agent_id":"default"}'
+openclawssy run --agent default --message '/tool policy.grant {"agent_id":"default","capability":"metrics.get"}'
+
+# tool metrics summary example
+openclawssy run --agent default --message '/tool metrics.get {"agent_id":"default","limit":100}'
 
 # shell execution with timeout (ms)
 openclawssy run --agent default --message '/tool shell.exec {"command":"bash","args":["-lc","sleep 60"],"timeout_ms":10000}'
@@ -353,8 +371,10 @@ If you need battle-tested enterprise controls today, this is not that product ye
 - `.github/workflows/ci.yml` - fmt, vet, test, build CI checks.
 
 ## Docs
+- `CONTRIBUTING.md`
 - `docs/GETTING_STARTED.md`
 - `docs/PROJECT_STATUS.md`
+- `docs/TOOL_CATALOG.md`
 - `docs/specs/CONTRACTS.md`
 - `docs/specs/ACCEPTANCE.md`
 - `docs/specs/CONFIG.md`

@@ -136,6 +136,17 @@ func TestParseToolCallsAcceptsFsDeleteWhenAllowed(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsAcceptsFsAppendWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"fs.append\",\"arguments\":{\"path\":\"notes.txt\",\"content\":\"more\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"fs.append"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "fs.append" {
+		t.Fatalf("expected fs.append, got %q", calls[0].Name)
+	}
+}
+
 func TestParseToolCallsCanonicalizesFsRenameAlias(t *testing.T) {
 	text := "```json\n{\"tool_name\":\"fs.rename\",\"arguments\":{\"src\":\"a.txt\",\"dst\":\"b.txt\"}}\n```"
 	calls, _ := ParseToolCalls(text, []string{"fs.move"})
@@ -188,6 +199,64 @@ func TestParseToolCallsAcceptsSessionCloseWhenAllowed(t *testing.T) {
 	}
 	if calls[0].Name != "session.close" {
 		t.Fatalf("expected session.close, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsAgentToolsWhenAllowed(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		allowed  []string
+	}{
+		{name: "list", toolName: "agent.list", allowed: []string{"agent.list"}},
+		{name: "create", toolName: "agent.create", allowed: []string{"agent.create"}},
+		{name: "switch", toolName: "agent.switch", allowed: []string{"agent.switch"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			text := "```json\n{\"tool_name\":\"" + tc.toolName + "\",\"arguments\":{\"agent_id\":\"default\"}}\n```"
+			calls, _ := ParseToolCalls(text, tc.allowed)
+			if len(calls) != 1 {
+				t.Fatalf("expected one tool call, got %d", len(calls))
+			}
+			if calls[0].Name != tc.toolName {
+				t.Fatalf("expected %s, got %q", tc.toolName, calls[0].Name)
+			}
+		})
+	}
+}
+
+func TestParseToolCallsAcceptsRunCancelWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"run.cancel\",\"arguments\":{\"run_id\":\"run_123\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"run.cancel"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "run.cancel" {
+		t.Fatalf("expected run.cancel, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsPolicyGrantWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"policy.grant\",\"arguments\":{\"agent_id\":\"worker\",\"capability\":\"fs.read\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"policy.grant"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "policy.grant" {
+		t.Fatalf("expected policy.grant, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsMetricsGetWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"metrics.get\",\"arguments\":{\"agent_id\":\"default\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"metrics.get"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "metrics.get" {
+		t.Fatalf("expected metrics.get, got %q", calls[0].Name)
 	}
 }
 

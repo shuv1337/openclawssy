@@ -275,41 +275,41 @@ PR: _______
 ## 4) Medium Priority Enhancements
 
 ### M1 — Multi-agent management tools
-Status: ⬜  
+Status: 🟩  
 Tasks
-- [ ] `agent.list`, `agent.create`, `agent.switch`
-- [ ] Per-agent capability grants + separate rules/soul docs (or equivalent)
-- [ ] Tests
+- [x] `agent.list`, `agent.create`, `agent.switch`
+- [x] Per-agent capability grants + separate rules/soul docs (or equivalent)
+- [x] Tests
 
 ### M2 — Better editing ergonomics
-Status: ⬜  
+Status: 🟩  
 Tasks
-- [ ] `fs.append` tool
-- [ ] Diff/patch support in `fs.edit` (unified diff)
-- [ ] Tests + docs
+- [x] `fs.append` tool
+- [x] Diff/patch support in `fs.edit` (unified diff)
+- [x] Tests + docs
 
 ### M3 — Policy management tools
-Status: ⬜  
+Status: 🟩  
 Tasks
-- [ ] `policy.list` / `policy.grant` / `policy.revoke`
-- [ ] Enforce audit + require elevated capability
+- [x] `policy.list` / `policy.grant` / `policy.revoke`
+- [x] Enforce audit + require elevated capability
 
 ### M4 — Metrics
-Status: ⬜  
+Status: 🟩  
 Tasks
-- [ ] Track tool durations/errors
-- [ ] `metrics.get` tool and/or dashboard view
+- [x] Track tool durations/errors
+- [x] `metrics.get` tool and/or dashboard view
 
 ---
 
 ## 5) Documentation & Quality
 
 ### D1 — Documentation audit
-Status: ⬜  
+Status: 🟩  
 Tasks
-- [ ] Ensure all referenced docs exist (SOUL/RULES/README references)
-- [ ] Add “Tool catalog” page: names, args schema, examples, safety rules
-- [ ] Add “How to add a tool” contributor guide
+- [x] Ensure all referenced docs exist (SOUL/RULES/README references)
+- [x] Add “Tool catalog” page: names, args schema, examples, safety rules
+- [x] Add “How to add a tool” contributor guide
 
 ### D2 — Test coverage & CI
 Status: ⬜  
@@ -341,6 +341,11 @@ Tasks
 | W__  | H5–H6 |       | H5,H6   | H5,H6| Added scheduler lifecycle tools and `http.request` (`net.fetch` alias) with network allowlist/redirect enforcement, response caps, parser/runtime wiring, tests, and docs updates |
 | W__  | H7–H8 |       | H7,H8   | H7,H8| Added `session.list`/`session.close`, close-state metadata, routing guard to avoid reusing closed sessions, parser/runtime wiring, tests, and docs updates; Added `run.list`/`run.get` run trace tools with filtering, pagination, and capability gating |
 | W__  | H9    |       | H9      | H9   | Added `run.cancel` tool with RunTracker for context-based cancellation; Added shell.exec timeout_ms support; Added timeout config fields to ShellConfig and EngineConfig; Full test coverage and documentation updates |
+| W__  | M1    |       | M1      | M1   | Added `agent.list`/`agent.create`/`agent.switch` with strict `agent_id` validation, config default switching for chat/discord, runtime/parser/model wiring, tests, and docs updates |
+| W__  | M2    |       | M2      | M2   | Added `fs.append` plus `fs.edit` unified-diff patch mode, runtime arg normalization (`unified_diff` alias), guardrail tests, and docs updates |
+| W__  | M3    |       | M3      | M3   | Added `policy.list`/`policy.grant`/`policy.revoke` with persisted grants file support, live enforcer updates, admin capability gating, runtime/parser/model wiring, tests, and docs updates |
+| W__  | M4    |       | M4      | M4   | Added per-tool duration capture in run traces and `metrics.get` aggregation (calls/errors/latency by tool with filters/pagination), plus capability tests and docs updates |
+| W__  | D1    |       | D1      | D1   | Added `docs/TOOL_CATALOG.md`, `CONTRIBUTING.md` tool workflow guidance, and refreshed README docs index |
 
 ---
 

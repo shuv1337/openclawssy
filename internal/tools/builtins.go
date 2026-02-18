@@ -33,8 +33,11 @@ var workspaceControlPlaneFilenames = map[string]bool{
 type CoreOptions struct {
 	EnableShellExec bool
 	ConfigPath      string
+	AgentsPath      string
 	SchedulerPath   string
 	ChatstorePath   string
+	PolicyPath      string
+	DefaultGrants   []string
 	RunsPath        string
 	RunTracker      RunCanceller
 }
@@ -53,13 +56,16 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := reg.Register(ToolSpec{Name: "fs.write", Description: "Write text file", Required: []string{"path", "content"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "content": ArgTypeString}}, fsWrite); err != nil {
 		return err
 	}
+	if err := reg.Register(ToolSpec{Name: "fs.append", Description: "Append text to file", Required: []string{"path", "content"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "content": ArgTypeString}}, fsAppend); err != nil {
+		return err
+	}
 	if err := reg.Register(ToolSpec{Name: "fs.delete", Description: "Delete file or directory", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "recursive": ArgTypeBool, "force": ArgTypeBool}}, fsDelete); err != nil {
 		return err
 	}
 	if err := reg.Register(ToolSpec{Name: "fs.move", Description: "Move or rename file or directory", Required: []string{"src", "dst"}, ArgTypes: map[string]ArgType{"src": ArgTypeString, "dst": ArgTypeString, "overwrite": ArgTypeBool}}, fsMove); err != nil {
 		return err
 	}
-	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply line-based file edits", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "old": ArgTypeString, "new": ArgTypeString, "edits": ArgTypeArray}}, fsEdit); err != nil {
+	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply file edits (replace, line patch, unified diff)", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "old": ArgTypeString, "new": ArgTypeString, "edits": ArgTypeArray, "patch": ArgTypeString}}, fsEdit); err != nil {
 		return err
 	}
 	if err := reg.Register(ToolSpec{Name: "code.search", Description: "Search code with regex", Required: []string{"pattern"}, ArgTypes: map[string]ArgType{"pattern": ArgTypeString, "path": ArgTypeString, "max_files": ArgTypeNumber, "max_file_bytes": ArgTypeNumber}}, codeSearch); err != nil {
@@ -80,7 +86,16 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := registerSessionTools(reg, opts.ChatstorePath); err != nil {
 		return err
 	}
+	if err := registerAgentTools(reg, opts.AgentsPath, opts.ConfigPath); err != nil {
+		return err
+	}
+	if err := registerPolicyTools(reg, opts.PolicyPath, opts.DefaultGrants); err != nil {
+		return err
+	}
 	if err := registerRunTools(reg, opts.RunsPath, opts.RunTracker); err != nil {
+		return err
+	}
+	if err := registerMetricsTools(reg, opts.RunsPath); err != nil {
 		return err
 	}
 	if err := registerNetworkTools(reg, opts.ConfigPath); err != nil {
@@ -179,6 +194,48 @@ func fsWrite(_ context.Context, req Request) (map[string]any, error) {
 		"bytes":   len(content),
 		"lines":   lines,
 		"summary": fmt.Sprintf("wrote %d line(s) to %s", lines, path),
+	}, nil
+}
+
+func fsAppend(_ context.Context, req Request) (map[string]any, error) {
+	path, err := getString(req.Args, "path")
+	if err != nil {
+		return nil, err
+	}
+	content, err := getString(req.Args, "content")
+	if err != nil {
+		return nil, err
+	}
+	if req.Policy == nil {
+		return nil, errors.New("policy is required")
+	}
+	resolved, err := req.Policy.ResolveWritePath(req.Workspace, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := guardWorkspaceControlPlaneFilename(req.Workspace, resolved, req.AgentID); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(resolved, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		return nil, err
+	}
+	lines := 0
+	if content != "" {
+		lines = strings.Count(content, "\n") + 1
+	}
+	return map[string]any{
+		"path":           path,
+		"bytes_appended": len(content),
+		"lines_appended": lines,
+		"summary":        fmt.Sprintf("appended %d line(s) to %s", lines, path),
 	}, nil
 }
 
@@ -332,6 +389,16 @@ type lineEdit struct {
 	NewText   string `json:"newText"`
 }
 
+type unifiedDiffHunk struct {
+	OldStart int
+	OldCount int
+	NewStart int
+	NewCount int
+	Lines    []string
+}
+
+var unifiedDiffHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$`)
+
 func fsEdit(_ context.Context, req Request) (map[string]any, error) {
 	path, err := getString(req.Args, "path")
 	if err != nil {
@@ -352,8 +419,34 @@ func fsEdit(_ context.Context, req Request) (map[string]any, error) {
 		return nil, err
 	}
 
-	// Backward compatibility path.
-	if oldText, ok := req.Args["old"]; ok {
+	_, hasOld := req.Args["old"]
+	_, hasNew := req.Args["new"]
+	_, hasEdits := req.Args["edits"]
+	_, hasPatch := req.Args["patch"]
+	hasReplaceMode := hasOld || hasNew
+
+	modeCount := 0
+	if hasReplaceMode {
+		modeCount++
+	}
+	if hasEdits {
+		modeCount++
+	}
+	if hasPatch {
+		modeCount++
+	}
+	if modeCount == 0 {
+		return nil, errors.New("fs.edit requires one edit mode: old/new, edits, or patch")
+	}
+	if modeCount > 1 {
+		return nil, errors.New("fs.edit accepts exactly one edit mode: old/new, edits, or patch")
+	}
+
+	if hasReplaceMode {
+		oldText, ok := req.Args["old"]
+		if !ok {
+			return nil, errors.New("missing argument: old")
+		}
 		oldS, ok := oldText.(string)
 		if !ok {
 			return nil, errors.New("old must be string")
@@ -371,6 +464,28 @@ func fsEdit(_ context.Context, req Request) (map[string]any, error) {
 			return nil, err
 		}
 		return map[string]any{"path": path, "updated": true, "mode": "replace_once"}, nil
+	}
+
+	if hasPatch {
+		patch, err := getString(req.Args, "patch")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(patch) == "" {
+			return nil, errors.New("patch must not be empty")
+		}
+		hunks, err := parseUnifiedDiff(patch)
+		if err != nil {
+			return nil, err
+		}
+		updated, applied, err := applyUnifiedDiff(string(b), hunks)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(resolved, []byte(updated), 0o600); err != nil {
+			return nil, err
+		}
+		return map[string]any{"path": path, "updated": true, "applied_edits": applied, "mode": "unified_diff"}, nil
 	}
 
 	rawEdits, ok := req.Args["edits"]
@@ -674,6 +789,156 @@ func applyLineEdits(content string, edits []lineEdit) (string, int, error) {
 		lineIdx++
 	}
 	return strings.Join(out, "\n"), applied, nil
+}
+
+func parseUnifiedDiff(patch string) ([]unifiedDiffHunk, error) {
+	text := strings.ReplaceAll(patch, "\r\n", "\n")
+	rows := strings.Split(text, "\n")
+
+	hunks := make([]unifiedDiffHunk, 0)
+	for i := 0; i < len(rows); {
+		line := rows[i]
+		if strings.TrimSpace(line) == "" {
+			i++
+			continue
+		}
+		if !strings.HasPrefix(line, "@@") {
+			i++
+			continue
+		}
+
+		match := unifiedDiffHeaderPattern.FindStringSubmatch(line)
+		if match == nil {
+			return nil, fmt.Errorf("invalid unified diff hunk header: %s", line)
+		}
+		oldStart, _ := strconv.Atoi(match[1])
+		oldCount := 1
+		if strings.TrimSpace(match[2]) != "" {
+			oldCount, _ = strconv.Atoi(match[2])
+		}
+		newStart, _ := strconv.Atoi(match[3])
+		newCount := 1
+		if strings.TrimSpace(match[4]) != "" {
+			newCount, _ = strconv.Atoi(match[4])
+		}
+		if oldStart < 0 || oldCount < 0 || newStart < 0 || newCount < 0 {
+			return nil, fmt.Errorf("invalid unified diff hunk header: %s", line)
+		}
+
+		hunk := unifiedDiffHunk{OldStart: oldStart, OldCount: oldCount, NewStart: newStart, NewCount: newCount}
+		i++
+		oldSeen := 0
+		newSeen := 0
+		for i < len(rows) {
+			body := rows[i]
+			if strings.HasPrefix(body, "@@") {
+				break
+			}
+			if body == "" {
+				i++
+				continue
+			}
+			if body == `\ No newline at end of file` {
+				i++
+				continue
+			}
+			prefix := body[0]
+			if prefix != ' ' && prefix != '+' && prefix != '-' {
+				return nil, fmt.Errorf("invalid unified diff line prefix at hunk %d: %s", len(hunks)+1, body)
+			}
+			if prefix == ' ' || prefix == '-' {
+				oldSeen++
+			}
+			if prefix == ' ' || prefix == '+' {
+				newSeen++
+			}
+			hunk.Lines = append(hunk.Lines, body)
+			i++
+		}
+
+		if oldSeen != oldCount || newSeen != newCount {
+			return nil, fmt.Errorf("hunk line counts do not match header at hunk %d", len(hunks)+1)
+		}
+		hunks = append(hunks, hunk)
+	}
+
+	if len(hunks) == 0 {
+		return nil, errors.New("patch does not contain any @@ hunks")
+	}
+	return hunks, nil
+}
+
+func applyUnifiedDiff(content string, hunks []unifiedDiffHunk) (string, int, error) {
+	src, hadTrailingNewline := splitContentLines(content)
+	out := make([]string, 0, len(src))
+	total := len(src)
+	cursor := 1
+
+	for idx, hunk := range hunks {
+		target := hunk.OldStart
+		if target == 0 && hunk.OldCount == 0 {
+			target = 1
+		}
+		if target <= 0 {
+			return "", 0, fmt.Errorf("hunk start out of bounds at old line %d", hunk.OldStart)
+		}
+		if target < cursor {
+			return "", 0, fmt.Errorf("hunks out of order or overlapping at hunk %d", idx+1)
+		}
+		if target > total+1 {
+			return "", 0, fmt.Errorf("hunk start out of bounds at old line %d", hunk.OldStart)
+		}
+
+		for cursor < target {
+			out = append(out, src[cursor-1])
+			cursor++
+		}
+
+		for _, row := range hunk.Lines {
+			prefix := row[0]
+			text := row[1:]
+			switch prefix {
+			case ' ':
+				if cursor > total || src[cursor-1] != text {
+					return "", 0, fmt.Errorf("hunk context mismatch at old line %d", cursor)
+				}
+				out = append(out, text)
+				cursor++
+			case '-':
+				if cursor > total || src[cursor-1] != text {
+					return "", 0, fmt.Errorf("hunk context mismatch at old line %d", cursor)
+				}
+				cursor++
+			case '+':
+				out = append(out, text)
+			}
+		}
+	}
+
+	for cursor <= total {
+		out = append(out, src[cursor-1])
+		cursor++
+	}
+
+	updated := strings.Join(out, "\n")
+	if hadTrailingNewline {
+		updated += "\n"
+	}
+	return updated, len(hunks), nil
+}
+
+func splitContentLines(content string) ([]string, bool) {
+	if content == "" {
+		return nil, false
+	}
+	hadTrailingNewline := strings.HasSuffix(content, "\n")
+	if hadTrailingNewline {
+		content = strings.TrimSuffix(content, "\n")
+	}
+	if content == "" {
+		return []string{}, hadTrailingNewline
+	}
+	return strings.Split(content, "\n"), hadTrailingNewline
 }
 
 func getString(args map[string]any, key string) (string, error) {
