@@ -128,6 +128,9 @@ func TestRunnerReplacesRepeatedDeferralWithConcreteFallback(t *testing.T) {
 		{FinalText: "Let me check that right now."},
 		{FinalText: "Okay, let me do that now."},
 		{FinalText: "Let me actually execute it."},
+		{FinalText: "Hold on while I verify."},
+		{FinalText: "Give me a moment."},
+		{FinalText: "I will do that now."},
 	}}
 	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 8}
 
@@ -138,7 +141,7 @@ func TestRunnerReplacesRepeatedDeferralWithConcreteFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
-	if !strings.Contains(out.FinalText, "did not complete an actionable step") {
+	if !strings.Contains(out.FinalText, "could not complete an actionable execution step") {
 		t.Fatalf("expected non-actionable fallback final text, got %q", out.FinalText)
 	}
 	if len(out.ToolCalls) != 0 {

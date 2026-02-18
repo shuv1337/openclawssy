@@ -707,6 +707,64 @@ func TestProviderModelRejectsToolCallsNotInAllowlist(t *testing.T) {
 	}
 }
 
+func TestProviderModelReturnsFriendlyMessageWhenToolIsNotAllowed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "Let me call the web API now.\n```json\n{\"tool_name\":\"http.request\",\"arguments\":{\"method\":\"GET\",\"url\":\"https://example.com\"}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "fetch example", AllowedTools: []string{"fs.read"}})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %d", len(resp.ToolCalls))
+	}
+	if !resp.ToolParseFailure {
+		t.Fatal("expected tool parse failure flag")
+	}
+	if !strings.Contains(resp.FinalText, "http.request") || !strings.Contains(resp.FinalText, "network.enabled=true") {
+		t.Fatalf("expected actionable not-allowed guidance, got %q", resp.FinalText)
+	}
+}
+
+func TestProviderModelReturnsFriendlyMessageWhenToolPayloadIsInvalid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]string{
+					"content": "```json\n{\"tool_name\":\"fs.list\",\"arguments\":{path:.}}\n```",
+				}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	model := testProviderModel(t, server.URL)
+	resp, err := model.Generate(context.Background(), agent.ModelRequest{Prompt: "system", Message: "list files", AllowedTools: []string{"fs.list"}})
+	if err != nil {
+		t.Fatalf("generate failed: %v", err)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %d", len(resp.ToolCalls))
+	}
+	if !resp.ToolParseFailure {
+		t.Fatal("expected tool parse failure flag")
+	}
+	if !strings.Contains(resp.FinalText, "payload could not be executed") {
+		t.Fatalf("expected friendly parse failure text, got %q", resp.FinalText)
+	}
+}
+
 func TestProviderModelRejectsShellExecWhenNotAllowed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

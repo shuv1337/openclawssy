@@ -351,7 +351,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 			toolLines = append(toolLines, string(b))
 		}
 		if runErr == nil {
-			finalOutput := out.FinalText
+			finalOutput := policy.RedactString(out.FinalText)
 			if includeThinking {
 				finalOutput = formatFinalOutputWithThinking(finalOutput, persistedThinking)
 			}
@@ -494,7 +494,7 @@ func resolveRunTimeout(engineCfg config.EngineConfig) time.Duration {
 }
 
 func (e *Engine) appendRunFailureConversation(sessionID, runID string, out agent.RunOutput, includeToolMessages bool, runErr error) error {
-	failureMessage := strings.TrimSpace(out.FinalText)
+	failureMessage := policy.RedactString(strings.TrimSpace(out.FinalText))
 	if failureMessage == "" {
 		failureMessage = formatRunFailureUserMessage(runErr)
 	} else {

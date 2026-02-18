@@ -21,7 +21,7 @@ const (
 	repeatedNoProgressLoopCapTrigger = 6
 	failureRecoveryTrigger           = 2
 	failureGuidanceEscalation        = 3
-	followThroughRepromptCap         = 2
+	followThroughRepromptCap         = 5
 )
 
 // Runner executes the model/tool loop for a single run.
@@ -372,11 +372,8 @@ func shouldForceFollowThrough(finalText string, allowedTools []string, toolResul
 }
 
 func nonActionableFinalText(lastText string) string {
-	trimmed := strings.TrimSpace(lastText)
-	if trimmed == "" {
-		return "I need to actually execute the requested checks, but I could not produce a concrete execution step. Please retry and I will run it directly."
-	}
-	return "I need to actually execute the requested checks, but I did not complete an actionable step in time. Please retry and I will run it directly.\n\nLast draft response: " + trimmed
+	_ = lastText
+	return "I could not complete an actionable execution step in time. Please retry and I will run it directly and report concrete results."
 }
 
 func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extraDirective string) string {

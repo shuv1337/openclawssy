@@ -287,7 +287,6 @@ function createEditor() {
     if (!docsState.statusKind || docsState.statusKind === "success") {
       setStatus("", "");
     }
-    rerender();
   });
 
   editorLabel.append(labelText, textarea);

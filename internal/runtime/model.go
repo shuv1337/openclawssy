@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -86,6 +87,8 @@ var toolNameAliases = map[string]string{
 	"terminal.exec":    "shell.exec",
 	"terminal.run":     "shell.exec",
 }
+
+var toolNotAllowedReasonRE = regexp.MustCompile(`tool "([^"]+)" not allowed`)
 
 type SecretLookup func(name string) (string, bool, error)
 
@@ -222,11 +225,13 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 	visibleText, thinkingText, thinkingPresent := ExtractThinking(content)
 
 	// Check if the model's response contains tool calls.
-	toolCalls, parseFailure := parseToolCallsFromResponse(content, req.AllowedTools, trace)
+	toolCalls, parseFailure, parseFailureReason := parseToolCallsFromResponse(content, req.AllowedTools, trace)
 	if len(toolCalls) == 0 && thinkingPresent {
 		var visibleParseFailure bool
-		toolCalls, visibleParseFailure = parseToolCallsFromResponse(visibleText, req.AllowedTools, trace)
+		var visibleParseFailureReason string
+		toolCalls, visibleParseFailure, visibleParseFailureReason = parseToolCallsFromResponse(visibleText, req.AllowedTools, trace)
 		parseFailure = parseFailure || visibleParseFailure
+		parseFailureReason = mergeParseFailureReasons(parseFailureReason, visibleParseFailureReason)
 	}
 	if len(toolCalls) > 0 {
 		return agent.ModelResponse{
@@ -234,6 +239,11 @@ func (m *ProviderModel) Generate(ctx context.Context, req agent.ModelRequest) (a
 			Thinking:        thinkingText,
 			ThinkingPresent: thinkingPresent,
 		}, nil
+	}
+	if parseFailure {
+		if friendly, ok := formatToolParseFailureUserMessage(visibleText, parseFailureReason); ok {
+			visibleText = friendly
+		}
 	}
 
 	return agent.ModelResponse{
@@ -721,7 +731,7 @@ func parseToolDirective(message string, allowedTools []string) (agent.ModelRespo
 	return agent.ModelResponse{ToolCalls: []agent.ToolCallRequest{{ID: "tool-1", Name: toolName, Arguments: argBytes}}}, nil
 }
 
-func parseToolCallsFromResponse(content string, allowedTools []string, trace *runTraceCollector) ([]agent.ToolCallRequest, bool) {
+func parseToolCallsFromResponse(content string, allowedTools []string, trace *runTraceCollector) ([]agent.ToolCallRequest, bool, string) {
 	parsedCalls, diag := toolparse.ParseToolCalls(content, allowedTools)
 	if len(parsedCalls) > maxToolCallsPerReply {
 		parsedCalls = parsedCalls[:maxToolCallsPerReply]
@@ -732,7 +742,85 @@ func parseToolCallsFromResponse(content string, allowedTools []string, trace *ru
 		}
 	}
 	parseFailure := len(parsedCalls) == 0 && len(diag.Rejected) > 0
-	return parsedCalls, parseFailure
+	return parsedCalls, parseFailure, summarizeParseFailureReasons(diag.Rejected)
+}
+
+func summarizeParseFailureReasons(rejected []toolparse.Extraction) string {
+	if len(rejected) == 0 {
+		return ""
+	}
+
+	reasons := make([]string, 0, len(rejected))
+	seen := map[string]struct{}{}
+	for _, entry := range rejected {
+		reason := strings.TrimSpace(entry.Reason)
+		if reason == "" {
+			continue
+		}
+		if _, ok := seen[reason]; ok {
+			continue
+		}
+		seen[reason] = struct{}{}
+		reasons = append(reasons, reason)
+	}
+	if len(reasons) == 0 {
+		return ""
+	}
+	sort.Strings(reasons)
+	if len(reasons) > 3 {
+		reasons = reasons[:3]
+	}
+	return strings.Join(reasons, "; ")
+}
+
+func mergeParseFailureReasons(base, extra string) string {
+	base = strings.TrimSpace(base)
+	extra = strings.TrimSpace(extra)
+	if base == "" {
+		return extra
+	}
+	if extra == "" {
+		return base
+	}
+	if strings.Contains(base, extra) {
+		return base
+	}
+	if strings.Contains(extra, base) {
+		return extra
+	}
+	return base + "; " + extra
+}
+
+func formatToolParseFailureUserMessage(visibleText, parseReason string) (string, bool) {
+	text := strings.ToLower(strings.TrimSpace(visibleText))
+	if text == "" {
+		return "", false
+	}
+
+	toolAttempt := strings.Contains(text, `"tool_name"`) ||
+		strings.Contains(text, `"arguments"`) ||
+		strings.Contains(text, "```json") ||
+		strings.Contains(text, `"function"`)
+	if !toolAttempt {
+		return "", false
+	}
+
+	reason := strings.TrimSpace(parseReason)
+	if matches := toolNotAllowedReasonRE.FindStringSubmatch(reason); len(matches) == 2 {
+		toolName := strings.TrimSpace(matches[1])
+		if toolName == "http.request" {
+			return "I tried to call `http.request`, but that tool is not enabled for this agent right now. Enable `network.enabled=true` (and keep the domain allowlist set), then retry.", true
+		}
+		if toolName == "shell.exec" {
+			return "I tried to call `shell.exec`, but it is not enabled for this agent right now. Enable `shell.enable_exec=true` and a sandbox provider, then retry.", true
+		}
+		return fmt.Sprintf("I tried to call `%s`, but that tool is not enabled for this agent right now. Please enable it and retry.", toolName), true
+	}
+
+	if reason != "" {
+		return "I attempted a tool call, but the payload could not be executed (" + reason + "). Please retry and I will run it directly.", true
+	}
+	return "I attempted a tool call, but the payload could not be executed. Please retry and I will run it directly.", true
 }
 
 func parseLooseJSONToolCalls(content string, allowedTools []string, trace *runTraceCollector) []agent.ToolCallRequest {
