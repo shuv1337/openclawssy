@@ -33,3 +33,14 @@ func TestAllowlist_EmptyUsersDenyByDefault(t *testing.T) {
 		t.Fatal("expected deny-by-default when user allowlist is empty")
 	}
 }
+
+func TestAllowlist_NormalizesCaseAndWhitespace(t *testing.T) {
+	a := NewAllowlist([]string{" DASHBOARD_USER "}, []string{" DASHBOARD "})
+
+	if !a.MessageAllowed("dashboard_user", "dashboard") {
+		t.Fatal("expected lowercase sender IDs to match upper/whitespace allowlist entries")
+	}
+	if !a.MessageAllowed("DASHBOARD_USER", "DASHBOARD") {
+		t.Fatal("expected uppercase sender IDs to match normalized allowlist entries")
+	}
+}
