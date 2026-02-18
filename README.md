@@ -29,7 +29,7 @@ Welcome to the **Ussyverse**: the tiny but principled corner of agent tooling wh
 - CLI: `init`, `setup`, `ask`, `run`, `serve`, `cron`, `doctor`
 - Channels: local HTTP API + Discord bot bridge
 - Dashboard: HTTPS admin panel for status/config/secrets ingestion
-- Tooling: fs/code tools, `time.now`, sandbox-gated `shell.exec`
+- Tooling: fs/code tools (`fs.read`, `fs.list`, `fs.write`, `fs.delete`, `fs.move`, `fs.edit`), config tools (`config.get`, `config.set`), secret tools (`secrets.get`, `secrets.set`, `secrets.list`), scheduler tools (`scheduler.list`, `scheduler.add`, `scheduler.remove`, `scheduler.pause`, `scheduler.resume`), session tools (`session.list`, `session.close`), run management tools (`run.list`, `run.get`, `run.cancel`), network tool (`http.request`), `time.now`, sandbox-gated `shell.exec`
 - Security: encrypted secret store, append-only audit logs, path/symlink guards
 - Providers: OpenAI, OpenRouter, Requesty, ZAI, generic OpenAI-compatible endpoints
 
@@ -51,6 +51,8 @@ Recent runtime hardening and UX upgrades:
 - Dashboard chat layout improvements: resizable chat panel, collapsible panes, focus-chat mode, persisted layout preferences, and continuous in-chat progress updates for long runs.
 - Chat API queue responses now include `session_id` so clients can keep progress/tool timelines tied to the active session.
 - Chat rate limiting supports sender + global policies with cooldown hints (`chat.rate_limited`).
+- Run cancellation support via `run.cancel` tool and internal RunTracker for graceful termination.
+- Shell execution timeout support via `timeout_ms` argument in `shell.exec`.
 
 Ussyverse flavor, practical core.
 
@@ -113,6 +115,54 @@ Then open:
 3. `openclawssy ask -agent default -message "hello"` for a synchronous run.
 4. `openclawssy run -agent default -message '/tool time.now {}'` for tool flow.
 5. `openclawssy serve --token change-me` and monitor in `/dashboard`.
+
+Safe delete example:
+
+```bash
+openclawssy run --agent default --message '/tool fs.delete {"path":"scratch.txt","force":true}'
+
+# safe rename/move example
+openclawssy run --agent default --message '/tool fs.move {"src":"draft.txt","dst":"final.txt"}'
+
+# safe config mutation example (allowlisted fields only)
+openclawssy run --agent default --message '/tool config.set {"updates":{"output.thinking_mode":"on_error","engine.max_concurrent_runs":32}}'
+
+# read redacted config
+openclawssy run --agent default --message '/tool config.get {"field":"output.thinking_mode"}'
+
+# secret lifecycle examples
+openclawssy run --agent default --message '/tool secrets.set {"key":"provider/openrouter/api_key","value":"<token>"}'
+openclawssy run --agent default --message '/tool secrets.get {"key":"provider/openrouter/api_key"}'
+openclawssy run --agent default --message '/tool secrets.list {}'
+
+# scheduler lifecycle examples
+openclawssy run --agent default --message '/tool scheduler.add {"id":"job_1","schedule":"@every 1h","message":"status report"}'
+openclawssy run --agent default --message '/tool scheduler.list {}'
+openclawssy run --agent default --message '/tool scheduler.pause {"id":"job_1"}'
+
+# session lifecycle examples
+openclawssy run --agent default --message '/tool session.list {"agent_id":"default","limit":10}'
+openclawssy run --agent default --message '/tool session.close {"session_id":"chat_123"}'
+
+# run management examples
+openclawssy run --agent default --message '/tool run.list {"agent_id":"default","limit":20}'
+openclawssy run --agent default --message '/tool run.get {"run_id":"run_1234567890"}'
+openclawssy run --agent default --message '/tool run.cancel {"run_id":"run_1234567890"}'
+
+# shell execution with timeout (ms)
+openclawssy run --agent default --message '/tool shell.exec {"command":"bash","args":["-lc","sleep 60"],"timeout_ms":10000}'
+
+# allowlisted network request example (requires network.enabled + allowlist/localhost policy)
+openclawssy run --agent default --message '/tool http.request {"method":"GET","url":"https://example.com"}'
+```
+
+`config.set` currently allows a safe subset of fields only:
+- `output.thinking_mode`, `output.max_thinking_chars`
+- `chat.rate_limit_per_min`, `chat.global_rate_limit_per_min`
+- `discord.rate_limit_per_min`, `discord.command_prefix` (only when `discord.enabled=true`)
+- `engine.max_concurrent_runs`, `scheduler.max_concurrent_jobs`
+- `network.enabled`, `network.allowed_domains`, `network.allow_localhosts`
+- `shell.enable_exec` (only when `sandbox.active=true`)
 
 Dashboard chat quick controls:
 - Use `New chat`, `Resume`, and `List chats` in the chat controls row.

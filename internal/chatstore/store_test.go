@@ -265,6 +265,39 @@ func TestGetActiveSessionPointerMissing(t *testing.T) {
 	}
 }
 
+func TestCloseSessionIsIdempotentAndPreventsActivePointer(t *testing.T) {
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if err := store.CloseSession(session.SessionID); err != nil {
+		t.Fatalf("close session: %v", err)
+	}
+	if err := store.CloseSession(session.SessionID); err != nil {
+		t.Fatalf("close session again should be idempotent: %v", err)
+	}
+
+	updated, err := store.GetSession(session.SessionID)
+	if err != nil {
+		t.Fatalf("get closed session: %v", err)
+	}
+	if !updated.IsClosed() {
+		t.Fatal("expected session to be marked closed")
+	}
+
+	err = store.SetActiveSessionPointer("default", "dashboard", "u1", "r1", session.SessionID)
+	if !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("expected ErrSessionClosed, got %v", err)
+	}
+}
+
 func TestClampHistoryCount(t *testing.T) {
 	if got := ClampHistoryCount(10, 50); got != 10 {
 		t.Fatalf("expected 10, got %d", got)
@@ -313,6 +346,35 @@ func TestReadRecentMessagesSkipsMalformedLines(t *testing.T) {
 	}
 	if msgs[0].Content != "ok" {
 		t.Fatalf("unexpected message: %+v", msgs[0])
+	}
+}
+
+func TestReadRecentMessagesSupportsLargeMessageLines(t *testing.T) {
+	agentsRoot := filepath.Join(t.TempDir(), ".openclawssy", "agents")
+	store, err := NewStore(agentsRoot)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+
+	session, err := store.CreateSession(CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "r1"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	large := strings.Repeat("x", 200*1024)
+	if err := store.AppendMessage(session.SessionID, Message{Role: "assistant", Content: large}); err != nil {
+		t.Fatalf("append large message: %v", err)
+	}
+
+	msgs, err := store.ReadRecentMessages(session.SessionID, 10)
+	if err != nil {
+		t.Fatalf("read recent messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected one message, got %d", len(msgs))
+	}
+	if msgs[0].Content != large {
+		t.Fatalf("expected large content to round-trip; got %d chars", len(msgs[0].Content))
 	}
 }
 

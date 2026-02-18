@@ -227,3 +227,50 @@ func TestConnectorGlobalRateLimiterReturnsCooldown(t *testing.T) {
 		t.Fatalf("expected cooldown in error, got %+v", rateErr)
 	}
 }
+
+func TestConnectorClosedSessionGetsReplacedAndCannotResume(t *testing.T) {
+	store, err := chatstore.NewStore(filepath.Join(t.TempDir(), ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+
+	queuedSessionIDs := make([]string, 0, 2)
+	connector := &Connector{
+		Store:          store,
+		DefaultAgentID: "default",
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
+			queuedSessionIDs = append(queuedSessionIDs, sessionID)
+			return QueuedRun{ID: "run-1", Status: "queued"}, nil
+		},
+	}
+
+	first, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "hello"})
+	if err != nil {
+		t.Fatalf("first message: %v", err)
+	}
+	if first.SessionID == "" {
+		t.Fatal("expected first session id")
+	}
+	if err := store.CloseSession(first.SessionID); err != nil {
+		t.Fatalf("close first session: %v", err)
+	}
+
+	second, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "next"})
+	if err != nil {
+		t.Fatalf("second message: %v", err)
+	}
+	if second.SessionID == "" || second.SessionID == first.SessionID {
+		t.Fatalf("expected second message to use a new session, first=%q second=%q", first.SessionID, second.SessionID)
+	}
+	if len(queuedSessionIDs) != 2 || queuedSessionIDs[0] != first.SessionID || queuedSessionIDs[1] != second.SessionID {
+		t.Fatalf("unexpected queued session ids: %#v", queuedSessionIDs)
+	}
+
+	res, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "/resume " + first.SessionID})
+	if err != nil {
+		t.Fatalf("resume closed session: %v", err)
+	}
+	if !strings.Contains(res.Response, "Session is closed") {
+		t.Fatalf("expected closed session message, got %q", res.Response)
+	}
+}

@@ -14,6 +14,6 @@ func FuzzParseStrictNoPanic(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, input string) {
-		_ = ParseStrict(input, []string{"fs.list", "fs.read", "fs.write", "shell.exec"}, 1)
+		_ = ParseStrict(input, []string{"fs.list", "fs.read", "fs.write", "fs.delete", "fs.move", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "run.list", "run.get", "http.request", "shell.exec"}, 1)
 	})
 }

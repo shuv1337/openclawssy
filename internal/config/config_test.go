@@ -140,3 +140,26 @@ func TestValidateRejectsEmptyShellAllowedCommand(t *testing.T) {
 		t.Fatal("expected validation error for empty shell.allowed_commands entry")
 	}
 }
+
+func TestRedactedClearsSensitiveFieldsOnly(t *testing.T) {
+	cfg := Default()
+	cfg.Providers.OpenAI.APIKey = "openai-key"
+	cfg.Providers.OpenRouter.APIKey = "openrouter-key"
+	cfg.Providers.Requesty.APIKey = "requesty-key"
+	cfg.Providers.ZAI.APIKey = "zai-key"
+	cfg.Providers.Generic.APIKey = "generic-key"
+	cfg.Discord.Token = "discord-token"
+	cfg.Model.Name = "kept-model"
+
+	redacted := cfg.Redacted()
+
+	if redacted.Providers.OpenAI.APIKey != "" || redacted.Providers.OpenRouter.APIKey != "" || redacted.Providers.Requesty.APIKey != "" || redacted.Providers.ZAI.APIKey != "" || redacted.Providers.Generic.APIKey != "" {
+		t.Fatalf("expected provider api keys redacted, got %+v", redacted.Providers)
+	}
+	if redacted.Discord.Token != "" {
+		t.Fatalf("expected discord token redacted, got %q", redacted.Discord.Token)
+	}
+	if redacted.Model.Name != "kept-model" {
+		t.Fatalf("expected non-sensitive model name preserved, got %q", redacted.Model.Name)
+	}
+}

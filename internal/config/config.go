@@ -61,12 +61,16 @@ type NetworkConfig struct {
 }
 
 type ShellConfig struct {
-	EnableExec      bool     `json:"enable_exec"`
-	AllowedCommands []string `json:"allowed_commands,omitempty"`
+	EnableExec       bool     `json:"enable_exec"`
+	AllowedCommands  []string `json:"allowed_commands,omitempty"`
+	DefaultTimeoutMS int      `json:"default_timeout_ms,omitempty"`
+	MaxTimeoutMS     int      `json:"max_timeout_ms,omitempty"`
 }
 
 type EngineConfig struct {
-	MaxConcurrentRuns int `json:"max_concurrent_runs,omitempty"`
+	MaxConcurrentRuns   int `json:"max_concurrent_runs,omitempty"`
+	DefaultRunTimeoutMS int `json:"default_run_timeout_ms,omitempty"`
+	MaxRunTimeoutMS     int `json:"max_run_timeout_ms,omitempty"`
 }
 
 type SchedulerConfig struct {
@@ -403,6 +407,17 @@ func (c Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (c Config) Redacted() Config {
+	redacted := c
+	redacted.Providers.OpenAI.APIKey = ""
+	redacted.Providers.OpenRouter.APIKey = ""
+	redacted.Providers.Requesty.APIKey = ""
+	redacted.Providers.ZAI.APIKey = ""
+	redacted.Providers.Generic.APIKey = ""
+	redacted.Discord.Token = ""
+	return redacted
 }
 
 func LoadOrDefault(path string) (Config, error) {

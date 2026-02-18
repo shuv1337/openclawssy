@@ -153,6 +153,27 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		if !strings.Contains(doc.Content, "home directory") {
 			t.Fatalf("runtime context missing home directory guidance: %q", doc.Content)
 		}
+		if !strings.Contains(doc.Content, "fs.delete") {
+			t.Fatalf("runtime context missing fs.delete in file tools list: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "fs.move") {
+			t.Fatalf("runtime context missing fs.move in file tools list: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "config.get/config.set") {
+			t.Fatalf("runtime context missing config tools guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "secrets.get/secrets.set/secrets.list") {
+			t.Fatalf("runtime context missing secrets tools guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "scheduler.list/add/remove/pause/resume") {
+			t.Fatalf("runtime context missing scheduler tools guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "session.list/session.close") {
+			t.Fatalf("runtime context missing session tools guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "http.request") {
+			t.Fatalf("runtime context missing network tool guidance: %q", doc.Content)
+		}
 		if !strings.Contains(doc.Content, "do not mention HANDOFF") {
 			t.Fatalf("runtime context missing prompt hygiene guidance: %q", doc.Content)
 		}
@@ -169,6 +190,27 @@ func TestLoadPromptDocsIncludesRuntimeContext(t *testing.T) {
 		bestFound = true
 		if !strings.Contains(doc.Content, "shell.exec") {
 			t.Fatalf("tool best practices missing shell.exec guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "fs.delete") {
+			t.Fatalf("tool best practices missing fs.delete guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "fs.move") {
+			t.Fatalf("tool best practices missing fs.move guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "config.get") || !strings.Contains(doc.Content, "config.set") {
+			t.Fatalf("tool best practices missing config tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "secrets.get") || !strings.Contains(doc.Content, "secrets.set") {
+			t.Fatalf("tool best practices missing secrets tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "scheduler.add") || !strings.Contains(doc.Content, "scheduler.resume") {
+			t.Fatalf("tool best practices missing scheduler tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "session.list") || !strings.Contains(doc.Content, "session.close") {
+			t.Fatalf("tool best practices missing session tool guidance: %q", doc.Content)
+		}
+		if !strings.Contains(doc.Content, "http.request") {
+			t.Fatalf("tool best practices missing network tool guidance: %q", doc.Content)
 		}
 		if !strings.Contains(doc.Content, "Do not invent tool names") {
 			t.Fatalf("tool best practices missing invalid tool warning: %q", doc.Content)
@@ -219,6 +261,56 @@ func TestNormalizeToolArgsShellCommandFallbackToBashLC(t *testing.T) {
 	list, ok := args["args"].([]string)
 	if !ok || len(list) != 2 || list[0] != "-lc" || list[1] != "ls -la" {
 		t.Fatalf("unexpected shell args normalization: %#v", args["args"])
+	}
+}
+
+func TestNormalizeToolArgsHTTPRequestURLAliases(t *testing.T) {
+	args := normalizeToolArgs("http.request", map[string]any{"endpoint": "https://example.com/health"})
+	if args["url"] != "https://example.com/health" {
+		t.Fatalf("expected endpoint to normalize into url, got %#v", args["url"])
+	}
+}
+
+func TestNormalizeToolArgsSessionCloseIDAliases(t *testing.T) {
+	args := normalizeToolArgs("session.close", map[string]any{"id": "chat_123"})
+	if args["session_id"] != "chat_123" {
+		t.Fatalf("expected id to normalize into session_id, got %#v", args["session_id"])
+	}
+}
+
+func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
+	e := &Engine{}
+	cfg := config.Default()
+	cfg.Network.Enabled = false
+	tools := e.allowedTools(cfg)
+	hasSessionList := false
+	hasSessionClose := false
+	for _, name := range tools {
+		if name == "session.list" {
+			hasSessionList = true
+		}
+		if name == "session.close" {
+			hasSessionClose = true
+		}
+		if name == "http.request" {
+			t.Fatal("did not expect http.request when network is disabled")
+		}
+	}
+	if !hasSessionList || !hasSessionClose {
+		t.Fatalf("expected session tools in allowed list, got %#v", tools)
+	}
+
+	cfg.Network.Enabled = true
+	tools = e.allowedTools(cfg)
+	found := false
+	for _, name := range tools {
+		if name == "http.request" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected http.request in allowed tools when network is enabled")
 	}
 }
 
@@ -1531,6 +1623,16 @@ func TestNormalizeToolArgsCoversFieldMappings(t *testing.T) {
 		t.Fatalf("expected fs.read path mapping, got %#v", readArgs)
 	}
 
+	deleteArgs := normalizeToolArgs("fs.delete", map[string]any{"target": "old.txt"})
+	if deleteArgs["path"] != "old.txt" {
+		t.Fatalf("expected fs.delete target mapping, got %#v", deleteArgs)
+	}
+
+	moveArgs := normalizeToolArgs("fs.move", map[string]any{"from": "old.txt", "to": "new.txt"})
+	if moveArgs["src"] != "old.txt" || moveArgs["dst"] != "new.txt" {
+		t.Fatalf("expected fs.move src/dst mapping, got %#v", moveArgs)
+	}
+
 	listArgs := normalizeToolArgs("fs.list", map[string]any{"target": "docs"})
 	if listArgs["path"] != "docs" {
 		t.Fatalf("expected fs.list target mapping, got %#v", listArgs)
@@ -1618,5 +1720,49 @@ func TestFormatFinalOutputWithThinking(t *testing.T) {
 	}
 	if got := formatFinalOutputWithThinking("", "thought"); got != "Thinking:\nthought" {
 		t.Fatalf("unexpected formatted output without final text: %q", got)
+	}
+}
+
+func TestRuntimeContextDocIncludesRunTools(t *testing.T) {
+	doc := runtimeContextDoc("/tmp/workspace")
+	if !strings.Contains(doc, "run.list/run.get") {
+		t.Fatalf("expected runtime context to include run tools, got: %s", doc)
+	}
+	if !strings.Contains(doc, "Run tools") {
+		t.Fatalf("expected runtime context to mention Run tools, got: %s", doc)
+	}
+}
+
+func TestToolCallingBestPracticesDocIncludesRunTools(t *testing.T) {
+	doc := toolCallingBestPracticesDoc()
+	if !strings.Contains(doc, "run.list") || !strings.Contains(doc, "run.get") {
+		t.Fatalf("expected best practices to include run.list and run.get, got: %s", doc)
+	}
+	if !strings.Contains(doc, "run.list") && !strings.Contains(doc, "run.get") {
+		t.Fatalf("expected best practices to mention run tools, got: %s", doc)
+	}
+}
+
+func TestAllowedToolsIncludesRunTools(t *testing.T) {
+	e := &Engine{}
+	cfg := config.Default()
+	cfg.Network.Enabled = false
+	tools := e.allowedTools(cfg)
+
+	hasRunList := false
+	hasRunGet := false
+	for _, name := range tools {
+		if name == "run.list" {
+			hasRunList = true
+		}
+		if name == "run.get" {
+			hasRunGet = true
+		}
+	}
+	if !hasRunList {
+		t.Fatalf("expected run.list in allowed tools, got: %v", tools)
+	}
+	if !hasRunGet {
+		t.Fatalf("expected run.get in allowed tools, got: %v", tools)
 	}
 }

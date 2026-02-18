@@ -113,6 +113,9 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		if session.AgentID != agentID || session.Channel != source || session.UserID != msg.UserID || session.RoomID != roomID {
 			return Result{Response: "Session not available in this chat context"}, nil
 		}
+		if session.IsClosed() {
+			return Result{Response: "Session is closed: " + parts[1] + " (use /new to continue)"}, nil
+		}
 		if err := c.Store.SetActiveSessionPointer(agentID, source, msg.UserID, roomID, parts[1]); err != nil {
 			return Result{}, err
 		}
@@ -132,7 +135,11 @@ func (c *Connector) HandleMessage(ctx context.Context, msg Message) (Result, err
 		lines := make([]string, 0, len(sessions)+1)
 		lines = append(lines, "Recent chats:")
 		for i, session := range sessions {
-			lines = append(lines, strconv.Itoa(i+1)+". "+session.SessionID)
+			line := strconv.Itoa(i+1) + ". " + session.SessionID
+			if session.IsClosed() {
+				line += " (closed)"
+			}
+			lines = append(lines, line)
 		}
 		return Result{Response: strings.Join(lines, "\n")}, nil
 	}
@@ -182,6 +189,9 @@ func (c *Connector) resolveOrCreateActiveSession(agentID, source, userID, roomID
 		return chatstore.Session{}, err
 	}
 	if session.AgentID != agentID || session.Channel != source || session.UserID != userID || session.RoomID != roomID {
+		return c.createAndSetActiveSession(agentID, source, userID, roomID)
+	}
+	if session.IsClosed() {
 		return c.createAndSetActiveSession(agentID, source, userID, roomID)
 	}
 	return session, nil

@@ -214,13 +214,7 @@ func (h *Handler) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		cfg.Providers.OpenAI.APIKey = ""
-		cfg.Providers.OpenRouter.APIKey = ""
-		cfg.Providers.Requesty.APIKey = ""
-		cfg.Providers.ZAI.APIKey = ""
-		cfg.Providers.Generic.APIKey = ""
-		cfg.Discord.Token = ""
-		writeJSON(w, cfg)
+		writeJSON(w, cfg.Redacted())
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -823,7 +817,16 @@ const txt=await r.text();
 let parsed;
 try{parsed=JSON.parse(txt);}catch(e){parsed={raw:txt};}
 if(!r.ok){
-if(!parsed.error){parsed.error=parsed.raw||txt||('request failed with status '+r.status);}
+const errBody=parsed&&parsed.error;
+if(errBody&&typeof errBody==='object'){
+const msg=typeof errBody.message==='string'?errBody.message.trim():'';
+const code=typeof errBody.code==='string'?errBody.code.trim():'';
+parsed.error=msg||code||JSON.stringify(errBody);
+if(code)parsed.error_code=code;
+if(typeof errBody.retry_after_seconds==='number')parsed.retry_after_seconds=errBody.retry_after_seconds;
+}else if(!parsed.error){
+parsed.error=parsed.raw||txt||('request failed with status '+r.status);
+}
 parsed.ok=false;
 parsed.status=r.status;
 return parsed;
@@ -1398,7 +1401,11 @@ renderChat();
 try{
 const result=await j('/v1/chat/messages',{method:'POST',body:JSON.stringify({user_id:'dashboard_user',message:message,agent_id:'default'})});
 if(result.error){
-chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+result.error};
+let errorText=String(result.error||'request failed');
+if(result.status===403&&errorText.toLowerCase().indexOf('not allowlisted')!==-1){
+errorText+=' (add "dashboard_user" to chat.allow_users in config)';
+}
+chatMessages[thinkingIdx]={role:'assistant',content:'Error: '+errorText};
 }else if(result.id){
 if(result.session_id&&String(result.session_id).trim()){
 currentActiveSessionID=String(result.session_id).trim();

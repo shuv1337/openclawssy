@@ -125,6 +125,83 @@ func TestParseToolCallsCanonicalizesAliases(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsAcceptsFsDeleteWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"fs.delete\",\"arguments\":{\"path\":\"old.txt\",\"force\":true}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"fs.delete"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "fs.delete" {
+		t.Fatalf("expected fs.delete, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsCanonicalizesFsRenameAlias(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"fs.rename\",\"arguments\":{\"src\":\"a.txt\",\"dst\":\"b.txt\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"fs.move"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "fs.move" {
+		t.Fatalf("expected canonical fs.move, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsConfigSetWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"config.set\",\"arguments\":{\"updates\":{\"output.thinking_mode\":\"always\"}}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"config.set"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "config.set" {
+		t.Fatalf("expected config.set, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsSecretsGetWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"secrets.get\",\"arguments\":{\"key\":\"provider/openrouter/api_key\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"secrets.get"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "secrets.get" {
+		t.Fatalf("expected secrets.get, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsSchedulerAddWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"scheduler.add\",\"arguments\":{\"schedule\":\"@every 1h\",\"message\":\"status\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"scheduler.add"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "scheduler.add" {
+		t.Fatalf("expected scheduler.add, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsAcceptsSessionCloseWhenAllowed(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"session.close\",\"arguments\":{\"session_id\":\"chat_123\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"session.close"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "session.close" {
+		t.Fatalf("expected session.close, got %q", calls[0].Name)
+	}
+}
+
+func TestParseToolCallsCanonicalizesNetFetchAlias(t *testing.T) {
+	text := "```json\n{\"tool_name\":\"net.fetch\",\"arguments\":{\"url\":\"https://example.com\"}}\n```"
+	calls, _ := ParseToolCalls(text, []string{"http.request"})
+	if len(calls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(calls))
+	}
+	if calls[0].Name != "http.request" {
+		t.Fatalf("expected canonical http.request, got %q", calls[0].Name)
+	}
+}
+
 func TestParseToolCallsCapsReturnedCallsAtSix(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 8; i++ {

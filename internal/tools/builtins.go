@@ -32,6 +32,11 @@ var workspaceControlPlaneFilenames = map[string]bool{
 
 type CoreOptions struct {
 	EnableShellExec bool
+	ConfigPath      string
+	SchedulerPath   string
+	ChatstorePath   string
+	RunsPath        string
+	RunTracker      RunCanceller
 }
 
 func RegisterCore(reg *Registry) error {
@@ -48,6 +53,12 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := reg.Register(ToolSpec{Name: "fs.write", Description: "Write text file", Required: []string{"path", "content"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "content": ArgTypeString}}, fsWrite); err != nil {
 		return err
 	}
+	if err := reg.Register(ToolSpec{Name: "fs.delete", Description: "Delete file or directory", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "recursive": ArgTypeBool, "force": ArgTypeBool}}, fsDelete); err != nil {
+		return err
+	}
+	if err := reg.Register(ToolSpec{Name: "fs.move", Description: "Move or rename file or directory", Required: []string{"src", "dst"}, ArgTypes: map[string]ArgType{"src": ArgTypeString, "dst": ArgTypeString, "overwrite": ArgTypeBool}}, fsMove); err != nil {
+		return err
+	}
 	if err := reg.Register(ToolSpec{Name: "fs.edit", Description: "Apply line-based file edits", Required: []string{"path"}, ArgTypes: map[string]ArgType{"path": ArgTypeString, "old": ArgTypeString, "new": ArgTypeString, "edits": ArgTypeArray}}, fsEdit); err != nil {
 		return err
 	}
@@ -55,6 +66,24 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 		return err
 	}
 	if err := reg.Register(ToolSpec{Name: "time.now", Description: "Get current time"}, timeNow); err != nil {
+		return err
+	}
+	if err := registerConfigTools(reg, opts.ConfigPath); err != nil {
+		return err
+	}
+	if err := registerSecretsTools(reg, opts.ConfigPath); err != nil {
+		return err
+	}
+	if err := registerSchedulerTools(reg, opts.SchedulerPath); err != nil {
+		return err
+	}
+	if err := registerSessionTools(reg, opts.ChatstorePath); err != nil {
+		return err
+	}
+	if err := registerRunTools(reg, opts.RunsPath, opts.RunTracker); err != nil {
+		return err
+	}
+	if err := registerNetworkTools(reg, opts.ConfigPath); err != nil {
 		return err
 	}
 	if opts.EnableShellExec {
@@ -150,6 +179,150 @@ func fsWrite(_ context.Context, req Request) (map[string]any, error) {
 		"bytes":   len(content),
 		"lines":   lines,
 		"summary": fmt.Sprintf("wrote %d line(s) to %s", lines, path),
+	}, nil
+}
+
+func fsDelete(_ context.Context, req Request) (map[string]any, error) {
+	path, err := getString(req.Args, "path")
+	if err != nil {
+		return nil, err
+	}
+	if req.Policy == nil {
+		return nil, errors.New("policy is required")
+	}
+	resolved, err := req.Policy.ResolveWritePath(req.Workspace, path)
+	if err != nil {
+		return nil, err
+	}
+	if err := guardWorkspaceControlPlaneFilename(req.Workspace, resolved, req.AgentID); err != nil {
+		return nil, err
+	}
+
+	recursive := getBoolArg(req.Args, "recursive", false)
+	force := getBoolArg(req.Args, "force", false)
+
+	info, err := os.Lstat(resolved)
+	if err != nil {
+		if os.IsNotExist(err) && force {
+			return map[string]any{
+				"path":    path,
+				"deleted": false,
+				"skipped": "not_found",
+				"summary": fmt.Sprintf("path not found, skipped delete: %s", path),
+			}, nil
+		}
+		return nil, err
+	}
+
+	isDir := info.IsDir()
+	if isDir && !recursive {
+		return nil, errors.New("path is a directory; set recursive=true to delete directories")
+	}
+
+	if isDir {
+		err = os.RemoveAll(resolved)
+	} else {
+		err = os.Remove(resolved)
+	}
+	if err != nil {
+		if os.IsNotExist(err) && force {
+			return map[string]any{
+				"path":    path,
+				"deleted": false,
+				"skipped": "not_found",
+				"summary": fmt.Sprintf("path not found, skipped delete: %s", path),
+			}, nil
+		}
+		return nil, err
+	}
+
+	targetType := "file"
+	if isDir {
+		targetType = "dir"
+	}
+	return map[string]any{
+		"path":      path,
+		"deleted":   true,
+		"type":      targetType,
+		"recursive": recursive,
+		"summary":   fmt.Sprintf("deleted %s", path),
+	}, nil
+}
+
+func fsMove(_ context.Context, req Request) (map[string]any, error) {
+	src, err := getString(req.Args, "src")
+	if err != nil {
+		return nil, err
+	}
+	dst, err := getString(req.Args, "dst")
+	if err != nil {
+		return nil, err
+	}
+	if req.Policy == nil {
+		return nil, errors.New("policy is required")
+	}
+	srcResolved, err := req.Policy.ResolveWritePath(req.Workspace, src)
+	if err != nil {
+		return nil, err
+	}
+	dstResolved, err := req.Policy.ResolveWritePath(req.Workspace, dst)
+	if err != nil {
+		return nil, err
+	}
+	if err := guardWorkspaceControlPlaneFilename(req.Workspace, srcResolved, req.AgentID); err != nil {
+		return nil, err
+	}
+	if err := guardWorkspaceControlPlaneFilename(req.Workspace, dstResolved, req.AgentID); err != nil {
+		return nil, err
+	}
+
+	overwrite := getBoolArg(req.Args, "overwrite", false)
+
+	srcInfo, err := os.Lstat(srcResolved)
+	if err != nil {
+		return nil, err
+	}
+
+	if srcResolved == dstResolved {
+		return map[string]any{
+			"src":       src,
+			"dst":       dst,
+			"moved":     true,
+			"overwrite": overwrite,
+			"summary":   fmt.Sprintf("moved %s to %s", src, dst),
+		}, nil
+	}
+
+	if dstInfo, err := os.Lstat(dstResolved); err == nil {
+		if !overwrite {
+			return nil, fmt.Errorf("destination already exists: %s", dst)
+		}
+		if dstInfo.IsDir() {
+			if err := os.RemoveAll(dstResolved); err != nil {
+				return nil, err
+			}
+		} else if err := os.Remove(dstResolved); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+
+	if err := os.Rename(srcResolved, dstResolved); err != nil {
+		return nil, err
+	}
+
+	kind := "file"
+	if srcInfo.IsDir() {
+		kind = "dir"
+	}
+	return map[string]any{
+		"src":       src,
+		"dst":       dst,
+		"moved":     true,
+		"type":      kind,
+		"overwrite": overwrite,
+		"summary":   fmt.Sprintf("moved %s to %s", src, dst),
 	}, nil
 }
 
@@ -319,11 +492,21 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 			return nil, &ToolError{Code: ErrCodePolicyDenied, Tool: req.Tool, Message: "command is not allowed"}
 		}
 	}
-	stdout, stderr, exitCode, execErr := req.Shell.Exec(ctx, command, args)
+
+	// Apply timeout if specified
+	timeoutMS := getIntArg(req.Args, "timeout_ms", 0)
+	execCtx := ctx
+	var cancel context.CancelFunc
+	if timeoutMS > 0 {
+		execCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMS)*time.Millisecond)
+		defer cancel()
+	}
+
+	stdout, stderr, exitCode, execErr := req.Shell.Exec(execCtx, command, args)
 	fallbackUsed := ""
 	if execErr != nil && command == "bash" && isExecutableNotFound(execErr) {
 		for _, candidate := range []string{"/bin/bash", "/usr/bin/bash", "sh"} {
-			fbStdout, fbStderr, fbExitCode, fbErr := req.Shell.Exec(ctx, candidate, args)
+			fbStdout, fbStderr, fbExitCode, fbErr := req.Shell.Exec(execCtx, candidate, args)
 			if fbErr == nil || !isExecutableNotFound(fbErr) {
 				stdout, stderr, exitCode, execErr = fbStdout, fbStderr, fbExitCode, fbErr
 				fallbackUsed = candidate
@@ -342,8 +525,8 @@ func shellExec(ctx context.Context, req Request) (map[string]any, error) {
 	if execErr != nil {
 		res["error"] = execErr.Error()
 	}
-	if timeoutRaw, ok := req.Args["timeout_ms"]; ok {
-		res["timeout_ms"] = normalizeInt(timeoutRaw)
+	if timeoutMS > 0 {
+		res["timeout_ms"] = timeoutMS
 	}
 	return res, returnErr
 }
@@ -516,6 +699,18 @@ func getIntArg(args map[string]any, key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func getBoolArg(args map[string]any, key string, fallback bool) bool {
+	v, ok := args[key]
+	if !ok {
+		return fallback
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return fallback
+	}
+	return b
 }
 
 func guardWorkspaceControlPlaneFilename(workspace, targetAbs, agentID string) error {

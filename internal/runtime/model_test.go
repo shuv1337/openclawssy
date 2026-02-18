@@ -1242,9 +1242,51 @@ func TestToolNameHelpersAndAllowlist(t *testing.T) {
 	if isToolAllowed("fs.write", []string{"fs.read"}) {
 		t.Fatal("expected fs.write to be denied")
 	}
+	if !isToolAllowed("fs.delete", []string{"fs.delete"}) {
+		t.Fatal("expected fs.delete to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("fs.move", []string{"fs.rename"}) {
+		t.Fatal("expected fs.rename alias to allow canonical fs.move")
+	}
+	if !isToolAllowed("config.set", []string{"config.set"}) {
+		t.Fatal("expected config.set to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("secrets.get", []string{"secrets.get"}) {
+		t.Fatal("expected secrets.get to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("scheduler.list", []string{"scheduler.list"}) {
+		t.Fatal("expected scheduler.list to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("session.close", []string{"session.close"}) {
+		t.Fatal("expected session.close to be allowed when explicitly granted")
+	}
+	if !isToolAllowed("http.request", []string{"net.fetch"}) {
+		t.Fatal("expected net.fetch alias to allow canonical http.request")
+	}
 
 	if canonical, ok := canonicalToolName("terminal.run"); !ok || canonical != "shell.exec" {
 		t.Fatalf("unexpected canonical alias mapping: ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("fs.delete"); !ok || canonical != "fs.delete" {
+		t.Fatalf("expected fs.delete canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("fs.rename"); !ok || canonical != "fs.move" {
+		t.Fatalf("expected fs.rename alias to canonicalize to fs.move, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("config.get"); !ok || canonical != "config.get" {
+		t.Fatalf("expected config.get canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("secrets.list"); !ok || canonical != "secrets.list" {
+		t.Fatalf("expected secrets.list canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("scheduler.pause"); !ok || canonical != "scheduler.pause" {
+		t.Fatalf("expected scheduler.pause canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("session.list"); !ok || canonical != "session.list" {
+		t.Fatalf("expected session.list canonical mapping, got ok=%v canonical=%q", ok, canonical)
+	}
+	if canonical, ok := canonicalToolName("net.fetch"); !ok || canonical != "http.request" {
+		t.Fatalf("expected net.fetch alias to canonicalize to http.request, got ok=%v canonical=%q", ok, canonical)
 	}
 	if _, ok := canonicalToolName("unknown.tool"); ok {
 		t.Fatal("expected unknown tool alias to fail")

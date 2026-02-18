@@ -122,7 +122,7 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 	_ = r.emit(ctx, "tool.call", map[string]any{
 		"agent_id": agentID,
 		"tool":     name,
-		"args":     args,
+		"args":     sanitizeAuditArgs(name, args),
 	})
 
 	r.mu.RLock()
@@ -191,9 +191,43 @@ func (r *Registry) Execute(ctx context.Context, agentID, name, workspace string,
 	_ = r.emit(ctx, "tool.result", map[string]any{
 		"agent_id": agentID,
 		"tool":     name,
-		"result":   res,
+		"result":   sanitizeAuditResult(name, res),
 	})
 	return res, nil
+}
+
+func sanitizeAuditArgs(tool string, args map[string]any) map[string]any {
+	if !strings.HasPrefix(strings.TrimSpace(tool), "secrets.") {
+		return args
+	}
+	if len(args) == 0 {
+		return args
+	}
+	cloned := make(map[string]any, len(args))
+	for k, v := range args {
+		cloned[k] = v
+	}
+	if _, ok := cloned["value"]; ok {
+		cloned["value"] = "[REDACTED]"
+	}
+	return cloned
+}
+
+func sanitizeAuditResult(tool string, result map[string]any) map[string]any {
+	if !strings.HasPrefix(strings.TrimSpace(tool), "secrets.") {
+		return result
+	}
+	if len(result) == 0 {
+		return result
+	}
+	cloned := make(map[string]any, len(result))
+	for k, v := range result {
+		cloned[k] = v
+	}
+	if _, ok := cloned["value"]; ok {
+		cloned["value"] = "[REDACTED]"
+	}
+	return cloned
 }
 
 func classifyToolErrorCode(err error) ErrorCode {

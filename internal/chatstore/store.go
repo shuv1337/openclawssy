@@ -16,10 +16,16 @@ import (
 )
 
 var ErrSessionNotFound = errors.New("chatstore: session not found")
+var ErrSessionClosed = errors.New("chatstore: session closed")
 
 const DefaultMaxHistoryCount = 200
 
 const lockAcquireTimeout = 5 * time.Second
+
+const (
+	messageScanBufferInit = 256 * 1024
+	messageScanBufferMax  = 8 * 1024 * 1024
+)
 
 type Store struct {
 	agentsRoot string
@@ -39,6 +45,11 @@ type Session struct {
 	Title     string    `json:"title,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	ClosedAt  time.Time `json:"closed_at,omitempty"`
+}
+
+func (s Session) IsClosed() bool {
+	return !s.ClosedAt.IsZero()
 }
 
 type Message struct {
@@ -270,6 +281,7 @@ func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, erro
 		defer f.Close()
 
 		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, messageScanBufferInit), messageScanBufferMax)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -282,6 +294,9 @@ func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, erro
 			all = append(all, m)
 		}
 		if err := scanner.Err(); err != nil {
+			if errors.Is(err, bufio.ErrTooLong) {
+				return fmt.Errorf("chatstore: scan messages: message exceeds %d bytes", messageScanBufferMax)
+			}
 			return fmt.Errorf("chatstore: scan messages: %w", err)
 		}
 		return nil
@@ -308,6 +323,38 @@ func (s *Store) GetSession(sessionID string) (Session, error) {
 	}
 
 	return readSessionMeta(filepath.Join(dir, "meta.json"))
+}
+
+func (s *Store) CloseSession(sessionID string) error {
+	if err := validateSegment("session_id", sessionID); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dir, err := s.sessionDirByIDLocked(sessionID)
+	if err != nil {
+		return err
+	}
+
+	lockPath := filepath.Join(dir, ".chatstore.lock")
+	return withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		metaPath := filepath.Join(dir, "meta.json")
+		session, err := readSessionMeta(metaPath)
+		if err != nil {
+			return err
+		}
+		if session.IsClosed() {
+			return nil
+		}
+		now := time.Now().UTC()
+		session.ClosedAt = now
+		if now.After(session.UpdatedAt) {
+			session.UpdatedAt = now
+		}
+		return writeJSONFile(metaPath, session)
+	})
 }
 
 func (s *Store) SetActiveSessionPointer(agentID, channel, userID, roomID, sessionID string) error {
@@ -340,6 +387,9 @@ func (s *Store) SetActiveSessionPointer(agentID, channel, userID, roomID, sessio
 	}
 	if session.AgentID != agentID {
 		return ErrSessionNotFound
+	}
+	if session.IsClosed() {
+		return ErrSessionClosed
 	}
 
 	path := s.activePointerPath(agentID, channel, userID, roomID)
