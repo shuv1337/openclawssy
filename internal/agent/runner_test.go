@@ -15,6 +15,10 @@ type mockModel struct {
 	reqs      []ModelRequest
 }
 
+type streamingMockModel struct {
+	reqs []ModelRequest
+}
+
 func (m *mockModel) Generate(_ context.Context, req ModelRequest) (ModelResponse, error) {
 	m.reqs = append(m.reqs, req)
 	if m.idx >= len(m.responses) {
@@ -23,6 +27,19 @@ func (m *mockModel) Generate(_ context.Context, req ModelRequest) (ModelResponse
 	resp := m.responses[m.idx]
 	m.idx++
 	return resp, nil
+}
+
+func (m *streamingMockModel) Generate(_ context.Context, req ModelRequest) (ModelResponse, error) {
+	m.reqs = append(m.reqs, req)
+	if req.OnTextDelta != nil {
+		if err := req.OnTextDelta("hello "); err != nil {
+			return ModelResponse{}, err
+		}
+		if err := req.OnTextDelta("world"); err != nil {
+			return ModelResponse{}, err
+		}
+	}
+	return ModelResponse{FinalText: "hello world"}, nil
 }
 
 type mockTools struct {
@@ -193,6 +210,36 @@ func TestRunnerPassesRunMetadataAndContextToModelRequests(t *testing.T) {
 	}
 	if len(req.AllowedTools) != len(allowedTools) || req.AllowedTools[0] != allowedTools[0] || req.AllowedTools[1] != allowedTools[1] {
 		t.Fatalf("expected allowed tools to pass through, got %#v", req.AllowedTools)
+	}
+}
+
+func TestRunnerForwardsAndInvokesOnTextDelta(t *testing.T) {
+	model := &streamingMockModel{}
+	runner := Runner{Model: model, ToolExecutor: &mockTools{}, MaxToolIterations: 2}
+
+	var deltas []string
+	out, err := runner.Run(context.Background(), RunInput{
+		Message:      "stream this",
+		ArtifactDocs: []ArtifactDoc{{Name: "SOUL.md", Content: "help user"}},
+		OnTextDelta: func(delta string) error {
+			deltas = append(deltas, delta)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "hello world" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(model.reqs) != 1 {
+		t.Fatalf("expected one model request, got %d", len(model.reqs))
+	}
+	if model.reqs[0].OnTextDelta == nil {
+		t.Fatal("expected OnTextDelta callback forwarded to model request")
+	}
+	if strings.Join(deltas, "") != "hello world" {
+		t.Fatalf("expected forwarded deltas to be invoked, got %#v", deltas)
 	}
 }
 
@@ -544,6 +591,76 @@ func TestRunnerBreaksNoProgressToolLoopBeforeCap(t *testing.T) {
 	}
 	if len(model.reqs) != 8 {
 		t.Fatalf("expected finalize call after no-progress loop, got %d model requests", len(model.reqs))
+	}
+}
+
+func TestRunnerBreaksRepeatedToolPatternLoop(t *testing.T) {
+	responses := []ModelResponse{
+		{ToolCalls: []ToolCallRequest{
+			{ID: "1", Name: "fs.list", Arguments: []byte(`{"path":"."}`)},
+			{ID: "2", Name: "config.get", Arguments: []byte(`{}`)},
+			{ID: "3", Name: "agent.list", Arguments: []byte(`{}`)},
+			{ID: "4", Name: "session.list", Arguments: []byte(`{}`)},
+			{ID: "5", Name: "scheduler.list", Arguments: []byte(`{}`)},
+			{ID: "6", Name: "skill.list", Arguments: []byte(`{}`)},
+		}},
+		{ToolCalls: []ToolCallRequest{
+			{ID: "1b", Name: "fs.list", Arguments: []byte(`{"path":"."}`)},
+			{ID: "2b", Name: "config.get", Arguments: []byte(`{}`)},
+			{ID: "3b", Name: "agent.list", Arguments: []byte(`{}`)},
+			{ID: "4b", Name: "session.list", Arguments: []byte(`{}`)},
+			{ID: "5b", Name: "scheduler.list", Arguments: []byte(`{}`)},
+			{ID: "6b", Name: "skill.list", Arguments: []byte(`{}`)},
+		}},
+		{FinalText: "Completed the requested read-only checks using existing tool results."},
+	}
+	model := &mockModel{responses: responses}
+	tools := &mockTools{results: map[string]ToolCallResult{
+		"1": {ID: "1", Output: `{"entries":[]}`},
+		"2": {ID: "2", Output: `{"config":{}}`},
+		"3": {ID: "3", Output: `{"items":["default"]}`},
+		"4": {ID: "4", Output: `{"sessions":[]}`},
+		"5": {ID: "5", Output: `{"jobs":[]}`},
+		"6": {ID: "6", Output: `{"skills":[]}`},
+	}}
+
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+	out, err := runner.Run(context.Background(), RunInput{Message: "run 10 read-only tool calls"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "Completed the requested read-only checks using existing tool results." {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if len(out.ToolCalls) != 10 {
+		t.Fatalf("expected early stop at requested tool-call count, got %d", len(out.ToolCalls))
+	}
+	if len(tools.calls) != 6 {
+		t.Fatalf("expected only first batch to execute for real, got %d calls", len(tools.calls))
+	}
+	if len(model.reqs) != 3 {
+		t.Fatalf("expected two tool iterations + one finalize call, got %d model requests", len(model.reqs))
+	}
+	if !strings.Contains(model.reqs[2].SystemPrompt, "REQUESTED_TOOL_COUNT_MODE") {
+		t.Fatalf("expected requested-tool-count directive in finalize prompt, got %q", model.reqs[2].SystemPrompt)
+	}
+}
+
+func TestInferExplicitToolCallLimit(t *testing.T) {
+	tests := []struct {
+		message string
+		want    int
+	}{
+		{message: "run 10 read-only tool calls", want: 10},
+		{message: "execute 3 tool calls then summarize", want: 3},
+		{message: "perform 0 tool calls", want: 0},
+		{message: "run tool calls", want: 0},
+		{message: "please inspect and summarize", want: 0},
+	}
+	for _, tc := range tests {
+		if got := inferExplicitToolCallLimit(tc.message); got != tc.want {
+			t.Fatalf("inferExplicitToolCallLimit(%q)=%d, want %d", tc.message, got, tc.want)
+		}
 	}
 }
 

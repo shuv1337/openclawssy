@@ -63,6 +63,7 @@ type ExecuteInput struct {
 	Source       string
 	SessionID    string
 	ThinkingMode string
+	OnProgress   func(eventType string, data map[string]any)
 }
 
 const (
@@ -76,6 +77,8 @@ const (
 	maxParseDiagnosticReasonChars  = 180
 	defaultRunTimeout              = 20 * time.Minute
 	maxRunErrorUserMessageChars    = 320
+	modelDeltaFlushInterval        = 120 * time.Millisecond
+	modelDeltaFlushCharThreshold   = 200
 )
 
 type RunLimitError struct {
@@ -320,12 +323,47 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		modelMessages = append(modelMessages, agent.ChatMessage{Role: "user", Content: runMessage})
 	}
 
+	emitProgress := func(eventType string, data map[string]any) {
+		if in.OnProgress == nil {
+			return
+		}
+		safeEmitProgress(in.OnProgress, eventType, data)
+	}
+
+	var textBatcher *modelTextProgressBatcher
+	var onTextDelta func(string) error
+	if in.OnProgress != nil {
+		textBatcher = newModelTextProgressBatcher(modelDeltaFlushInterval, modelDeltaFlushCharThreshold, func(chunk string) {
+			emitProgress("model_text", map[string]any{"text": chunk, "partial": true})
+		})
+		onTextDelta = func(delta string) error {
+			textBatcher.Append(delta)
+			return nil
+		}
+	}
+
 	appendToolsAfterRun := true
-	onToolCall := func(rec agent.ToolCallRecord) error { return nil }
-	if conversationStore != nil {
-		appendToolsAfterRun = false
+	var onToolCall func(agent.ToolCallRecord) error
+	if conversationStore != nil || in.OnProgress != nil {
+		if conversationStore != nil {
+			appendToolsAfterRun = false
+		}
 		onToolCall = func(rec agent.ToolCallRecord) error {
-			return appendToolCallMessage(conversationStore, sessionID, runID, rec)
+			durationMS := rec.CompletedAt.Sub(rec.StartedAt).Milliseconds()
+			if durationMS < 0 {
+				durationMS = 0
+			}
+			emitProgress("tool_end", map[string]any{
+				"tool":         strings.TrimSpace(rec.Request.Name),
+				"tool_call_id": strings.TrimSpace(rec.Request.ID),
+				"summary":      summarizeToolExecution(rec.Request.Name, rec.Result.Output, rec.Result.Error),
+				"error":        strings.TrimSpace(rec.Result.Error),
+				"duration_ms":  durationMS,
+			})
+			if conversationStore != nil {
+				return appendToolCallMessage(conversationStore, sessionID, runID, rec)
+			}
+			return nil
 		}
 	}
 
@@ -341,7 +379,14 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		ToolTimeoutMS:     int(agent.DefaultToolTimeout / time.Millisecond),
 		AllowedTools:      allowedTools,
 		OnToolCall:        onToolCall,
+		OnTextDelta:       onTextDelta,
 	})
+	if textBatcher != nil {
+		textBatcher.Flush()
+	}
+	if runErr == nil {
+		emitProgress("model_text", map[string]any{"text": out.FinalText, "partial": false})
+	}
 
 	artifactPath := ""
 	persistedThinking, thinkingPresent := sanitizedPersistedThinking(out.Thinking, out.ThinkingPresent, cfg.Output.MaxThinkingChars)
@@ -653,6 +698,110 @@ func logToolCallbackFailures(ctx context.Context, aud *audit.Logger, runID, agen
 			fields["session_id"] = sessionID
 		}
 		_ = aud.LogEvent(ctx, audit.EventToolCallbackError, fields)
+	}
+}
+
+func safeEmitProgress(cb func(eventType string, data map[string]any), eventType string, data map[string]any) {
+	if cb == nil {
+		return
+	}
+	if strings.TrimSpace(eventType) == "" {
+		return
+	}
+	payload := make(map[string]any, len(data))
+	for key, value := range data {
+		payload[key] = value
+	}
+	defer func() {
+		_ = recover()
+	}()
+	cb(strings.TrimSpace(eventType), payload)
+}
+
+type modelTextProgressBatcher struct {
+	mu            sync.Mutex
+	buffer        strings.Builder
+	flushInterval time.Duration
+	charThreshold int
+	timer         *time.Timer
+	emit          func(chunk string)
+}
+
+func newModelTextProgressBatcher(flushInterval time.Duration, charThreshold int, emit func(chunk string)) *modelTextProgressBatcher {
+	if flushInterval <= 0 {
+		flushInterval = modelDeltaFlushInterval
+	}
+	if charThreshold <= 0 {
+		charThreshold = modelDeltaFlushCharThreshold
+	}
+	if emit == nil {
+		return nil
+	}
+	return &modelTextProgressBatcher{
+		flushInterval: flushInterval,
+		charThreshold: charThreshold,
+		emit:          emit,
+	}
+}
+
+func (b *modelTextProgressBatcher) Append(delta string) {
+	if b == nil {
+		return
+	}
+	if delta == "" {
+		return
+	}
+
+	b.mu.Lock()
+	b.buffer.WriteString(delta)
+	if b.buffer.Len() >= b.charThreshold {
+		chunk := b.buffer.String()
+		b.buffer.Reset()
+		if b.timer != nil {
+			b.timer.Stop()
+			b.timer = nil
+		}
+		b.mu.Unlock()
+		b.emit(chunk)
+		return
+	}
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.flushInterval, b.flushFromTimer)
+	}
+	b.mu.Unlock()
+}
+
+func (b *modelTextProgressBatcher) flushFromTimer() {
+	chunk := ""
+	b.mu.Lock()
+	if b.buffer.Len() > 0 {
+		chunk = b.buffer.String()
+		b.buffer.Reset()
+	}
+	b.timer = nil
+	b.mu.Unlock()
+	if chunk != "" {
+		b.emit(chunk)
+	}
+}
+
+func (b *modelTextProgressBatcher) Flush() {
+	if b == nil {
+		return
+	}
+	chunk := ""
+	b.mu.Lock()
+	if b.timer != nil {
+		b.timer.Stop()
+		b.timer = nil
+	}
+	if b.buffer.Len() > 0 {
+		chunk = b.buffer.String()
+		b.buffer.Reset()
+	}
+	b.mu.Unlock()
+	if chunk != "" {
+		b.emit(chunk)
 	}
 }
 

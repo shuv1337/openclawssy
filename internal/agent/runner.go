@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -13,15 +15,21 @@ var (
 	ErrModelRequired            = errors.New("agent runner requires model")
 	ErrToolExecutorRequired     = errors.New("agent runner requires tool executor for tool calls")
 	ErrToolIterationCapExceeded = errors.New("agent runner tool iteration cap exceeded")
+
+	explicitToolCallLimitRE = regexp.MustCompile(`(?i)\b(?:run|execute|perform)\s+(\d{1,3})\s+[^\n]*?\btool calls?\b`)
 )
 
 const (
-	DefaultToolIterationCap          = 120
-	DefaultToolTimeout               = 900 * time.Second
-	repeatedNoProgressLoopCapTrigger = 6
-	failureRecoveryTrigger           = 2
-	failureGuidanceEscalation        = 3
-	followThroughRepromptCap         = 5
+	DefaultToolIterationCap             = 120
+	DefaultToolTimeout                  = 900 * time.Second
+	repeatedNoProgressLoopCapTrigger    = 6
+	repeatedToolPatternLoopCapTrigger   = 2
+	repeatedToolPatternMinResultWindow  = 10
+	repeatedCallKeyCountThreshold       = 2
+	repeatedCallKeyDistinctToolsTrigger = 3
+	failureRecoveryTrigger              = 2
+	failureGuidanceEscalation           = 3
+	followThroughRepromptCap            = 5
 )
 
 // Runner executes the model/tool loop for a single run.
@@ -67,6 +75,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 	cachedFailedToolResults := make(map[string]ToolCallResult)
 	failedToolCallCounts := make(map[string]int)
 	failedToolCallErrors := make(map[string]string)
+	successfulCallKeyCounts := make(map[string]int)
 	consecutiveToolFailures := 0
 	failureRecoveryActive := false
 	failuresSinceRecovery := 0
@@ -76,6 +85,9 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		toolTimeout = DefaultToolTimeout
 	}
 	noProgressIterations := 0
+	lastToolPattern := ""
+	repeatedToolPatternCount := 0
+	explicitToolCallLimit := inferExplicitToolCallLimit(input.Message)
 	latestThinking := ""
 	thinkingPresent := false
 	toolParseFailure := false
@@ -115,6 +127,34 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 	}
 
+	finalizeForExplicitToolLimit := func() bool {
+		if explicitToolCallLimit <= 0 || len(toolResults) < explicitToolCallLimit {
+			return false
+		}
+		if finalized := finalizeFromToolResults(
+			ctx,
+			r.Model,
+			input.AgentID,
+			input.RunID,
+			out.Prompt,
+			messages,
+			input.Message,
+			input.ToolTimeoutMS,
+			toolResults,
+			fmt.Sprintf("# REQUESTED_TOOL_COUNT_MODE\n- The user-requested tool-call count (%d) has been reached.\n- Do not call tools again. Provide the final answer from existing tool results.", explicitToolCallLimit),
+			input.OnTextDelta,
+		); finalized != "" {
+			out.FinalText = finalized
+		} else {
+			out.FinalText = requestedToolCallLimitFallback(toolResults, explicitToolCallLimit)
+		}
+		out.Thinking = latestThinking
+		out.ThinkingPresent = thinkingPresent
+		out.ToolParseFailure = toolParseFailure
+		out.CompletedAt = time.Now().UTC()
+		return true
+	}
+
 	for {
 		systemPrompt := out.Prompt
 		if failureRecoveryActive {
@@ -134,6 +174,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			Prompt:        systemPrompt,
 			Message:       input.Message,
 			ToolResults:   append([]ToolCallResult(nil), toolResults...),
+			OnTextDelta:   input.OnTextDelta,
 		})
 		if resp.ThinkingPresent {
 			thinkingPresent = true
@@ -194,7 +235,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			out.ThinkingPresent = thinkingPresent
 			out.ToolParseFailure = toolParseFailure
 			if len(toolResults) > 0 {
-				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, ""); finalized != "" {
+				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, "", input.OnTextDelta); finalized != "" {
 					out.FinalText = finalized
 					out.CompletedAt = time.Now().UTC()
 					return out, nil
@@ -205,6 +246,38 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			}
 			out.CompletedAt = time.Now().UTC()
 			return out, ErrToolIterationCapExceeded
+		}
+
+		currentToolPattern := toolCallPattern(resp.ToolCalls)
+		if currentToolPattern != "" && currentToolPattern == lastToolPattern {
+			repeatedToolPatternCount++
+		} else {
+			repeatedToolPatternCount = 0
+			lastToolPattern = currentToolPattern
+		}
+		if repeatedToolPatternCount >= repeatedToolPatternLoopCapTrigger && len(toolResults) >= repeatedToolPatternMinResultWindow {
+			if finalized := finalizeFromToolResults(
+				ctx,
+				r.Model,
+				input.AgentID,
+				input.RunID,
+				out.Prompt,
+				messages,
+				input.Message,
+				input.ToolTimeoutMS,
+				toolResults,
+				"# LOOP_GUARD_MODE\n- You have repeated materially identical tool-call batches across consecutive iterations.\n- Do not call tools again. Synthesize a final answer from existing tool results.",
+				input.OnTextDelta,
+			); finalized != "" {
+				out.FinalText = finalized
+			} else {
+				out.FinalText = loopGuardFallbackFromToolResults(toolResults)
+			}
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
+			out.CompletedAt = time.Now().UTC()
+			return out, nil
 		}
 
 		hadFreshExecution := false
@@ -227,6 +300,12 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
 					registerToolOutcome(record.Result.Error)
+					if strings.TrimSpace(record.Result.Error) == "" {
+						successfulCallKeyCounts[callKey]++
+					}
+					if finalizeForExplicitToolLimit() {
+						return out, nil
+					}
 					continue
 				}
 				if cached, ok := cachedFailedToolResults[callKey]; ok {
@@ -241,6 +320,9 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 					out.ToolCalls = append(out.ToolCalls, record)
 					toolResults = append(toolResults, record.Result)
 					registerToolOutcome(record.Result.Error)
+					if finalizeForExplicitToolLimit() {
+						return out, nil
+					}
 					continue
 				}
 			}
@@ -276,6 +358,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 
 			if callKey != "|" {
 				if strings.TrimSpace(result.Error) == "" {
+					successfulCallKeyCounts[callKey]++
 					cachedToolResults[callKey] = ToolCallResult{Output: result.Output}
 					delete(cachedFailedToolResults, callKey)
 					delete(failedToolCallCounts, callKey)
@@ -297,12 +380,41 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			notifyToolCall(&record)
 			out.ToolCalls = append(out.ToolCalls, record)
 			toolResults = append(toolResults, result)
+			if finalizeForExplicitToolLimit() {
+				return out, nil
+			}
 		}
 
 		if hadFreshExecution {
 			noProgressIterations = 0
 		} else {
 			noProgressIterations++
+		}
+
+		repeatedCallKeys := countCallKeysAtOrAbove(successfulCallKeyCounts, repeatedCallKeyCountThreshold)
+		if repeatedCallKeys >= repeatedCallKeyDistinctToolsTrigger && len(toolResults) >= repeatedToolPatternMinResultWindow {
+			if finalized := finalizeFromToolResults(
+				ctx,
+				r.Model,
+				input.AgentID,
+				input.RunID,
+				out.Prompt,
+				messages,
+				input.Message,
+				input.ToolTimeoutMS,
+				toolResults,
+				"# LOOP_GUARD_MODE\n- Multiple tool signatures have repeated without converging.\n- Do not call tools again. Synthesize a final answer from existing tool results.",
+				input.OnTextDelta,
+			); finalized != "" {
+				out.FinalText = finalized
+			} else {
+				out.FinalText = loopGuardFallbackFromToolResults(toolResults)
+			}
+			out.Thinking = latestThinking
+			out.ThinkingPresent = thinkingPresent
+			out.ToolParseFailure = toolParseFailure
+			out.CompletedAt = time.Now().UTC()
+			return out, nil
 		}
 
 		if failureRecoveryActive && failuresSinceRecovery >= failureGuidanceEscalation && len(out.ToolCalls) > 0 {
@@ -315,7 +427,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 
 		if noProgressIterations >= repeatedNoProgressLoopCapTrigger && len(toolResults) > 0 {
-			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, ""); finalized != "" {
+			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, "", input.OnTextDelta); finalized != "" {
 				out.FinalText = finalized
 			} else {
 				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
@@ -376,7 +488,7 @@ func nonActionableFinalText(lastText string) string {
 	return "I could not complete an actionable execution step in time. Please retry and I will run it directly and report concrete results."
 }
 
-func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extraDirective string) string {
+func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extraDirective string, onTextDelta func(delta string) error) string {
 	if model == nil || len(toolResults) == 0 {
 		return ""
 	}
@@ -400,6 +512,7 @@ func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, p
 		Prompt:        finalPrompt,
 		Message:       message,
 		ToolResults:   append([]ToolCallResult(nil), toolResults...),
+		OnTextDelta:   onTextDelta,
 	})
 	if err != nil {
 		return ""
@@ -419,6 +532,31 @@ func fallbackFromToolResults(results []ToolCallResult, toolCap int) string {
 	b.WriteString("I reached the tool-iteration limit before producing a final response. Here are the latest tool results:\n")
 	b.WriteString(formatLatestToolResults(results))
 	b.WriteString(fmt.Sprintf("\n(Iteration cap: %d)", toolCap))
+	return b.String()
+}
+
+func loopGuardFallbackFromToolResults(results []ToolCallResult) string {
+	if len(results) == 0 {
+		return "I stopped because the tool-call plan was looping without converging."
+	}
+
+	var b strings.Builder
+	b.WriteString("I stopped to avoid a repeating tool-call loop. Here are the latest tool results:\n")
+	b.WriteString(formatLatestToolResults(results))
+	return b.String()
+}
+
+func requestedToolCallLimitFallback(results []ToolCallResult, requested int) string {
+	if requested <= 0 {
+		requested = len(results)
+	}
+	if len(results) == 0 {
+		return fmt.Sprintf("I stopped after reaching the requested tool-call limit (%d).", requested)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("I reached the requested tool-call limit (%d). Here are the latest tool results:\n", requested))
+	b.WriteString(formatLatestToolResults(results))
 	return b.String()
 }
 
@@ -581,6 +719,51 @@ func toolResultErrorText(result ToolCallResult) string {
 		}
 	}
 	return ""
+}
+
+func toolCallPattern(calls []ToolCallRequest) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(calls))
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Name)
+		args := strings.TrimSpace(string(call.Arguments))
+		parts = append(parts, name+"|"+args)
+	}
+	return strings.Join(parts, "||")
+}
+
+func inferExplicitToolCallLimit(message string) int {
+	text := strings.TrimSpace(message)
+	if text == "" {
+		return 0
+	}
+	matches := explicitToolCallLimitRE.FindStringSubmatch(text)
+	if len(matches) != 2 {
+		return 0
+	}
+	value, err := strconv.Atoi(matches[1])
+	if err != nil || value <= 0 {
+		return 0
+	}
+	if value > 200 {
+		value = 200
+	}
+	return value
+}
+
+func countCallKeysAtOrAbove(counts map[string]int, minCount int) int {
+	if len(counts) == 0 || minCount <= 1 {
+		return len(counts)
+	}
+	total := 0
+	for _, count := range counts {
+		if count >= minCount {
+			total++
+		}
+	}
+	return total
 }
 
 func uniqueToolCallID(rawID string, ordinal int, used map[string]struct{}) string {
