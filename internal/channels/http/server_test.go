@@ -554,6 +554,7 @@ func TestServer_AuthAllowsOnlyDashboardGetHeadPathsWithoutToken(t *testing.T) {
 		{name: "dashboard legacy post blocked", method: http.MethodPost, path: "/dashboard-legacy", want: http.StatusUnauthorized},
 		{name: "dashboard static post blocked", method: http.MethodPost, path: "/dashboard/static/app.js", want: http.StatusUnauthorized},
 		{name: "other path blocked", method: http.MethodGet, path: "/api/admin/status", want: http.StatusUnauthorized},
+		{name: "admin memory path blocked", method: http.MethodGet, path: "/api/admin/memory/default", want: http.StatusUnauthorized},
 	}
 
 	for _, tc := range tests {

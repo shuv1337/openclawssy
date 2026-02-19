@@ -21,6 +21,7 @@ Come chat about Openclawssy and other Ussyverse projects.
 - Supports encrypted secret ingestion with write-only dashboard/API handling.
 - Provides multi-agent control with per-agent profiles, model overrides, and routing pointers.
 - Includes session-aware chat timelines and operational controls for long-running workloads.
+- Ships a full memory system (event ingestion, checkpoint distillation, recall injection, maintenance, proactive hooks, optional embeddings).
 
 ## Core Capabilities
 
@@ -41,6 +42,15 @@ Come chat about Openclawssy and other Ussyverse projects.
   - Structured tool errors and bounded loop execution
   - Persisted bundles per run (`input`, `prompt`, `toolcalls`, `output`, `meta`)
   - Audit logs with redaction behavior
+  - Memory admin endpoint (`GET /api/admin/memory/<agent>`) with health + embedding stats
+
+- Memory system
+  - Event stream persisted under `.openclawssy/agents/<agent>/memory/events/*.jsonl`
+  - Working memory store with tools (`memory.search`, `memory.write`, `memory.update`, `memory.forget`, `memory.health`)
+  - Decision logging + checkpoint distillation (`decision.log`, `memory.checkpoint`)
+  - Prompt-time recall injection with bounded memory context
+  - Weekly maintenance (`memory.maintenance`) and proactive messaging triggers
+  - Optional embeddings + semantic hybrid recall (OpenRouter/OpenAI-compatible providers)
 
 ## Quickstart
 
@@ -102,6 +112,7 @@ Detailed operational/reference content has been moved out of the README into `do
 - Getting started: `docs/GETTING_STARTED.md`
 - Usage and workflows: `docs/USAGE.md`
 - Architecture: `docs/ARCHITECTURE.md`
+- Memory system: `docs/MEMORY_SYSTEM.md`
 - Tool catalog: `docs/TOOL_CATALOG.md`
 - Config spec: `docs/specs/CONFIG.md`
 - Contracts + acceptance: `docs/specs/CONTRACTS.md`, `docs/specs/ACCEPTANCE.md`

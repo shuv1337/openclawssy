@@ -25,6 +25,7 @@ type Config struct {
 	Chat      ChatConfig      `json:"chat"`
 	Discord   DiscordConfig   `json:"discord"`
 	Secrets   SecretsConfig   `json:"secrets"`
+	Memory    MemoryConfig    `json:"memory"`
 }
 
 const (
@@ -159,6 +160,18 @@ type SecretsConfig struct {
 	MasterKeyFile string `json:"master_key_file"`
 }
 
+type MemoryConfig struct {
+	Enabled           bool   `json:"enabled"`
+	MaxWorkingItems   int    `json:"max_working_items,omitempty"`
+	MaxPromptTokens   int    `json:"max_prompt_tokens,omitempty"`
+	AutoCheckpoint    bool   `json:"auto_checkpoint"`
+	ProactiveEnabled  bool   `json:"proactive_enabled"`
+	EmbeddingsEnabled bool   `json:"embeddings_enabled"`
+	EmbeddingProvider string `json:"embedding_provider,omitempty"`
+	EmbeddingModel    string `json:"embedding_model,omitempty"`
+	EventBufferSize   int    `json:"event_buffer_size,omitempty"`
+}
+
 func Default() Config {
 	return Config{
 		Network: NetworkConfig{
@@ -246,6 +259,17 @@ func Default() Config {
 			StoreFile:     ".openclawssy/secrets.enc",
 			MasterKeyFile: ".openclawssy/master.key",
 		},
+		Memory: MemoryConfig{
+			Enabled:           false,
+			MaxWorkingItems:   200,
+			MaxPromptTokens:   1200,
+			AutoCheckpoint:    false,
+			ProactiveEnabled:  true,
+			EmbeddingsEnabled: false,
+			EmbeddingProvider: "openrouter",
+			EmbeddingModel:    "text-embedding-3-small",
+			EventBufferSize:   256,
+		},
 	}
 }
 
@@ -321,6 +345,21 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Secrets.MasterKeyFile == "" {
 		c.Secrets.MasterKeyFile = d.Secrets.MasterKeyFile
+	}
+	if c.Memory.MaxWorkingItems <= 0 {
+		c.Memory.MaxWorkingItems = d.Memory.MaxWorkingItems
+	}
+	if c.Memory.MaxPromptTokens <= 0 {
+		c.Memory.MaxPromptTokens = d.Memory.MaxPromptTokens
+	}
+	if c.Memory.EventBufferSize <= 0 {
+		c.Memory.EventBufferSize = d.Memory.EventBufferSize
+	}
+	if strings.TrimSpace(c.Memory.EmbeddingProvider) == "" {
+		c.Memory.EmbeddingProvider = d.Memory.EmbeddingProvider
+	}
+	if strings.TrimSpace(c.Memory.EmbeddingModel) == "" {
+		c.Memory.EmbeddingModel = d.Memory.EmbeddingModel
 	}
 
 	if c.Providers.OpenAI.BaseURL == "" {
@@ -467,6 +506,23 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Secrets.StoreFile) == "" || strings.TrimSpace(c.Secrets.MasterKeyFile) == "" {
 		return errors.New("secrets.store_file and secrets.master_key_file are required")
+	}
+	if c.Memory.MaxWorkingItems < 1 || c.Memory.MaxWorkingItems > 100000 {
+		return errors.New("memory.max_working_items must be between 1 and 100000")
+	}
+	if c.Memory.MaxPromptTokens < 64 || c.Memory.MaxPromptTokens > 100000 {
+		return errors.New("memory.max_prompt_tokens must be between 64 and 100000")
+	}
+	if c.Memory.EventBufferSize < 1 || c.Memory.EventBufferSize > 10000 {
+		return errors.New("memory.event_buffer_size must be between 1 and 10000")
+	}
+	embeddingProvider := strings.ToLower(strings.TrimSpace(c.Memory.EmbeddingProvider))
+	supportedEmbeddingProviders := map[string]bool{"openai": true, "openrouter": true, "requesty": true, "zai": true, "generic": true}
+	if !supportedEmbeddingProviders[embeddingProvider] {
+		return fmt.Errorf("unsupported memory.embedding_provider: %q", c.Memory.EmbeddingProvider)
+	}
+	if strings.TrimSpace(c.Memory.EmbeddingModel) == "" {
+		return errors.New("memory.embedding_model is required")
 	}
 
 	return nil

@@ -238,6 +238,60 @@ func applyConfigFieldUpdate(cfg *config.Config, field string, value any) error {
 			return err
 		}
 		cfg.Agents.EnabledAgentIDs = items
+	case "memory.enabled":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.Enabled = b
+	case "memory.max_working_items":
+		n, err := requireInt(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.MaxWorkingItems = n
+	case "memory.max_prompt_tokens":
+		n, err := requireInt(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.MaxPromptTokens = n
+	case "memory.auto_checkpoint":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.AutoCheckpoint = b
+	case "memory.proactive_enabled":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.ProactiveEnabled = b
+	case "memory.embeddings_enabled":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.EmbeddingsEnabled = b
+	case "memory.embedding_provider":
+		s, err := requireString(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.EmbeddingProvider = s
+	case "memory.embedding_model":
+		s, err := requireString(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.EmbeddingModel = s
+	case "memory.event_buffer_size":
+		n, err := requireInt(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Memory.EventBufferSize = n
 	default:
 		return fmt.Errorf("field is not mutable: %s", field)
 	}
@@ -279,6 +333,24 @@ func configGetField(cfg config.Config, field string) (any, bool) {
 		return cfg.Agents.AllowAgentModelOverrides, true
 	case "agents.enabled_agent_ids":
 		return cfg.Agents.EnabledAgentIDs, true
+	case "memory.enabled":
+		return cfg.Memory.Enabled, true
+	case "memory.max_working_items":
+		return cfg.Memory.MaxWorkingItems, true
+	case "memory.max_prompt_tokens":
+		return cfg.Memory.MaxPromptTokens, true
+	case "memory.auto_checkpoint":
+		return cfg.Memory.AutoCheckpoint, true
+	case "memory.proactive_enabled":
+		return cfg.Memory.ProactiveEnabled, true
+	case "memory.embeddings_enabled":
+		return cfg.Memory.EmbeddingsEnabled, true
+	case "memory.embedding_provider":
+		return cfg.Memory.EmbeddingProvider, true
+	case "memory.embedding_model":
+		return cfg.Memory.EmbeddingModel, true
+	case "memory.event_buffer_size":
+		return cfg.Memory.EventBufferSize, true
 	case "config":
 		return cfg, true
 	default:

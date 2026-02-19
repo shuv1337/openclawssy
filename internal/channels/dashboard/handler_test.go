@@ -15,6 +15,8 @@ import (
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/memory"
+	memorystore "openclawssy/internal/memory/store"
 	"openclawssy/internal/scheduler"
 	"openclawssy/internal/secrets"
 )
@@ -220,6 +222,75 @@ func TestAdminStatusEndpointIncludesConfiguredModelStamp(t *testing.T) {
 	}
 	if model["provider"] != "openai" || model["name"] != "gpt-4.1-mini" {
 		t.Fatalf("unexpected model stamp: %#v", model)
+	}
+}
+
+func TestAdminMemoryEndpointReturnsHealthAndItems(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, ".openclawssy", "agents", "default", "memory", "memory.db")
+	store, err := memorystore.OpenSQLite(dbPath, "default")
+	if err != nil {
+		t.Fatalf("open sqlite store: %v", err)
+	}
+	_, err = store.Upsert(context.Background(), memory.MemoryItem{
+		Kind:       "preference",
+		Title:      "Notifications",
+		Content:    "User prefers proactive notifications.",
+		Importance: 4,
+		Confidence: 0.9,
+	})
+	if err != nil {
+		t.Fatalf("upsert memory item: %v", err)
+	}
+	_ = store.Close()
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/memory/default", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["agent_id"] != "default" {
+		t.Fatalf("expected default agent id, got %#v", payload["agent_id"])
+	}
+	if _, ok := payload["health"].(map[string]any); !ok {
+		t.Fatalf("expected health payload, got %#v", payload["health"])
+	}
+	if _, ok := payload["active_items"].([]any); !ok {
+		t.Fatalf("expected active_items array, got %#v", payload["active_items"])
+	}
+	embeddingStats, ok := payload["embedding_stats"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected embedding_stats object, got %#v", payload["embedding_stats"])
+	}
+	if _, ok := embeddingStats["vector_count"].(float64); !ok {
+		t.Fatalf("expected numeric vector_count, got %#v", embeddingStats["vector_count"])
+	}
+	if _, ok := embeddingStats["semantic_search_available"].(bool); !ok {
+		t.Fatalf("expected semantic_search_available bool, got %#v", embeddingStats["semantic_search_available"])
+	}
+}
+
+func TestAdminMemoryEndpointRejectsInvalidAgentID(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/memory/default/extra", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected %d, got %d", http.StatusBadRequest, rr.Code)
 	}
 }
 

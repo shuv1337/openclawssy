@@ -142,6 +142,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			input.Message,
 			input.ToolTimeoutMS,
 			toolResults,
+			input.SystemPromptExt,
 			fmt.Sprintf("# REQUESTED_TOOL_COUNT_MODE\n- The user-requested tool-call count (%d) has been reached.\n- Do not call tools again. Provide the final answer from existing tool results.", explicitToolCallLimit),
 			input.OnTextDelta,
 		); finalized != "" {
@@ -163,6 +164,11 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 		if followThroughReprompts > 0 {
 			systemPrompt = appendPromptDirective(systemPrompt, "# ACTION_EXECUTION_MODE\n- You previously replied with intent to act but did not execute.\n- In this turn, either call required tools now or provide a concrete final answer from existing evidence.\n- Do not defer with phrases like 'let me check' or promise future action without execution.")
+		}
+		if input.SystemPromptExt != nil {
+			if extended := strings.TrimSpace(input.SystemPromptExt(ctx, systemPrompt, append([]ChatMessage(nil), messages...), input.Message, append([]ToolCallResult(nil), toolResults...))); extended != "" {
+				systemPrompt = extended
+			}
 		}
 
 		resp, err := r.Model.Generate(ctx, ModelRequest{
@@ -236,7 +242,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 			out.ThinkingPresent = thinkingPresent
 			out.ToolParseFailure = toolParseFailure
 			if len(toolResults) > 0 {
-				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, "", input.OnTextDelta); finalized != "" {
+				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, input.SystemPromptExt, "", input.OnTextDelta); finalized != "" {
 					out.FinalText = finalized
 					out.CompletedAt = time.Now().UTC()
 					return out, nil
@@ -267,6 +273,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 				input.Message,
 				input.ToolTimeoutMS,
 				toolResults,
+				input.SystemPromptExt,
 				"# LOOP_GUARD_MODE\n- You have repeated materially identical tool-call batches across consecutive iterations.\n- Do not call tools again. Synthesize a final answer from existing tool results.",
 				input.OnTextDelta,
 			); finalized != "" {
@@ -404,6 +411,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 				input.Message,
 				input.ToolTimeoutMS,
 				toolResults,
+				input.SystemPromptExt,
 				"# LOOP_GUARD_MODE\n- Multiple tool signatures have repeated without converging.\n- Do not call tools again. Synthesize a final answer from existing tool results.",
 				input.OnTextDelta,
 			); finalized != "" {
@@ -428,7 +436,7 @@ func (r Runner) Run(ctx context.Context, input RunInput) (RunOutput, error) {
 		}
 
 		if noProgressIterations >= repeatedNoProgressLoopCapTrigger && len(toolResults) > 0 {
-			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, "", input.OnTextDelta); finalized != "" {
+			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, out.Prompt, messages, input.Message, input.ToolTimeoutMS, toolResults, input.SystemPromptExt, "", input.OnTextDelta); finalized != "" {
 				out.FinalText = finalized
 			} else {
 				out.FinalText = fallbackFromToolResults(toolResults, toolCap)
@@ -489,12 +497,17 @@ func nonActionableFinalText(lastText string) string {
 	return "I could not complete an actionable execution step in time. Please retry and I will run it directly and report concrete results."
 }
 
-func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extraDirective string, onTextDelta func(delta string) error) string {
+func finalizeFromToolResults(ctx context.Context, model Model, agentID, runID, prompt string, messages []ChatMessage, message string, toolTimeoutMS int, toolResults []ToolCallResult, extender SystemPromptExtender, extraDirective string, onTextDelta func(delta string) error) string {
 	if model == nil || len(toolResults) == 0 {
 		return ""
 	}
 
 	finalPrompt := strings.TrimSpace(prompt)
+	if extender != nil {
+		if extended := strings.TrimSpace(extender(ctx, finalPrompt, append([]ChatMessage(nil), messages...), message, append([]ToolCallResult(nil), toolResults...))); extended != "" {
+			finalPrompt = extended
+		}
+	}
 	if finalPrompt != "" {
 		finalPrompt += "\n\n"
 	}

@@ -72,6 +72,13 @@ openclawssy run --agent default --message '/tool policy.list {"agent_id":"defaul
 # utility
 openclawssy run --agent default --message '/tool time.now {}'
 openclawssy run --agent default --message '/tool http.request {"method":"GET","url":"https://example.com"}'
+
+# memory
+openclawssy run --agent default --message '/tool memory.write {"kind":"preference","title":"Tone","content":"Prefer concise responses","importance":4,"confidence":0.9}'
+openclawssy run --agent default --message '/tool memory.search {"query":"concise responses","limit":5}'
+openclawssy run --agent default --message '/tool decision.log {"title":"Retry strategy","content":"Use exponential backoff for flaky calls"}'
+openclawssy run --agent default --message '/tool memory.checkpoint {"max_events":200}'
+openclawssy run --agent default --message '/tool memory.maintenance {"dry_run":true}'
 ```
 
 For complete argument-level details, use `docs/TOOL_CATALOG.md`.
@@ -117,6 +124,7 @@ Admin APIs (dashboard/backend control):
 - `POST /api/admin/scheduler/control`
 - `GET /api/admin/agents`
 - `POST /api/admin/agents`
+- `GET /api/admin/memory/{agent}`
 
 ## Shell and Sandbox
 

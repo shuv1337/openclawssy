@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/memory"
 	"openclawssy/internal/policy"
 	"openclawssy/internal/scheduler"
 	"openclawssy/internal/secrets"
@@ -1038,6 +1040,264 @@ func setupConfigToolRegistry(t *testing.T) (string, string, *Registry) {
 	return ws, cfgPath, reg
 }
 
+func setupMemoryToolRegistry(t *testing.T) (string, string, string, *Registry) {
+	t.Helper()
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	agentsPath := filepath.Join(root, ".openclawssy", "agents")
+	if err := os.MkdirAll(filepath.Join(agentsPath, "agent", "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir agent memory dir: %v", err)
+	}
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Workspace.Root = ws
+	cfg.Memory.Enabled = true
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config fixture: %v", err)
+	}
+
+	enforcer := policy.NewEnforcer(ws, map[string][]string{"agent": {"memory.search", "memory.write", "memory.update", "memory.forget", "memory.health", "memory.checkpoint", "memory.maintenance", "decision.log"}})
+	reg := NewRegistry(enforcer, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath, AgentsPath: agentsPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	return ws, cfgPath, agentsPath, reg
+}
+
+func TestMemoryToolsWriteSearchUpdateForgetHealth(t *testing.T) {
+	ws, _, _, reg := setupMemoryToolRegistry(t)
+
+	writeRes, err := reg.Execute(context.Background(), "agent", "memory.write", ws, map[string]any{
+		"kind":       "preference",
+		"title":      "Notifications",
+		"content":    "User likes proactive notifications.",
+		"importance": 4,
+		"confidence": 0.9,
+	})
+	if err != nil {
+		t.Fatalf("memory.write: %v", err)
+	}
+	var id string
+	switch item := writeRes["item"].(type) {
+	case map[string]any:
+		id, _ = item["id"].(string)
+	case memory.MemoryItem:
+		id = item.ID
+	default:
+		t.Fatalf("expected item object, got %#v", writeRes["item"])
+	}
+	if id == "" {
+		t.Fatalf("expected memory id, got %#v", writeRes["item"])
+	}
+
+	searchRes, err := reg.Execute(context.Background(), "agent", "memory.search", ws, map[string]any{"query": "proactive"})
+	if err != nil {
+		t.Fatalf("memory.search: %v", err)
+	}
+	if count, _ := searchRes["count"].(int); count == 0 {
+		if fCount, ok := searchRes["count"].(float64); !ok || int(fCount) == 0 {
+			t.Fatalf("expected search result count > 0, got %#v", searchRes["count"])
+		}
+	}
+	if mode, _ := searchRes["mode"].(string); strings.TrimSpace(mode) == "" {
+		t.Fatalf("expected search mode field, got %#v", searchRes["mode"])
+	}
+
+	updateRes, err := reg.Execute(context.Background(), "agent", "memory.update", ws, map[string]any{
+		"id":         id,
+		"kind":       "preference",
+		"title":      "Notifications",
+		"content":    "User prefers weekly proactive notifications.",
+		"importance": 5,
+		"confidence": 0.95,
+	})
+	if err != nil {
+		t.Fatalf("memory.update: %v", err)
+	}
+	if updated, _ := updateRes["updated"].(bool); !updated {
+		t.Fatalf("expected updated=true, got %#v", updateRes)
+	}
+
+	forgetRes, err := reg.Execute(context.Background(), "agent", "memory.forget", ws, map[string]any{"id": id})
+	if err != nil {
+		t.Fatalf("memory.forget: %v", err)
+	}
+	if forgotten, _ := forgetRes["forgotten"].(bool); !forgotten {
+		t.Fatalf("expected forgotten=true, got %#v", forgetRes)
+	}
+
+	healthRes, err := reg.Execute(context.Background(), "agent", "memory.health", ws, map[string]any{})
+	if err != nil {
+		t.Fatalf("memory.health: %v", err)
+	}
+	switch health := healthRes["health"].(type) {
+	case map[string]any:
+		if _, ok := health["db_path"].(string); !ok {
+			t.Fatalf("expected db_path in health response, got %#v", health)
+		}
+	case memory.Health:
+		if strings.TrimSpace(health.DBPath) == "" {
+			t.Fatal("expected health DBPath to be populated")
+		}
+	default:
+		t.Fatalf("expected health object, got %#v", healthRes["health"])
+	}
+}
+
+func TestMemoryToolsRequireMemoryEnabled(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	agentsPath := filepath.Join(root, ".openclawssy", "agents")
+	if err := os.MkdirAll(filepath.Join(agentsPath, "agent", "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir agent memory dir: %v", err)
+	}
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Workspace.Root = ws
+	cfg.Memory.Enabled = false
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	enforcer := policy.NewEnforcer(ws, map[string][]string{"agent": {"memory.search"}})
+	reg := NewRegistry(enforcer, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath, AgentsPath: agentsPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "memory.search", ws, map[string]any{"query": "x"})
+	if err == nil {
+		t.Fatal("expected memory disabled error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "memory is disabled") {
+		t.Fatalf("expected disabled error, got %v", err)
+	}
+}
+
+func TestMemoryToolsAreCapabilityGated(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	agentsPath := filepath.Join(root, ".openclawssy", "agents")
+	if err := os.MkdirAll(filepath.Join(agentsPath, "agent", "memory"), 0o755); err != nil {
+		t.Fatalf("mkdir agent memory dir: %v", err)
+	}
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Workspace.Root = ws
+	cfg.Memory.Enabled = true
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	enforcer := policy.NewEnforcer(ws, map[string][]string{"agent": {"fs.read"}})
+	reg := NewRegistry(enforcer, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath, AgentsPath: agentsPath}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	_, err := reg.Execute(context.Background(), "agent", "memory.search", ws, map[string]any{"query": "x"})
+	if err == nil {
+		t.Fatal("expected capability denied error")
+	}
+	var toolErr *ToolError
+	if !errors.As(err, &toolErr) {
+		t.Fatalf("expected ToolError, got %T", err)
+	}
+	if toolErr.Code != ErrCodePolicyDenied {
+		t.Fatalf("expected policy denied error code, got %s", toolErr.Code)
+	}
+}
+
+func TestDecisionLogAndCheckpointTools(t *testing.T) {
+	ws, _, _, reg := setupMemoryToolRegistry(t)
+
+	res, err := reg.Execute(context.Background(), "agent", "decision.log", ws, map[string]any{
+		"title":      "Retry strategy",
+		"content":    "Use exponential backoff for flaky network calls.",
+		"importance": 5,
+		"confidence": 0.92,
+	})
+	if err != nil {
+		t.Fatalf("decision.log: %v", err)
+	}
+	if logged, _ := res["logged"].(bool); !logged {
+		t.Fatalf("expected logged=true, got %#v", res)
+	}
+
+	chk, err := reg.Execute(context.Background(), "agent", "memory.checkpoint", ws, map[string]any{"max_events": 50})
+	if err != nil {
+		t.Fatalf("memory.checkpoint: %v", err)
+	}
+	if created, _ := chk["checkpoint_created"].(bool); !created {
+		t.Fatalf("expected checkpoint_created=true, got %#v", chk)
+	}
+	if count, ok := chk["new_item_count"].(float64); ok {
+		if count <= 0 {
+			t.Fatalf("expected new_item_count > 0, got %#v", chk["new_item_count"])
+		}
+	} else if count, ok := chk["new_item_count"].(int); ok {
+		if count <= 0 {
+			t.Fatalf("expected new_item_count > 0, got %#v", chk["new_item_count"])
+		}
+	} else {
+		t.Fatalf("expected numeric new_item_count, got %#v", chk["new_item_count"])
+	}
+	if path, _ := chk["checkpoint_path"].(string); strings.TrimSpace(path) == "" {
+		t.Fatalf("expected checkpoint_path, got %#v", chk)
+	}
+}
+
+func TestMemoryMaintenanceToolGeneratesReport(t *testing.T) {
+	ws, _, agentsPath, reg := setupMemoryToolRegistry(t)
+
+	_, err := reg.Execute(context.Background(), "agent", "memory.write", ws, map[string]any{
+		"kind":       "preference",
+		"title":      "Style",
+		"content":    "Prefer concise responses.",
+		"importance": 2,
+		"confidence": 0.5,
+	})
+	if err != nil {
+		t.Fatalf("memory.write: %v", err)
+	}
+	_, err = reg.Execute(context.Background(), "agent", "memory.write", ws, map[string]any{
+		"kind":       "preference",
+		"title":      "Style",
+		"content":    "Prefer concise responses.",
+		"importance": 2,
+		"confidence": 0.5,
+	})
+	if err != nil {
+		t.Fatalf("memory.write duplicate: %v", err)
+	}
+
+	res, err := reg.Execute(context.Background(), "agent", "memory.maintenance", ws, map[string]any{})
+	if err != nil {
+		t.Fatalf("memory.maintenance: %v", err)
+	}
+	if ok, _ := res["ok"].(bool); !ok {
+		t.Fatalf("expected ok=true, got %#v", res)
+	}
+	if reportPath, _ := res["report_path"].(string); strings.TrimSpace(reportPath) == "" {
+		t.Fatalf("expected report path, got %#v", res)
+	}
+	reportLatest := filepath.Join(agentsPath, "agent", "memory", "reports", "latest-maintenance.json")
+	if _, err := os.Stat(reportLatest); err != nil {
+		t.Fatalf("expected latest maintenance report file: %v", err)
+	}
+}
+
 func TestSecretsToolsRoundTripAndList(t *testing.T) {
 	ws, cfgPath := setupSecretsConfigFixture(t)
 	reg := NewRegistry(fakePolicy{}, nil)
@@ -1630,6 +1890,61 @@ func TestAgentToolsRejectInvalidAgentID(t *testing.T) {
 	}
 	if _, err := reg.Execute(context.Background(), "agent", "agent.switch", ws, map[string]any{"agent_id": "a/b"}); err == nil {
 		t.Fatal("expected invalid agent_id rejection for switch")
+	}
+}
+
+func TestAgentMessageSendPersistsSourceContextFields(t *testing.T) {
+	ws, _, _, _, reg := setupAgentToolRegistry(t, fakePolicy{})
+
+	res, err := reg.Execute(context.Background(), "sender", "agent.message.send", ws, map[string]any{
+		"to_agent_id": "receiver",
+		"message":     "please remind user tomorrow",
+		"task_id":     "task-1",
+		"channel":     "dashboard",
+		"user_id":     "u-123",
+		"session_id":  "sess-xyz",
+	})
+	if err != nil {
+		t.Fatalf("agent.message.send: %v", err)
+	}
+	if sent, _ := res["sent"].(bool); !sent {
+		t.Fatalf("expected sent=true, got %#v", res)
+	}
+
+	inbox, err := reg.Execute(context.Background(), "receiver", "agent.message.inbox", ws, map[string]any{"agent_id": "receiver", "limit": 5})
+	if err != nil {
+		t.Fatalf("agent.message.inbox: %v", err)
+	}
+	msgs, ok := inbox["messages"].([]map[string]any)
+	if !ok {
+		rawMsgs, ok := inbox["messages"].([]any)
+		if !ok || len(rawMsgs) == 0 {
+			t.Fatalf("expected inbox messages, got %#v", inbox["messages"])
+		}
+		msg, ok := rawMsgs[0].(map[string]any)
+		if !ok {
+			t.Fatalf("expected first message map, got %#v", rawMsgs[0])
+		}
+		content, _ := msg["content"].(string)
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(content), &payload); err != nil {
+			t.Fatalf("decode inbox payload: %v", err)
+		}
+		if payload["channel"] != "dashboard" || payload["user_id"] != "u-123" || payload["session_id"] != "sess-xyz" {
+			t.Fatalf("expected source context fields in payload, got %#v", payload)
+		}
+		return
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one inbox message")
+	}
+	content, _ := msgs[0]["content"].(string)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		t.Fatalf("decode inbox payload: %v", err)
+	}
+	if payload["channel"] != "dashboard" || payload["user_id"] != "u-123" || payload["session_id"] != "sess-xyz" {
+		t.Fatalf("expected source context fields in payload, got %#v", payload)
 	}
 }
 

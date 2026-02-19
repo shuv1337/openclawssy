@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+type SystemPromptExtender func(ctx context.Context, basePrompt string, messages []ChatMessage, message string, toolResults []ToolCallResult) string
+
 // ArtifactDoc is a prompt source document.
 type ArtifactDoc struct {
 	Name    string `json:"name"`
@@ -25,6 +27,7 @@ type RunInput struct {
 	AllowedTools      []string                   `json:"allowed_tools,omitempty"`
 	OnToolCall        func(ToolCallRecord) error `json:"-"`
 	OnTextDelta       func(delta string) error   `json:"-"`
+	SystemPromptExt   SystemPromptExtender       `json:"-"`
 }
 
 // RunOutput is the finalized output contract for a run.

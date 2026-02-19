@@ -112,6 +112,9 @@ func registerAgentTools(reg *Registry, agentsPath, configPath, workspaceRoot str
 			"message":     ArgTypeString,
 			"task_id":     ArgTypeString,
 			"subject":     ArgTypeString,
+			"channel":     ArgTypeString,
+			"user_id":     ArgTypeString,
+			"session_id":  ArgTypeString,
 		},
 	}, agentMessageSend(agentsPath, configPath)); err != nil {
 		return err
@@ -450,10 +453,17 @@ func agentMessageSend(agentsPath, configPath string) Handler {
 			return nil, errors.New("message is required")
 		}
 		taskID := strings.TrimSpace(valueString(req.Args, "task_id"))
+		sessionID := strings.TrimSpace(valueString(req.Args, "session_id"))
 		if taskID == "" {
-			taskID = "shared"
+			if sessionID != "" {
+				taskID = sessionID
+			} else {
+				taskID = "shared"
+			}
 		}
 		subject := strings.TrimSpace(valueString(req.Args, "subject"))
+		sourceChannel := strings.TrimSpace(valueString(req.Args, "channel"))
+		sourceUserID := strings.TrimSpace(valueString(req.Args, "user_id"))
 
 		store, err := openAgentChatStore(req.Workspace, agentsPath)
 		if err != nil {
@@ -485,6 +495,9 @@ func agentMessageSend(agentsPath, configPath string) Handler {
 			"to_agent_id":   toAgentID,
 			"subject":       subject,
 			"task_id":       taskID,
+			"session_id":    sessionID,
+			"channel":       sourceChannel,
+			"user_id":       sourceUserID,
 			"message":       message,
 			"sent_at":       time.Now().UTC().Format(time.RFC3339),
 		}
@@ -494,11 +507,14 @@ func agentMessageSend(agentsPath, configPath string) Handler {
 		}
 
 		return map[string]any{
-			"sent":          true,
-			"session_id":    session.SessionID,
-			"from_agent_id": fromAgentID,
-			"to_agent_id":   toAgentID,
-			"task_id":       taskID,
+			"sent":              true,
+			"session_id":        session.SessionID,
+			"source_session_id": sessionID,
+			"from_agent_id":     fromAgentID,
+			"to_agent_id":       toAgentID,
+			"task_id":           taskID,
+			"channel":           sourceChannel,
+			"user_id":           sourceUserID,
 		}, nil
 	}
 }
@@ -851,7 +867,7 @@ func createAgentScaffold(agentRoot string, force bool) ([]string, error) {
 	files := map[string]string{
 		"SOUL.md":     "# SOUL\n\nYou are Openclawssy, a high-accountability software engineering agent.\n\n## Mission\n- Deliver correct, verifiable outcomes with minimal user friction.\n- Prefer concrete execution and evidence over speculation.\n- Keep users informed with concise, actionable updates.\n\n## Quality Bar\n- Validate assumptions against repository context before making changes.\n- Preserve user intent and existing architecture unless directed otherwise.\n- When uncertain, pick the safest reasonable default and explain tradeoffs.\n",
 		"RULES.md":    "# RULES\n\n- Follow workspace-only write policy and capability boundaries.\n- Never expose secrets in plain text output.\n- Keep responses concise, factual, and directly tied to user goals.\n- Run targeted verification for non-trivial changes whenever feasible.\n- If blocked by missing credentials or irreversible choices, ask one precise question with a recommended default.\n",
-		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now.\n",
+		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now.\n",
 		"SPECPLAN.md": "# SPECPLAN\n\nDescribe specs and acceptance requirements before coding.\n",
 		"DEVPLAN.md":  "# DEVPLAN\n\n- [ ] Implement task\n- [ ] Add tests\n- [ ] Update handoff\n",
 		"HANDOFF.md":  "# HANDOFF\n\nStatus: initialized\n\nNext:\n- Define first run objective.\n",

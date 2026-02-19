@@ -107,13 +107,19 @@ func (s *runState) notifyToolCall(record *ToolCallRecord, onToolCall func(ToolCa
 	}
 }
 
-func (s *runState) prepareSystemPrompt() string {
+func (s *runState) prepareSystemPrompt(ctx context.Context, input RunInput) string {
 	systemPrompt := s.out.Prompt
 	if s.failureRecoveryActive {
 		systemPrompt = appendPromptDirective(systemPrompt, "# ERROR_RECOVERY_MODE\n- Recent tool calls failed. Analyze the latest errors and outputs before choosing the next action.\n- Try a materially different approach to resolve the error.\n- Do not repeat the same failing command/arguments unless you explain why it should now work.")
 	}
 	if s.followThroughReprompts > 0 {
 		systemPrompt = appendPromptDirective(systemPrompt, "# ACTION_EXECUTION_MODE\n- You previously replied with intent to act but did not execute.\n- In this turn, either call required tools now or provide a concrete final answer from existing evidence.\n- Do not defer with phrases like 'let me check' or promise future action without execution.")
+	}
+	if input.SystemPromptExt != nil {
+		extended := input.SystemPromptExt(ctx, systemPrompt, append([]ChatMessage(nil), s.messages...), input.Message, append([]ToolCallResult(nil), s.toolResults...))
+		if strings.TrimSpace(extended) != "" {
+			systemPrompt = extended
+		}
 	}
 	return systemPrompt
 }
@@ -215,7 +221,7 @@ func (s *runState) executeTools(ctx context.Context, r Runner, toolCalls []ToolC
 
 func (s *runState) runLoop(ctx context.Context, r Runner, input RunInput) (RunOutput, error) {
 	for {
-		systemPrompt := s.prepareSystemPrompt()
+		systemPrompt := s.prepareSystemPrompt(ctx, input)
 
 		resp, err := r.Model.Generate(ctx, ModelRequest{
 			AgentID:       input.AgentID,
@@ -227,6 +233,7 @@ func (s *runState) runLoop(ctx context.Context, r Runner, input RunInput) (RunOu
 			Prompt:        systemPrompt,
 			Message:       input.Message,
 			ToolResults:   append([]ToolCallResult(nil), s.toolResults...),
+			OnTextDelta:   input.OnTextDelta,
 		})
 		if resp.ThinkingPresent {
 			s.thinkingPresent = true
@@ -287,7 +294,7 @@ func (s *runState) runLoop(ctx context.Context, r Runner, input RunInput) (RunOu
 			s.out.ThinkingPresent = s.thinkingPresent
 			s.out.ToolParseFailure = s.toolParseFailure
 			if len(s.toolResults) > 0 {
-				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, s.out.Prompt, s.messages, input.Message, input.ToolTimeoutMS, s.toolResults, "", input.OnTextDelta); finalized != "" {
+				if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, s.out.Prompt, s.messages, input.Message, input.ToolTimeoutMS, s.toolResults, input.SystemPromptExt, "", input.OnTextDelta); finalized != "" {
 					s.out.FinalText = finalized
 					s.out.CompletedAt = time.Now().UTC()
 					return s.out, nil
@@ -318,7 +325,7 @@ func (s *runState) runLoop(ctx context.Context, r Runner, input RunInput) (RunOu
 		}
 
 		if s.noProgressIterations >= repeatedNoProgressLoopCapTrigger && len(s.toolResults) > 0 {
-			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, s.out.Prompt, s.messages, input.Message, input.ToolTimeoutMS, s.toolResults, "", input.OnTextDelta); finalized != "" {
+			if finalized := finalizeFromToolResults(ctx, r.Model, input.AgentID, input.RunID, s.out.Prompt, s.messages, input.Message, input.ToolTimeoutMS, s.toolResults, input.SystemPromptExt, "", input.OnTextDelta); finalized != "" {
 				s.out.FinalText = finalized
 			} else {
 				s.out.FinalText = fallbackFromToolResults(s.toolResults, s.toolCap)
