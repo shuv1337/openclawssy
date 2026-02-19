@@ -1,372 +1,385 @@
-# Openclawssy Dashboard Rewrite Dev Plan (Modular UI + Legacy Fallback)
+🔥 Openclawssy Memory System — DevPlan v0.1
+Implementation Progress
 
-Owner: ____________________  
-Start date: _______________  
-Target milestone: _________  
-Repo: mojomast/openclawssy  
-Status key: ⬜ Not started · 🟦 In progress · 🟩 Done · 🟥 Blocked
+- [x] Phase 1: Event stream package created (`internal/memory`) with non-blocking queued JSONL ingestion.
+- [x] Phase 1: Runtime integration added after run execution to ingest redacted user/assistant/tool/error/scheduler events.
+- [x] Phase 1: Config surface added (`memory.enabled`, `memory.max_working_items`, `memory.max_prompt_tokens`, `memory.auto_checkpoint`) with defaults/validation.
+- [x] Phase 1: Tests added for memory manager, config memory defaults/validation, and runtime memory event ingestion.
+- [x] Phase 2: Working memory SQLite store + memory tools (`memory.search`, `memory.write`, `memory.update`, `memory.forget`, `memory.health`).
+- [x] Phase 2 follow-up: `decision.log` tool.
+- [x] Phase 3: `memory.checkpoint` now performs model-driven distillation with strict JSON validation and deterministic fallback safety path.
+- [x] Observability: memory admin endpoint added (`GET /api/admin/memory/<agent>`).
+- [x] Phase 3 follow-up: scheduler default checkpoint job wiring (`@every 6h`) and strict model JSON distillation.
+- [x] Phase 3: Checkpoint distillation.
+- [x] Phase 4: Recall integration into prompt assembly (relevant memory block injected pre-turn with importance/status filtering, recency boost, and size caps).
+- [x] Phase 5: Weekly maintenance workflow (`memory.maintenance` tool with dedupe/archive/verification report + auto weekly scheduler wiring via `@every 168h`).
+- [x] Phase 6: Proactive memory-driven behavior hooks (checkpoint/maintenance triggers invoke `agent.message.send` with required `channel`, `user_id`, and `session_id` context).
+- [x] Optional Phase 7: Embeddings support added (pluggable `Embedder` interface, vector storage, cosine retrieval, and OpenRouter-compatible embeddings API path).
 
----
+Guiding Principles
 
-## Goals (must-hit)
-1) **Space used properly**: multi-pane layout (no endless vertical stacking).
-2) **Granular visibility**: user can see “everything pertinent” the bot is doing, down to tool call args/output/errors and traces.
-3) **All settings available + easy**: settings are discoverable and editable from the UI.
-4) **Usability improvements**: the UI actively prevents the failure patterns we saw (schema mismatch, venv confusion, secrets confusion, iteration loops).
-5) **Modular**: easy to extend/replace panes, endpoints, and renderers later without editing a single giant string.
+Security-first (same posture as the runtime)
 
-> Legacy fallback requirement: keep the old dashboard reachable, and add a **link at the bottom** of the new dashboard to open it.
+Audit-friendly (memory derivations are traceable to runs)
 
----
+Workspace-bound (no cross-boundary writes)
 
-## Non-goals (for this phase)
-- Fixing backend behavior (secrets injection, cancellation endpoints, tool catalog endpoints, etc.)  
-  We will still **design UI hooks** so backend can be wired later with minimal churn.
+Deterministic where possible
 
----
+Optional and configurable
 
-## Architecture Decision: Static Assets + Tiny Client Router
-Current dashboard is embedded HTML (`dashboardHTML`) served from `internal/channels/dashboard/handler.go` at `/dashboard`.  
-Rewrite will:
-- Serve new UI as static files from `internal/channels/dashboard/ui/`
-- Keep legacy UI served at `/dashboard-legacy`
-- Provide link in new UI footer: “Open Legacy Dashboard”
+Small working memory, structured long-term memory
 
-Backend APIs to use now (already exist):
-- `/api/admin/status` (provider/model)  
-- `/api/admin/config` (GET/POST)  
-- `/api/admin/secrets` (GET keys / POST set)  
-- `/api/admin/scheduler/*` (jobs + control)  
-- `/api/admin/chat/sessions` + `/messages`  
-- `/api/admin/debug/runs/{id}/trace`  
-- `/v1/chat/messages`, `/v1/runs`, `/v1/runs/{id}`
+🧠 Memory Architecture for Openclawssy
 
----
+We will implement a 3-layer architecture:
 
-## Deliverables
-- New dashboard at `/dashboard`
-- Legacy dashboard at `/dashboard-legacy`
-- New UI footer link: `/dashboard-legacy`
-- Modular file layout with clear ownership boundaries
-- “MVP parity” with current features + adds missing UI for scheduler/sessions/runs/trace + inspector panes + fix-suggestion UX
+Layer	Purpose	Storage
+Event Stream	Raw events (chat/tool/decisions)	JSONL
+Working Memory	High-signal distilled memory	SQLite
+Archive	Long-term searchable memory	SQLite + optional embeddings
+📁 Proposed Filesystem Layout
 
----
+Inside the existing .openclawssy/agents/<agent>/:
 
-# Phase 0 — Safe Setup: Legacy fallback + new UI scaffolding
+.openclawssy/
+└── agents/<agent>/
+    ├── runs/                  (existing)
+    ├── audit/                 (existing)
+    ├── sessions/              (existing)
+    ├── memory/
+    │   ├── events/
+    │   │   └── YYYY-MM-DD.jsonl
+    │   ├── memory.db
+    │   ├── checkpoints/
+    │   │   └── checkpoint-<timestamp>.json
+    │   └── reports/
+    │       └── weekly-<date>.md
 
-## P0.1 Add legacy route
-Status: 🟩  PR: _______
-- [x] Serve current monolithic HTML at **`/dashboard-legacy`**
-- [x] Keep `/dashboard` temporarily as-is until new UI is ready (or flip immediately if comfortable)
 
-Acceptance:
-- [x] `/dashboard-legacy` loads the existing UI exactly as before.
+This keeps memory scoped per-agent.
 
-## P0.2 Create static UI directory + asset server
-Status: 🟩  PR: _______
-Create:
-- [x] `internal/channels/dashboard/ui/index.html`
-- [x] `internal/channels/dashboard/ui/styles.css`
-- [x] `internal/channels/dashboard/ui/app.js`
+🧱 Phase 1 — Event Stream (PR #1)
+Goal
 
-And in Go:
-- [x] Add static serving route for `/dashboard/static/*` → serves files from that folder
-- [x] Update `/dashboard` handler to serve the new `index.html`
+Capture memory-relevant events without changing runtime behavior.
 
-Acceptance:
-- [x] `/dashboard` loads new blank UI shell (header/nav/main panes)
-- [x] Footer includes link: **Open Legacy Dashboard** → `/dashboard-legacy`
+Integration Point
 
----
-
-# Phase 1 — Modular Frontend Foundation
-
-## P1.1 Frontend module layout (no framework required)
-Status: 🟦  PR: _______
-Create `internal/channels/dashboard/ui/src/` modules (bundling optional; can also be plain JS modules):
-- [x] `src/api/client.js` (fetch wrapper + auth + JSON parsing + consistent error objects)
-- [x] `src/router/router.js` (hash router or simple in-app router)
-- [x] `src/state/store.js` (single store + subscriptions; no global spaghetti)
-- [x] `src/ui/layout.js` (3-pane grid + resizers)
-- [ ] `src/ui/components/` (reusable: tabs, tables, json viewer, toast, modal) - json viewer added, others pending
-- [x] `src/pages/` (chat, sessions, runs, scheduler, settings, secrets)
-- [ ] `src/inspectors/` (tool-call inspector, trace inspector, run meta, config diff) - tool + trace inspectors added
-- [x] `src/ux/fix_suggestions.js` (error classifiers + suggested actions)
-- [x] `src/ux/venv_panel.js` (UI-only for now; backend wiring later)
-- [x] `src/ux/tool_schema_panel.js` (UI-only for now; backend wiring later)
-
-Acceptance:
-- [x] Adding a new page = one new file in `pages/` + one route entry
-- [x] No giant monolithic HTML/JS strings
-
-## P1.2 3-pane layout + resizable panes + persistence
-Status: 🟦  PR: _______
-Layout:
-- Left: nav
-- Center: active view (chat/timeline)
-- Right: inspector tabs
+Inside the runtime loop (after execution completes, where run bundle is persisted).
 
 Add:
- - [x] Draggable resizers between panes
- - [x] LocalStorage persistence of pane sizes + collapsed state
- - [x] Responsive behavior: right pane becomes drawer on narrow screens
 
-Acceptance:
- - [x] On wide screens, chat + timeline + inspector are visible simultaneously
- - [x] No “scroll forever to find tools” experience
+memoryManager.IngestEvent(ctx, MemoryEvent{...})
 
----
+Capture:
 
-# Phase 2 — “Everything the bot is doing” (granular visibility)
+user message
 
-## P2.1 Runs page (list/filter/open)
-Status: 🟩  PR: _______
-- [x] Runs list uses `/v1/runs?status&limit&offset`
-- [x] Filters: status; pagination controls
-- [x] Clicking a run loads `/v1/runs/{id}` and optionally `/api/admin/debug/runs/{id}/trace`
+assistant output
 
-Acceptance:
-- [x] User can browse prior runs without copying IDs manually
+tool calls
 
-## P2.2 Run Timeline (trace-first experience)
-Status: 🟦  PR: _______
-- [x] Timeline view for a selected run:
-  - model step(s) (if in trace)
-  - tool calls (name, args preview, duration, status)
-  - error blocks grouped (same tool+same error collapses)
-- [x] Selecting a tool call populates Inspector with:
-  - args JSON (pretty)
-  - output (truncate/expand)
-  - error (if any)
-  - copy buttons
-- [x] Trace inspector shows source metadata (`debug`/`run`/`none`) and trace payload context
+tool results
 
-Acceptance (must address the earlier failures):
-- [ ] If `fs.edit` fails with “missing edits”, UI highlights tool call payload and error clearly. (pending manual UI walkthrough)
-- [ ] If tool repeats failures, UI groups them so iteration loops are obvious. (pending manual UI walkthrough)
+errors
 
-## P2.3 Sessions page (browse + open + tool events)
-Status: 🟦  PR: _______
-- [x] Sessions list uses `/api/admin/chat/sessions` (limit/offset)
-- [x] Search box + sort modes
-- [x] Open session → `/api/admin/chat/sessions/{id}/messages?limit=...`
-- [x] Render:
-  - user/assistant messages
-  - tool messages as structured events (not just raw blobs)
+scheduler-triggered runs
 
-Acceptance:
-- [ ] You can inspect a past troubleshooting session and see tool outputs/errors inline. (pending manual UI walkthrough)
+Redaction
 
-## P2.4 “Live Activity” pane (for current chat)
-Status: 🟦  PR: _______
-- [x] When a chat run is in-flight, show:
-  - “current run id”
-  - latest tool activity (stream/poll via session messages)
-  - last error summary
-- [x] Surface iteration count / “loop risk” indicator (client-only heuristic)
-- [x] Show explicit in-flight heartbeat text in chat transcript and queued/run status handoff messaging
+Reuse existing redaction logic before writing to memory logs.
 
-Acceptance:
-- [ ] User never wonders “what is it doing right now?” (pending manual UX walkthrough)
+Storage
 
----
+Append-only JSONL:
 
-# Phase 3 — Settings: Everything accessible + easy to get to
+{
+  "id": "evt_01H...",
+  "type": "user_message",
+  "text": "...",
+  "session_id": "...",
+  "run_id": "...",
+  "timestamp": "...",
+  "metadata": {...}
+}
 
-> Backend config endpoint exists already; we’ll reorganize the UI to make it discoverable.
 
-## P3.1 Settings Home + categories
-Status: 🟦  PR: _______
-Pages:
-- [x] General
-- [x] Model Provider
-- [x] Chat/Discord
-- [x] Sandbox/Shell
-- [x] Network
-- [x] Scheduler
-- [x] Capabilities (UI-first; backend wiring later if needed)
-- [x] Advanced (raw JSON editor + diff)
+Non-blocking write.
 
-UX:
-- [x] Always show breadcrumbs + search within settings
-- [x] Inline validation messages (client-side basic + show server error on save)
-- [x] “Diff before save” (compare loaded config vs edited config)
+🧠 Phase 2 — Working Memory Store (PR #2)
 
-Acceptance:
-- [ ] A new user can find “model provider” in 1 click
-- [ ] A power user can still edit raw config safely and see diff
+Introduce:
 
-## P3.2 Secrets page improvements
-Status: 🟦  PR: _______
-- [x] Keys list from `/api/admin/secrets` (GET)
-- [x] Store secret via POST (existing)
-- [x] Quality-of-life:
-  - searchable keys list
-  - copy key name
-  - “conventions” helper block (provider keys, PERPLEXITY_API_KEY, etc.)
-  - never display stored values (only accept new input)
+internal/memory/
+    manager.go
+    models.go
+    store/sqlite.go
+    retrieve.go
 
-Acceptance:
-- [ ] User can confirm PERPLEXITY_API_KEY exists (key visible)
-- [ ] No confusing “env | grep” debugging needed from the UI side
+SQLite Schema
+CREATE TABLE memory_items (
+  id TEXT PRIMARY KEY,
+  agent_id TEXT,
+  kind TEXT,
+  title TEXT,
+  content TEXT,
+  importance INTEGER,
+  confidence REAL,
+  status TEXT,
+  created_at DATETIME,
+  updated_at DATETIME
+);
 
-## P3.3 Scheduler page (already supported server-side)
-Status: 🟦  PR: _______
-- [x] List jobs (paused + jobs)
-- [x] Add job form (agent_id, schedule, message, enabled)
-- [x] Delete job
-- [x] Pause/resume scheduler
-- [x] Enable/disable specific job
+CREATE VIRTUAL TABLE memory_fts USING fts5(content, title);
 
-Acceptance:
-- [ ] All scheduler functions usable without leaving UI (pending manual UI walkthrough)
 
----
+On insert/update:
 
-# Phase 4 — Usability: Prevent the tool failures you saw
+sync to FTS table
 
-This phase MUST cover all “problems the first devplan addressed”.
+Add Tools
 
-## P4.1 Tool Schema Viewer (UI now, backend later)
-Status: 🟦  PR: _______
-UI now:
-- [x] Add “Tool Schema” inspector tab with placeholder data model:
-   - show required fields
-   - show example payload
-- [x] For now: hardcode schemas for built-in tools in a JSON file:
-   - `ui/src/data/tool_schemas.json`
+Expose to agent:
 
-Later (backend wiring):
-- Replace hardcoded schemas with a `/api/admin/tools` endpoint.
+memory.search
+memory.write
+memory.update
+memory.forget
+memory.health
+decision.log
 
-Acceptance:
-- [x] When user clicks `fs.edit`, UI shows “requires edits[]”
-- [x] Prevents the exact schema misuse that caused `missing argument: edits`
 
-## P4.2 Fix Suggestions Panel (error classifier)
-Status: 🟦  PR: _______
-Detect and display “suggested next step” actions when errors appear in:
-- tool outputs
-- run trace errors
-- API errors
+These will integrate through the existing tool registry.
 
-Rules (initial):
-- [x] `tool.input_invalid` → show schema + highlight missing fields
-- [x] `externally-managed-environment` → suggest venv creation and always use `.venv/bin/python`
-- [x] `ModuleNotFoundError` → suggest “install requirements in venv”
-- [x] “env var not set” → suggest check Secrets page and later “inject/export to run env”
-- [x] `context deadline exceeded` → show provider request info and suggest retry/backoff (UI only)
+🧪 Phase 3 — Checkpoint Distillation (PR #3)
 
-Acceptance:
-- [x] When pip fails with externally-managed-environment, UI suggests venv workflow immediately
-- [x] When `requests` missing, UI suggests installing into venv and running with venv python
+This is where the 2.0 concept becomes real.
 
-## P4.3 Venv Manager Pane (UI-only for now)
-Status: 🟦  PR: _______
-- [x] Add an inspector tab “Python Env”
-- [x] Provide UI fields/buttons (no backend required yet):
-   - venv path input (default: `./.venv`)
-   - “suggested commands” generator:
-     - create venv
-     - install requirements
-     - run script using `.venv/bin/python`
-- [x] Copy-to-clipboard buttons for commands
+Add Scheduler Job
 
-Acceptance:
-- [x] User can copy the correct venv commands without the bot guessing wrong
+Use existing cron framework:
 
-## P4.4 Run controls: Stop polling + “soft cancel”
-Status: 🟦  PR: _______
-Frontend-only:
-- [x] “Stop polling” button (halts UI polling and clears “Thinking…”)
-- [x] “Retry” button (re-send last prompt)
-- [x] “Copy debug bundle” (selected run/session ids + errors)
+openclawssy cron add \
+  --agent default \
+  --schedule "@every 6h" \
+  --message "/tool memory.checkpoint {}"
 
-Later (backend wiring):
-- Add true cancel endpoint.
 
-Acceptance:
-- [ ] User can stop the UI from spinning forever when iteration caps happen
+Add tool:
 
-## P4.5 Provider/model identity stamp everywhere
-Status: 🟦  PR: _______
-- [x] Display provider/model from `/api/admin/status` in header
-- [x] When rendering run/session, display provider/model for that run if available in trace; otherwise label as “current config”
+memory.checkpoint
 
-Acceptance:
-- [x] If bot claims “I’m Claude”, user can see the actual configured model/provider at all times
+Behavior
 
----
+Read last N events since last checkpoint.
 
-# Phase 5 — Polish (space, speed, and maintainability)
+Construct summarization prompt.
 
-## P5.1 JSON viewer + truncation + streaming-friendly UI
-Status: 🟦  PR: _______
-- [x] Reusable JSON viewer component (collapse/expand)
-- [x] Truncate huge outputs with “expand”
-- [x] Search within JSON text
+Call model.
 
-## P5.2 Theming + accessibility + keyboard shortcuts
-Status: 🟦  PR: _______
-- [ ] Improve contrast and spacing
-- [ ] Shortcuts:
-  - [x] `g c` chat, `g r` runs, `g s` scheduler
-  - [x] `/` focus search
-  - [x] `Esc` close drawer
+Parse structured JSON result.
 
----
+Upsert memory items.
 
-# Legacy Fallback UX Requirement (must-have)
-- [x] New UI footer contains: **“Open Legacy Dashboard”** linking to `/dashboard-legacy`
-- [x] Optional: “Report bug” link to prefill run/session id in issue template
+Structured Prompt Example
 
----
+We DO NOT let the model freestyle.
 
-# QA Checklist (manual scripts)
+We require:
 
-Automation note:
-- Added handler-level automated checks for `/api/admin/status` model stamp payload and static tool schema catalog serving/missing-file behavior in `internal/channels/dashboard/handler_test.go`.
+{
+  "new_items": [
+    {
+      "kind": "preference",
+      "title": "...",
+      "content": "...",
+      "importance": 4,
+      "confidence": 0.92
+    }
+  ],
+  "updates": [
+    {
+      "id": "...",
+      "new_content": "...",
+      "confidence": 0.88
+    }
+  ]
+}
 
-## Script 1: Tool failure visibility
-- [ ] Trigger a known tool input error (e.g., bad payload)
-- [ ] Confirm: timeline shows error, inspector shows payload, Tool Schema tab shows required args, Fix Suggestions appear
 
-## Script 2: Python dependency failure guidance
-- [ ] Confirm: Fix Suggestions show venv workflow; Python Env tab generates correct commands
+Strict JSON schema validation.
 
-## Script 3: Secrets workflow confidence
-- [ ] Store PERPLEXITY_API_KEY
-- [ ] Confirm key appears in list
-- [ ] UI shows “env var missing” guidance that points to Secrets page (until backend injection is wired)
+🗂 Phase 4 — Recall Integration (PR #4)
 
-## Script 4: Scheduler usability
-- [ ] Create job
-- [ ] Disable job
-- [ ] Pause scheduler
-- [ ] Delete job
+This is critical.
 
----
+Inside prompt assembly (Architecture doc step 14–15 flow):
 
-# Progress Tracker
+Before model turn:
 
-| PR | Theme | Status | Notes |
-|----|-------|--------|------|
-| P0.1 | /dashboard-legacy route | 🟩 | |
-| P0.2 | static UI serve + /dashboard new shell | 🟩 | |
-| P1.1 | modular JS layout | 🟦 | Foundation wired; modular pages now include a dashboard Docs editor for core agent markdown files, with remaining component/inspector depth in follow-up slices. |
-| P1.2 | 3-pane resizable layout | 🟦 | Resizers, localStorage pane state, and mobile inspector drawer added in modular shell; verify with manual UX pass. |
-| P2.1 | runs page | 🟩 | `/runs` now supports status filter + pagination, run open, optional debug trace fetch, and inspector state wiring (`selectedTrace`, `selectedTool`, `lastError`). |
-| P2.2 | run timeline + inspector | 🟦 | Runs page now renders trace-first timeline with model-step notes, tool-call blocks, repeated-failure grouping, tool-click inspector wiring, and trace source metadata; acceptance scenarios still need manual walkthrough. |
-| P2.3 | sessions page | 🟦 | `/sessions` now uses paged sessions endpoint, includes client-side search/sort controls, opens session messages with configurable `limit`, renders user/assistant chat items plus structured tool-event cards, and supports optional inspector wiring via `selectedTool`; acceptance still needs manual UX pass. |
-| P2.4 | live activity pane | 🟦 | `/chat` now sends prompts via `/v1/chat/messages` using dashboard defaults, renders user/assistant transcript with sticky-bottom behavior unless user scrolls up, polls `/v1/runs/{id}` and session messages for live tool activity/error summaries, and shows client-side loop-risk heuristics plus explicit in-flight heartbeat text; runtime now also enforces default run timeouts, appends assistant "need your attention" failure messages on run error/timeout, and reprompts deferral-only model replies to reduce "I'll do it" without action outcomes; acceptance needs manual UX pass. |
-| P3.1 | settings pages + diff | 🟦 | `settings.js` now provides category workspace (General/Model/Chat/Sandbox/Network/Scheduler/Capabilities/Advanced), config draft vs baseline handling, inline validation, clear server save errors, search + breadcrumbs, and diff-before-save with changed path table plus raw JSON editor; acceptance still needs manual UX verification. |
-| P3.2 | secrets page | 🟦 | `secrets.js` now uses a modular UI with GET key loading, search + copy-name controls, write-only POST set/rotate form, and a naming-conventions helper block (including PERPLEXITY_API_KEY and Discord token patterns); acceptance still needs manual UX verification. |
-| P3.3 | scheduler page | 🟦 | `/scheduler` now has modular controls for global paused/running state, refresh, add-job form (`agent_id`, `schedule`, `message`, optional `id`, optional explicit `enabled`), per-job enable/disable via scheduler control, delete actions, and clear success/error banners; acceptance still needs manual UI walkthrough. |
-| P4.1 | tool schema viewer (hardcoded first) | 🟦 | Added dedicated Schema inspector tab, loaded hardcoded schema catalog from `ui/src/data/tool_schemas.json`, and highlighted missing required fields with targeted `fs.edit` guidance. |
-| P4.2 | fix suggestions | 🟦 | Expanded classifier rules (`tool.input_invalid`, externally managed env, missing module, env/secret missing, timeout) and added one-click actions to open Schema/Tool/Python/Secrets/Settings views. |
-| P4.3 | python env pane | 🟦 | Added dedicated Python Env inspector tab with editable venv path, generated commands, and copy buttons. |
-| P4.4 | stop polling + soft controls | 🟦 | `/chat` now includes Stop polling, Retry (re-send last prompt), and Copy debug bundle actions; backend true-cancel endpoint remains future work. |
-| P4.5 | provider/model stamp everywhere | 🟦 | Header now fetches `/api/admin/status` and shows runtime provider/model; runs/sessions render model identity using run metadata when present or fallback to current config. |
-| P5.* | polish | 🟦 | Added global keyboard shortcuts (`g c`, `g r`, `g s`, `/`, `Esc`), JSON viewer search, and footer bug-report link with prefilled context; contrast/spacing polish remains. |
+build prompt + session context
 
----
+
+Modify to:
+
+build prompt
++ retrieve memory context
++ inject memory block
+
+Retrieval Logic
+
+FTS search on query
+
+filter by:
+
+status = active
+
+importance ≥ 3
+
+recency boost
+
+Return top N (configurable).
+
+Injected Prompt Block
+--- RELEVANT MEMORY ---
+[MEM-12] User prefers proactive notifications.
+[MEM-44] User is debugging skill loading issues.
+------------------------
+
+
+Hard size cap.
+
+🔄 Phase 5 — Weekly Maintenance (PR #5)
+
+Add tool:
+
+memory.maintenance
+
+
+Scheduled:
+
+cron 30 2 * * 0
+
+
+Maintenance tasks:
+
+Deduplicate similar items
+
+Archive stale items
+
+Mark items needing verification
+
+Compact DB
+
+Generate weekly report file
+
+Optional: proactive message to user.
+
+📊 Phase 6 — Proactive Memory-Driven Behavior (PR #6)
+
+Integrate with scheduler + delivery system.
+
+When:
+
+checkpoint creates high-importance memory
+
+maintenance finds stale item
+
+user preference indicates reminders
+
+Trigger:
+
+agent.message.send
+
+
+BUT must include:
+
+userID
+
+sessionID
+
+channel
+
+This will fix your current proactive messaging problem if implemented correctly.
+
+🔐 Security Considerations
+
+Never store raw secrets.
+
+Redact before memory ingestion.
+
+Memory DB stored inside agent directory.
+
+Enforce path guard.
+
+Add config:
+
+memory.enabled
+memory.max_working_items
+memory.max_prompt_tokens
+memory.auto_checkpoint
+
+🧪 Observability
+
+Add:
+
+memory debug endpoint:
+
+GET /api/admin/memory/<agent>
+
+memory health metrics
+
+memory stats in dashboard
+
+🧩 Optional Phase 7 — Embeddings
+
+Add interface:
+
+type Embedder interface {
+  Embed(text string) ([]float32, error)
+}
+
+
+Store embeddings.
+
+Add cosine search.
+
+Make pluggable.
+
+🗓 Implementation Timeline
+PR	Feature	Risk
+1	Event capture	Low
+2	SQLite memory store + tools	Medium
+3	Checkpoint summarizer	Medium
+4	Prompt injection	Medium
+5	Maintenance job	Low
+6	Proactive hooks	Medium
+7	Embeddings	Optional
+⚙ Integration Points Summary
+Area	Change
+Runtime loop	IngestEvent hook
+Prompt builder	Memory injection
+Tool registry	Add memory tools
+Scheduler	Add checkpoint + maintenance
+Dashboard	Memory admin surface
+Config	Add memory config section
+🎯 End Result
+
+Openclawssy gains:
+
+Automatic memory extraction
+
+Structured long-term knowledge
+
+Scheduled maintenance
+
+Decision logging
+
+Memory-aware responses
+
+Proactive behavior capability
+
+No silent failures
+
+Fully auditable derivation chain

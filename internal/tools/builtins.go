@@ -103,6 +103,9 @@ func RegisterCoreWithOptions(reg *Registry, opts CoreOptions) error {
 	if err := registerMetricsTools(reg, opts.RunsPath); err != nil {
 		return err
 	}
+	if err := registerMemoryTools(reg, opts.AgentsPath, opts.ConfigPath); err != nil {
+		return err
+	}
 	if err := registerNetworkTools(reg, opts.ConfigPath); err != nil {
 		return err
 	}

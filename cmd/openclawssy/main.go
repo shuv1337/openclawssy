@@ -105,6 +105,12 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	if err := ensureDefaultMemoryCheckpointJob(runtimeCfg, jobsStore); err != nil {
+		fmt.Fprintln(os.Stderr, "scheduler setup warning:", err)
+	}
+	if err := ensureDefaultMemoryMaintenanceJob(runtimeCfg, jobsStore); err != nil {
+		fmt.Fprintln(os.Stderr, "scheduler setup warning:", err)
+	}
 	var schedulerChatStore *chatstore.Store
 	if runtimeCfg.Chat.Enabled || runtimeCfg.Discord.Enabled {
 		schedulerChatStore, err = chatstore.NewStore(filepath.Join(".openclawssy", "agents"))
@@ -189,6 +195,56 @@ func handleServe(ctx context.Context, engine *runtime.Engine, args []string) int
 	}
 
 	return 0
+}
+
+func ensureDefaultMemoryCheckpointJob(cfg config.Config, jobsStore *scheduler.Store) error {
+	if jobsStore == nil {
+		return nil
+	}
+	if !cfg.Memory.Enabled || !cfg.Memory.AutoCheckpoint {
+		return nil
+	}
+	const defaultCheckpointJobID = "memory-checkpoint-default"
+	for _, job := range jobsStore.List() {
+		if strings.TrimSpace(job.ID) == defaultCheckpointJobID {
+			return nil
+		}
+	}
+	return jobsStore.Add(scheduler.Job{
+		ID:       defaultCheckpointJobID,
+		AgentID:  "default",
+		Schedule: "@every 6h",
+		Message:  "/tool memory.checkpoint {}",
+		Channel:  "system",
+		UserID:   "system",
+		RoomID:   "maintenance",
+		Enabled:  true,
+	})
+}
+
+func ensureDefaultMemoryMaintenanceJob(cfg config.Config, jobsStore *scheduler.Store) error {
+	if jobsStore == nil {
+		return nil
+	}
+	if !cfg.Memory.Enabled {
+		return nil
+	}
+	const defaultMaintenanceJobID = "memory-maintenance-default"
+	for _, job := range jobsStore.List() {
+		if strings.TrimSpace(job.ID) == defaultMaintenanceJobID {
+			return nil
+		}
+	}
+	return jobsStore.Add(scheduler.Job{
+		ID:       defaultMaintenanceJobID,
+		AgentID:  "default",
+		Schedule: "@every 168h",
+		Message:  "/tool memory.maintenance {}",
+		Channel:  "system",
+		UserID:   "system",
+		RoomID:   "maintenance",
+		Enabled:  true,
+	})
 }
 
 func resolveScheduledJobSession(store *chatstore.Store, job scheduler.Job) (string, error) {

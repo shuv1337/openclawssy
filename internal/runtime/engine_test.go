@@ -17,6 +17,7 @@ import (
 	"openclawssy/internal/agent"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/memory"
 	"openclawssy/internal/sandbox"
 )
 
@@ -88,6 +89,86 @@ func TestEngineExecuteWritesRunBundle(t *testing.T) {
 	}
 	if _, ok := res.Trace["input_message_hash"]; !ok {
 		t.Fatalf("expected input_message_hash in trace, got %#v", res.Trace)
+	}
+}
+
+func TestEngineExecuteIngestsMemoryEventsWhenEnabled(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("ZAI_API_KEY", "test-key")
+
+	e, err := NewEngine(root)
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if err := e.Init("default", false); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Memory.Enabled = true
+	cfg.Memory.EventBufferSize = 64
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	_, err = e.ExecuteWithInput(context.Background(), ExecuteInput{
+		AgentID: "default",
+		Message: `/tool fs.list {"path":"."}`,
+		Source:  "scheduler/weekly",
+	})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	eventsPath := filepath.Join(root, ".openclawssy", "agents", "default", "memory", "events", time.Now().UTC().Format("2006-01-02")+".jsonl")
+	var raw []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		raw, err = os.ReadFile(eventsPath)
+		if err == nil && strings.TrimSpace(string(raw)) != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("read events file: %v", err)
+			}
+			t.Fatal("expected memory events file to contain data")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) == 0 {
+		t.Fatal("expected memory events to be written")
+	}
+
+	types := map[string]bool{}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var evt memory.Event
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			t.Fatalf("unmarshal memory event: %v", err)
+		}
+		types[evt.Type] = true
+	}
+
+	if !types[memory.EventTypeSchedulerRun] {
+		t.Fatalf("expected %s event", memory.EventTypeSchedulerRun)
+	}
+	if !types[memory.EventTypeUserMessage] {
+		t.Fatalf("expected %s event", memory.EventTypeUserMessage)
+	}
+	if !types[memory.EventTypeToolCall] {
+		t.Fatalf("expected %s event", memory.EventTypeToolCall)
+	}
+	if !types[memory.EventTypeToolResult] {
+		t.Fatalf("expected %s event", memory.EventTypeToolResult)
 	}
 }
 

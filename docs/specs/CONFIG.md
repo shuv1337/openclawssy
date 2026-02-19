@@ -132,6 +132,17 @@ Provider API key env defaults:
   "secrets": {
     "store_file": ".openclawssy/secrets.enc",
     "master_key_file": ".openclawssy/master.key"
+  },
+  "memory": {
+    "enabled": false,
+    "max_working_items": 200,
+    "max_prompt_tokens": 1200,
+    "auto_checkpoint": false,
+    "proactive_enabled": true,
+    "embeddings_enabled": false,
+    "embedding_provider": "openrouter",
+    "embedding_model": "text-embedding-3-small",
+    "event_buffer_size": 256
   }
 }
 ```
@@ -175,3 +186,16 @@ Provider API key env defaults:
 ## Chat Rate Limiting
 - `chat.rate_limit_per_min` applies to sender-scoped keys.
 - `chat.global_rate_limit_per_min` applies process-wide across all chat senders.
+
+## Memory Configuration
+- `memory.enabled` toggles memory subsystem behavior globally.
+- `memory.max_working_items` caps retained/retrieved working memory candidate set.
+- `memory.max_prompt_tokens` bounds memory recall block size in prompt assembly.
+- `memory.auto_checkpoint` enables default scheduler checkpoint wiring (`@every 6h`).
+- `memory.proactive_enabled` enables proactive memory-triggered inter-agent message hooks.
+- `memory.embeddings_enabled` enables embedding sync and semantic hybrid recall.
+- `memory.embedding_provider` selects provider for embedding API calls (`openai|openrouter|requesty|zai|generic`).
+- `memory.embedding_model` sets embedding model name for provider requests.
+- `memory.event_buffer_size` controls async event ingestion queue capacity.
+
+OpenRouter embeddings are supported through `providers.openrouter.base_url` + `OPENROUTER_API_KEY` (or `providers.openrouter.api_key`).

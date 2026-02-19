@@ -128,6 +128,53 @@ All tools are deny-by-default through capability policy, and all tool inputs are
 - Optional: `scope` (`chat|discord|both`, default `both`), `create_if_missing`
 - Notes: updates config defaults (`chat.default_agent_id` / `discord.default_agent_id`) using scoped switching; can scaffold missing agent first when `create_if_missing=true`.
 
+### `agent.message.send`
+- Required: `to_agent_id`, `message`
+- Optional: `task_id`, `subject`, `channel`, `user_id`, `session_id`
+- Notes: writes to inter-agent inbox sessions (`channel=agent-mail`). Optional source context fields are persisted in payload for proactive/memory traceability.
+
+### `agent.message.inbox`
+- Required: none
+- Optional: `agent_id`, `limit`
+- Notes: reads recent inter-agent inbox payloads for the target agent.
+
+## Memory Tools
+
+### `memory.search`
+- Required: none
+- Optional: `query`, `limit`, `min_importance`, `status`
+- Notes: returns `mode` (`fts` or `semantic_hybrid` when embeddings are enabled and available).
+
+### `memory.write`
+- Required: `kind`, `title`, `content`
+- Optional: `importance`, `confidence`, `status`
+
+### `memory.update`
+- Required: `id`
+- Optional: `kind`, `title`, `content`, `importance`, `confidence`, `status`
+
+### `memory.forget`
+- Required: `id`
+- Optional: none
+
+### `memory.health`
+- Required: none
+- Optional: none
+
+### `decision.log`
+- Required: `title`, `content`
+- Optional: `importance`, `confidence`, `metadata`
+
+### `memory.checkpoint`
+- Required: none
+- Optional: `max_events`
+- Notes: uses strict model-validated distillation with deterministic fallback.
+
+### `memory.maintenance`
+- Required: none
+- Optional: `stale_days`, `dry_run`
+- Notes: dedupe/archive/verification pass, compaction, and weekly report generation.
+
 ## Runs and Networking
 
 ### `run.list`

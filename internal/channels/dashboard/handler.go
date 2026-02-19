@@ -17,6 +17,8 @@ import (
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/memory"
+	memorystore "openclawssy/internal/memory/store"
 	"openclawssy/internal/scheduler"
 	"openclawssy/internal/secrets"
 )
@@ -71,6 +73,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/agents", h.handleAgents)
 	mux.HandleFunc("/api/admin/agent/docs", h.handleAgentDocs)
 	mux.HandleFunc("/api/admin/debug/runs/", h.getRunTrace)
+	mux.HandleFunc("/api/admin/memory/", h.getAgentMemory)
 }
 
 func (h *Handler) schedulerStoreOrDefault() (*scheduler.Store, error) {
@@ -399,6 +402,72 @@ func (h *Handler) getRunTrace(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"run_id": run.ID,
 		"trace":  run.Trace,
+	})
+}
+
+func (h *Handler) getAgentMemory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	suffix := strings.TrimPrefix(r.URL.Path, "/api/admin/memory/")
+	if suffix == r.URL.Path {
+		http.NotFound(w, r)
+		return
+	}
+	agentID, err := normalizeDashboardAgentID(suffix)
+	if err != nil || strings.Contains(suffix, "/") {
+		http.Error(w, "invalid agent id", http.StatusBadRequest)
+		return
+	}
+
+	dbPath := filepath.Join(h.rootDir, ".openclawssy", "agents", agentID, "memory", "memory.db")
+	store, err := memorystore.OpenSQLite(dbPath, agentID)
+	if err != nil {
+		http.Error(w, "failed to open memory store", http.StatusInternalServerError)
+		return
+	}
+	defer func() { _ = store.Close() }()
+
+	health, err := store.Health(r.Context())
+	if err != nil {
+		http.Error(w, "failed to load memory health", http.StatusInternalServerError)
+		return
+	}
+	vectorCount, activeVectorCount, models, err := store.EmbeddingStats(r.Context())
+	if err != nil {
+		http.Error(w, "failed to load embedding stats", http.StatusInternalServerError)
+		return
+	}
+	activeItems, err := store.Search(r.Context(), memory.SearchParams{Limit: 20, MinImportance: 1, Status: memory.MemoryStatusActive})
+	if err != nil {
+		http.Error(w, "failed to load memory items", http.StatusInternalServerError)
+		return
+	}
+	cfgPath := filepath.Join(h.rootDir, ".openclawssy", "config.json")
+	cfg, _ := config.LoadOrDefault(cfgPath)
+	coverageRatio := 0.0
+	if health.ActiveItems > 0 {
+		coverageRatio = float64(activeVectorCount) / float64(health.ActiveItems)
+	}
+
+	writeJSON(w, map[string]any{
+		"agent_id":       agentID,
+		"health":         health,
+		"active_items":   activeItems,
+		"active_count":   len(activeItems),
+		"memory_enabled": true,
+		"embedding_stats": map[string]any{
+			"enabled":                   cfg.Memory.Enabled && cfg.Memory.EmbeddingsEnabled,
+			"provider":                  cfg.Memory.EmbeddingProvider,
+			"model":                     cfg.Memory.EmbeddingModel,
+			"vector_count":              vectorCount,
+			"active_vector_count":       activeVectorCount,
+			"active_coverage_ratio":     coverageRatio,
+			"semantic_search_available": cfg.Memory.Enabled && cfg.Memory.EmbeddingsEnabled && activeVectorCount > 0,
+			"models":                    models,
+		},
 	})
 }
 

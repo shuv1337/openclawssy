@@ -14,6 +14,7 @@ import (
 	"openclawssy/internal/channels/discord"
 	httpchannel "openclawssy/internal/channels/http"
 	"openclawssy/internal/chatstore"
+	"openclawssy/internal/config"
 	"openclawssy/internal/scheduler"
 )
 
@@ -199,5 +200,74 @@ func TestResolveScheduledJobSessionCreatesSessionWhenMissing(t *testing.T) {
 	}
 	if session.Channel != "dashboard" || session.UserID != "dashboard_user" || session.RoomID != "dashboard" {
 		t.Fatalf("unexpected created session metadata: %+v", session)
+	}
+}
+
+func TestEnsureDefaultMemoryCheckpointJob(t *testing.T) {
+	store, err := scheduler.NewStore(filepath.Join(t.TempDir(), "jobs.json"))
+	if err != nil {
+		t.Fatalf("new scheduler store: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Memory.Enabled = true
+	cfg.Memory.AutoCheckpoint = true
+
+	if err := ensureDefaultMemoryCheckpointJob(cfg, store); err != nil {
+		t.Fatalf("ensure default checkpoint job: %v", err)
+	}
+	jobs := store.List()
+	if len(jobs) != 1 {
+		t.Fatalf("expected one scheduler job, got %d", len(jobs))
+	}
+	job := jobs[0]
+	if job.ID != "memory-checkpoint-default" {
+		t.Fatalf("unexpected job id %q", job.ID)
+	}
+	if job.Schedule != "@every 6h" {
+		t.Fatalf("unexpected schedule %q", job.Schedule)
+	}
+	if job.Message != "/tool memory.checkpoint {}" {
+		t.Fatalf("unexpected message %q", job.Message)
+	}
+
+	if err := ensureDefaultMemoryCheckpointJob(cfg, store); err != nil {
+		t.Fatalf("ensure idempotent checkpoint job: %v", err)
+	}
+	if len(store.List()) != 1 {
+		t.Fatalf("expected idempotent setup to keep one job, got %d", len(store.List()))
+	}
+}
+
+func TestEnsureDefaultMemoryMaintenanceJob(t *testing.T) {
+	store, err := scheduler.NewStore(filepath.Join(t.TempDir(), "jobs.json"))
+	if err != nil {
+		t.Fatalf("new scheduler store: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Memory.Enabled = true
+
+	if err := ensureDefaultMemoryMaintenanceJob(cfg, store); err != nil {
+		t.Fatalf("ensure default maintenance job: %v", err)
+	}
+	jobs := store.List()
+	if len(jobs) != 1 {
+		t.Fatalf("expected one scheduler job, got %d", len(jobs))
+	}
+	job := jobs[0]
+	if job.ID != "memory-maintenance-default" {
+		t.Fatalf("unexpected job id %q", job.ID)
+	}
+	if job.Schedule != "@every 168h" {
+		t.Fatalf("unexpected schedule %q", job.Schedule)
+	}
+	if job.Message != "/tool memory.maintenance {}" {
+		t.Fatalf("unexpected message %q", job.Message)
+	}
+
+	if err := ensureDefaultMemoryMaintenanceJob(cfg, store); err != nil {
+		t.Fatalf("ensure idempotent maintenance job: %v", err)
+	}
+	if len(store.List()) != 1 {
+		t.Fatalf("expected idempotent setup to keep one job, got %d", len(store.List()))
 	}
 }

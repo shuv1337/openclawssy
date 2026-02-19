@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"openclawssy/internal/audit"
 	"openclawssy/internal/chatstore"
 	"openclawssy/internal/config"
+	"openclawssy/internal/memory"
+	memorystore "openclawssy/internal/memory/store"
 	"openclawssy/internal/policy"
 	"openclawssy/internal/sandbox"
 	"openclawssy/internal/secrets"
@@ -138,7 +141,7 @@ func (e *Engine) Init(agentID string, force bool) error {
 	files := map[string]string{
 		"SOUL.md":     "# SOUL\n\nYou are Openclawssy, a high-accountability software engineering agent.\n\n## Mission\n- Deliver correct, verifiable outcomes with minimal user friction.\n- Prefer concrete execution and evidence over speculation.\n- Keep users informed with concise, actionable updates.\n\n## Quality Bar\n- Validate assumptions against repository context before making changes.\n- Preserve user intent and existing architecture unless directed otherwise.\n- When uncertain, pick the safest reasonable default and explain tradeoffs.\n",
 		"RULES.md":    "# RULES\n\n- Follow workspace-only write policy and capability boundaries.\n- Never expose secrets in plain text output.\n- Keep responses concise, factual, and directly tied to user goals.\n- Run targeted verification for non-trivial changes whenever feasible.\n- If blocked by missing credentials or irreversible choices, ask one precise question with a recommended default.\n",
-		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now.\n",
+		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now.\n",
 		"SPECPLAN.md": "# SPECPLAN\n\nDescribe specs and acceptance requirements before coding.\n",
 		"DEVPLAN.md":  "# DEVPLAN\n\n- [ ] Implement task\n- [ ] Add tests\n- [ ] Update handoff\n",
 		"HANDOFF.md":  "# HANDOFF\n\nStatus: initialized\n\nNext:\n- Define first run objective.\n",
@@ -210,6 +213,23 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	}
 
 	runID := fmt.Sprintf("run_%d", time.Now().UTC().UnixNano())
+	memoryManager, memoryErr := memory.NewManager(e.agentsDir, agentID, memory.Options{
+		Enabled:    cfg.Memory.Enabled,
+		BufferSize: cfg.Memory.EventBufferSize,
+	})
+	if memoryErr != nil {
+		log.Printf("runtime: memory disabled for run %s (%v)", runID, memoryErr)
+	}
+	defer func() {
+		if memoryManager == nil {
+			return
+		}
+		go func(runID string, manager *memory.Manager) {
+			if err := manager.Close(); err != nil {
+				log.Printf("runtime: memory close failure for run %s: %v", runID, err)
+			}
+		}(runID, memoryManager)
+	}()
 
 	// Create cancellable context for this run and track it
 	runCtxBase, cancelRun := context.WithCancel(ctx)
@@ -345,6 +365,12 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 			return appendToolCallMessage(conversationStore, sessionID, runID, rec)
 		}
 	}
+	baseOnToolCall := onToolCall
+	onToolCall = func(rec agent.ToolCallRecord) error {
+		err := baseOnToolCall(rec)
+		e.maybeTriggerProactiveMemoryHook(runCtx, cfg, registry, agentID, sessionID, runID, rec)
+		return err
+	}
 
 	start := time.Now().UTC()
 	out, runErr := runner.Run(runCtx, agent.RunInput{
@@ -358,6 +384,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		ToolTimeoutMS:     int(agent.DefaultToolTimeout / time.Millisecond),
 		AllowedTools:      allowedTools,
 		OnToolCall:        onToolCall,
+		SystemPromptExt:   e.memoryPromptExtender(cfg, agentID, runID),
 	})
 
 	artifactPath := ""
@@ -409,6 +436,21 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		}
 	}
 	logToolCallbackFailures(runCtx, aud, runID, agentID, out.ToolCalls, source, sessionID)
+	ingestRunMemoryEvents(runCtx, memoryManager, runMemoryEventInput{
+		AgentID:   agentID,
+		RunID:     runID,
+		SessionID: sessionID,
+		Source:    source,
+		Message:   message,
+		Output:    out,
+		RunErr:    runErr,
+	})
+	if memoryManager != nil {
+		stats := memoryManager.Stats()
+		if stats.DroppedEvents > 0 {
+			log.Printf("runtime: dropped %d memory events in run %s", stats.DroppedEvents, runID)
+		}
+	}
 	if runErr != nil && sessionID != "" {
 		if err := e.appendRunFailureConversation(sessionID, runID, out, appendToolsAfterRun, runErr); err != nil {
 			log.Printf("runtime: failed to append run failure conversation (run=%s session=%s): %v", runID, sessionID, err)
@@ -948,7 +990,7 @@ func runtimeContextDoc(workspaceDir string) string {
 	)
 	doc = strings.Replace(doc,
 		"- Secret tools (secrets.get/secrets.set/secrets.list) use encrypted secret storage; secret values are never written to audit fields in plaintext.",
-		"- Secret tools (secrets.get/secrets.set/secrets.list) use encrypted secret storage; secret values are never written to audit fields in plaintext.\n- Skill tools (skill.list/skill.read) discover workspace skills under skills/ and report required secret keys with missing-secret diagnostics.",
+		"- Secret tools (secrets.get/secrets.set/secrets.list) use encrypted secret storage; secret values are never written to audit fields in plaintext.\n- Skill tools (skill.list/skill.read) discover workspace skills under skills/ and report required secret keys with missing-secret diagnostics.\n- Memory tools (memory.search/memory.write/memory.update/memory.forget/memory.health/memory.checkpoint/memory.maintenance/decision.log) persist structured per-agent working memory in .openclawssy/agents/<agent>/memory/memory.db.",
 		1,
 	)
 	return doc
@@ -962,7 +1004,7 @@ func toolCallingBestPracticesDocWithAgentTools() string {
 	doc := toolCallingBestPracticesDoc()
 	doc = strings.Replace(doc,
 		"secrets.get, secrets.set, secrets.list, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, run.list, run.get, http.request, time.now, shell.exec.",
-		"secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, run.list, run.get, http.request, time.now, shell.exec.",
+		"secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, run.list, run.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
 		1,
 	)
 	doc = strings.Replace(doc,
@@ -976,8 +1018,38 @@ func toolCallingBestPracticesDocWithAgentTools() string {
 		1,
 	)
 	doc = strings.Replace(doc,
+		"session.list, session.close, run.list, run.get, memory.search, memory.write, memory.update, memory.forget, memory.health, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
+		"session.list, session.close, run.list, run.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, decision.log, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, decision.log, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
+		"session.list, session.close, run.list, run.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
 		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, http.request, time.now, shell.exec.",
-		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, memory.search, memory.write, memory.update, memory.forget, memory.health, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, memory.search, memory.write, memory.update, memory.forget, memory.health, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, decision.log, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
+		1,
+	)
+	doc = strings.Replace(doc,
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, memory.search, memory.write, memory.update, memory.forget, memory.health, memory.checkpoint, memory.maintenance, decision.log, http.request, time.now, shell.exec.",
 		1,
 	)
 	doc = strings.Replace(doc,
@@ -1327,7 +1399,7 @@ func sanitizePathArg(path string) string {
 }
 
 func (e *Engine) allowedTools(cfg config.Config) []string {
-	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.append", "fs.delete", "fs.move", "fs.edit", "code.search", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "skill.list", "skill.read", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "agent.list", "agent.create", "agent.switch", "agent.profile.get", "agent.profile.set", "agent.message.send", "agent.message.inbox", "agent.run", "agent.prompt.read", "agent.prompt.update", "agent.prompt.suggest", "policy.list", "policy.grant", "policy.revoke", "run.list", "run.get", "run.cancel", "metrics.get", "time.now"}
+	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.append", "fs.delete", "fs.move", "fs.edit", "code.search", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "skill.list", "skill.read", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "agent.list", "agent.create", "agent.switch", "agent.profile.get", "agent.profile.set", "agent.message.send", "agent.message.inbox", "agent.run", "agent.prompt.read", "agent.prompt.update", "agent.prompt.suggest", "policy.list", "policy.grant", "policy.revoke", "run.list", "run.get", "run.cancel", "metrics.get", "memory.search", "memory.write", "memory.update", "memory.forget", "memory.health", "memory.checkpoint", "memory.maintenance", "decision.log", "time.now"}
 	if cfg.Network.Enabled {
 		toolsList = append(toolsList, "http.request")
 	}
@@ -1465,4 +1537,479 @@ func (s *sandboxShellExecutor) Exec(_ context.Context, command string, args []st
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func (e *Engine) memoryPromptExtender(cfg config.Config, agentID, runID string) agent.SystemPromptExtender {
+	if !cfg.Memory.Enabled {
+		return nil
+	}
+	return func(ctx context.Context, basePrompt string, messages []agent.ChatMessage, message string, _ []agent.ToolCallResult) string {
+		block, err := e.buildMemoryRecallBlock(ctx, cfg, agentID, message, messages)
+		if err != nil {
+			log.Printf("runtime: memory recall unavailable (run=%s): %v", runID, err)
+			return basePrompt
+		}
+		if strings.TrimSpace(block) == "" {
+			return basePrompt
+		}
+		if strings.TrimSpace(basePrompt) == "" {
+			return block
+		}
+		return strings.TrimSpace(basePrompt) + "\n\n" + block
+	}
+}
+
+func (e *Engine) buildMemoryRecallBlock(ctx context.Context, cfg config.Config, agentID, message string, messages []agent.ChatMessage) (string, error) {
+	if !cfg.Memory.Enabled {
+		return "", nil
+	}
+	storePath := filepath.Join(e.agentsDir, agentID, "memory", "memory.db")
+	store, err := memorystore.OpenSQLite(storePath, agentID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	defer func() { _ = store.Close() }()
+
+	query := recallQueryFromMessages(message, messages)
+	limit := cfg.Memory.MaxWorkingItems
+	if limit <= 0 || limit > 24 {
+		limit = 24
+	}
+	items, err := store.Search(ctx, memory.SearchParams{
+		Query:         query,
+		Limit:         limit,
+		MinImportance: 3,
+		Status:        memory.MemoryStatusActive,
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(items) == 0 {
+		items, err = store.Search(ctx, memory.SearchParams{
+			Query:         "",
+			Limit:         limit,
+			MinImportance: 3,
+			Status:        memory.MemoryStatusActive,
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(items) == 0 {
+		return "", nil
+	}
+
+	maxChars := cfg.Memory.MaxPromptTokens * 4
+	if maxChars <= 0 {
+		maxChars = 4800
+	}
+	return formatRecallBlock(items, maxChars), nil
+}
+
+func recallQueryFromMessages(message string, messages []agent.ChatMessage) string {
+	parts := []string{strings.TrimSpace(message)}
+	for i := len(messages) - 1; i >= 0 && len(parts) < 3; i-- {
+		if !strings.EqualFold(strings.TrimSpace(messages[i].Role), "user") {
+			continue
+		}
+		content := strings.TrimSpace(messages[i].Content)
+		if content != "" {
+			parts = append(parts, content)
+		}
+	}
+	joined := strings.Join(parts, " ")
+	joined = strings.TrimSpace(joined)
+	if len(joined) > 320 {
+		joined = joined[:320]
+	}
+	return joined
+}
+
+func formatRecallBlock(items []memory.MemoryItem, maxChars int) string {
+	if len(items) == 0 {
+		return ""
+	}
+	sorted := append([]memory.MemoryItem(nil), items...)
+	now := time.Now().UTC()
+	sort.Slice(sorted, func(i, j int) bool {
+		si := float64(sorted[i].Importance)*2 + recencyBoost(now, sorted[i].UpdatedAt)
+		sj := float64(sorted[j].Importance)*2 + recencyBoost(now, sorted[j].UpdatedAt)
+		if si == sj {
+			return sorted[i].UpdatedAt.After(sorted[j].UpdatedAt)
+		}
+		return si > sj
+	})
+
+	lines := []string{"--- RELEVANT MEMORY ---"}
+	used := len(lines[0]) + 1
+	for _, item := range sorted {
+		id := strings.TrimSpace(item.ID)
+		if id == "" {
+			id = "unknown"
+		}
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		text := policy.RedactString(strings.TrimSpace(item.Content))
+		if text == "" {
+			continue
+		}
+		line := fmt.Sprintf("[MEM-%s] %s", id, text)
+		if len(line) > 420 {
+			line = line[:420] + "..."
+		}
+		if used+len(line)+1 > maxChars {
+			break
+		}
+		lines = append(lines, line)
+		used += len(line) + 1
+	}
+	if len(lines) == 1 {
+		return ""
+	}
+	lines = append(lines, "------------------------")
+	if used+len(lines[len(lines)-1]) > maxChars {
+		if len(lines) <= 2 {
+			return ""
+		}
+		return strings.Join(lines[:len(lines)-1], "\n")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func recencyBoost(now, ts time.Time) float64 {
+	if ts.IsZero() {
+		return 0
+	}
+	age := now.Sub(ts)
+	if age < 24*time.Hour {
+		return 3
+	}
+	if age < 7*24*time.Hour {
+		return 2
+	}
+	if age < 30*24*time.Hour {
+		return 1
+	}
+	return 0
+}
+
+type proactiveMemorySignal struct {
+	Trigger bool
+	Reason  string
+}
+
+type proactiveSessionContext struct {
+	SessionID string
+	Channel   string
+	UserID    string
+}
+
+func (e *Engine) maybeTriggerProactiveMemoryHook(ctx context.Context, cfg config.Config, registry *tools.Registry, agentID, sessionID, runID string, rec agent.ToolCallRecord) {
+	if !cfg.Memory.Enabled || !cfg.Memory.ProactiveEnabled {
+		return
+	}
+	if registry == nil || strings.TrimSpace(rec.Result.Error) != "" {
+		return
+	}
+	signal := proactiveSignalFromToolOutput(rec.Request.Name, rec.Result.Output)
+	if !signal.Trigger {
+		return
+	}
+	sessionCtx, ok := e.proactiveContextFromSession(sessionID)
+	if !ok {
+		log.Printf("runtime: skip proactive hook (missing channel/user/session context) run=%s tool=%s", runID, rec.Request.Name)
+		return
+	}
+	toAgentID := strings.TrimSpace(cfg.Chat.DefaultAgentID)
+	if toAgentID == "" {
+		toAgentID = "default"
+	}
+	msg := fmt.Sprintf("Proactive memory signal: %s\nchannel=%s\nuser_id=%s\nsession_id=%s\nrun_id=%s", signal.Reason, sessionCtx.Channel, sessionCtx.UserID, sessionCtx.SessionID, runID)
+	_, err := registry.Execute(ctx, agentID, "agent.message.send", e.workspaceDir, map[string]any{
+		"to_agent_id": toAgentID,
+		"subject":     "memory.proactive",
+		"task_id":     sessionCtx.SessionID,
+		"session_id":  sessionCtx.SessionID,
+		"channel":     sessionCtx.Channel,
+		"user_id":     sessionCtx.UserID,
+		"message":     msg,
+	})
+	if err != nil {
+		log.Printf("runtime: proactive hook delivery failed run=%s tool=%s: %v", runID, rec.Request.Name, err)
+	}
+}
+
+func (e *Engine) proactiveContextFromSession(sessionID string) (proactiveSessionContext, bool) {
+	if e == nil || e.chatStore == nil {
+		return proactiveSessionContext{}, false
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return proactiveSessionContext{}, false
+	}
+	session, err := e.chatStore.GetSession(sessionID)
+	if err != nil {
+		return proactiveSessionContext{}, false
+	}
+	channel := strings.TrimSpace(session.Channel)
+	userID := strings.TrimSpace(session.UserID)
+	if channel == "" || userID == "" {
+		return proactiveSessionContext{}, false
+	}
+	return proactiveSessionContext{SessionID: sessionID, Channel: channel, UserID: userID}, true
+}
+
+func proactiveSignalFromToolOutput(toolName, output string) proactiveMemorySignal {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	if name != "memory.checkpoint" && name != "memory.maintenance" {
+		return proactiveMemorySignal{}
+	}
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return proactiveMemorySignal{}
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		return proactiveMemorySignal{}
+	}
+	if name == "memory.maintenance" {
+		stale := int(numberField(payload, "archived_stale_count"))
+		if stale > 0 {
+			return proactiveMemorySignal{Trigger: true, Reason: fmt.Sprintf("maintenance archived %d stale memory items", stale)}
+		}
+		return proactiveMemorySignal{}
+	}
+
+	result, _ := payload["result"].(map[string]any)
+	newItems, _ := result["new_items"].([]any)
+	highImportance := 0
+	preferenceReminder := false
+	for _, raw := range newItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		importance := int(numberField(item, "importance"))
+		if importance >= 4 {
+			highImportance++
+		}
+		kind := strings.ToLower(strings.TrimSpace(stringField(item, "kind")))
+		content := strings.ToLower(strings.TrimSpace(stringField(item, "content")))
+		if kind == "preference" && containsReminderPreference(content) {
+			preferenceReminder = true
+		}
+	}
+	if highImportance > 0 {
+		return proactiveMemorySignal{Trigger: true, Reason: fmt.Sprintf("checkpoint created %d high-importance memory items", highImportance)}
+	}
+	if preferenceReminder {
+		return proactiveMemorySignal{Trigger: true, Reason: "checkpoint captured reminder preference"}
+	}
+	return proactiveMemorySignal{}
+}
+
+func numberField(value map[string]any, key string) float64 {
+	if len(value) == 0 {
+		return 0
+	}
+	raw, ok := value[key]
+	if !ok {
+		return 0
+	}
+	switch v := raw.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	default:
+		return 0
+	}
+}
+
+func stringField(value map[string]any, key string) string {
+	if len(value) == 0 {
+		return ""
+	}
+	raw, ok := value[key]
+	if !ok {
+		return ""
+	}
+	s, _ := raw.(string)
+	return s
+}
+
+func containsReminderPreference(content string) bool {
+	if strings.TrimSpace(content) == "" {
+		return false
+	}
+	markers := []string{"remind me", "reminder", "notify me", "follow up", "follow-up"}
+	for _, marker := range markers {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+type runMemoryEventInput struct {
+	AgentID   string
+	RunID     string
+	SessionID string
+	Source    string
+	Message   string
+	Output    agent.RunOutput
+	RunErr    error
+}
+
+func ingestRunMemoryEvents(ctx context.Context, manager *memory.Manager, in runMemoryEventInput) {
+	if manager == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	baseMetadata := map[string]any{}
+	if in.Source != "" {
+		baseMetadata["source"] = in.Source
+	}
+	if in.AgentID != "" {
+		baseMetadata["agent_id"] = in.AgentID
+	}
+
+	ingest := func(event memory.Event) {
+		if err := manager.IngestEvent(ctx, event); err != nil && !errors.Is(err, memory.ErrQueueFull) {
+			log.Printf("runtime: memory ingest failure (run=%s type=%s): %v", in.RunID, event.Type, err)
+		}
+	}
+
+	if strings.HasPrefix(strings.TrimSpace(in.Source), "scheduler") {
+		ingest(memory.Event{
+			Type:      memory.EventTypeSchedulerRun,
+			Text:      policy.RedactString(in.Message),
+			SessionID: in.SessionID,
+			RunID:     in.RunID,
+			Timestamp: now,
+			Metadata:  cloneMetadata(baseMetadata),
+		})
+	}
+
+	ingest(memory.Event{
+		Type:      memory.EventTypeUserMessage,
+		Text:      policy.RedactString(in.Message),
+		SessionID: in.SessionID,
+		RunID:     in.RunID,
+		Timestamp: now,
+		Metadata:  cloneMetadata(baseMetadata),
+	})
+
+	if strings.TrimSpace(in.Output.FinalText) != "" {
+		ingest(memory.Event{
+			Type:      memory.EventTypeAssistantOutput,
+			Text:      policy.RedactString(in.Output.FinalText),
+			SessionID: in.SessionID,
+			RunID:     in.RunID,
+			Timestamp: now,
+			Metadata:  cloneMetadata(baseMetadata),
+		})
+	}
+
+	for i, rec := range in.Output.ToolCalls {
+		callMeta := cloneMetadata(baseMetadata)
+		callMeta["tool"] = rec.Request.Name
+		callMeta["tool_call_id"] = rec.Request.ID
+		callMeta["tool_call_index"] = i
+		callMeta["arguments"] = policy.RedactValue(rec.Request.Arguments)
+		callText := renderMemoryEventText(map[string]any{
+			"tool":      rec.Request.Name,
+			"id":        rec.Request.ID,
+			"arguments": policy.RedactValue(rec.Request.Arguments),
+		})
+		ingest(memory.Event{
+			Type:      memory.EventTypeToolCall,
+			Text:      callText,
+			SessionID: in.SessionID,
+			RunID:     in.RunID,
+			Timestamp: rec.StartedAt,
+			Metadata:  callMeta,
+		})
+
+		resultMeta := cloneMetadata(baseMetadata)
+		resultMeta["tool"] = rec.Request.Name
+		resultMeta["tool_call_id"] = rec.Request.ID
+		resultMeta["tool_result_id"] = rec.Result.ID
+		resultMeta["tool_call_index"] = i
+		if strings.TrimSpace(rec.Result.Error) != "" {
+			resultMeta["error"] = policy.RedactString(rec.Result.Error)
+		}
+		resultText := policy.RedactString(rec.Result.Output)
+		if resultText == "" && strings.TrimSpace(rec.Result.Error) != "" {
+			resultText = policy.RedactString(rec.Result.Error)
+		}
+		ingest(memory.Event{
+			Type:      memory.EventTypeToolResult,
+			Text:      resultText,
+			SessionID: in.SessionID,
+			RunID:     in.RunID,
+			Timestamp: rec.CompletedAt,
+			Metadata:  resultMeta,
+		})
+
+		if strings.TrimSpace(rec.Result.Error) != "" {
+			errMeta := cloneMetadata(baseMetadata)
+			errMeta["tool"] = rec.Request.Name
+			errMeta["tool_call_id"] = rec.Request.ID
+			errMeta["tool_result_id"] = rec.Result.ID
+			errMeta["tool_call_index"] = i
+			ingest(memory.Event{
+				Type:      memory.EventTypeError,
+				Text:      policy.RedactString(rec.Result.Error),
+				SessionID: in.SessionID,
+				RunID:     in.RunID,
+				Timestamp: rec.CompletedAt,
+				Metadata:  errMeta,
+			})
+		}
+	}
+
+	if in.RunErr != nil {
+		errMeta := cloneMetadata(baseMetadata)
+		errMeta["error_type"] = "run_error"
+		ingest(memory.Event{
+			Type:      memory.EventTypeError,
+			Text:      policy.RedactString(in.RunErr.Error()),
+			SessionID: in.SessionID,
+			RunID:     in.RunID,
+			Timestamp: now,
+			Metadata:  errMeta,
+		})
+	}
+}
+
+func renderMemoryEventText(payload map[string]any) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return policy.RedactString(string(b))
+}
+
+func cloneMetadata(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return nil
+	}
+	clone := make(map[string]any, len(meta))
+	for k, v := range meta {
+		clone[k] = v
+	}
+	return clone
 }

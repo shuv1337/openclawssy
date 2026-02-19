@@ -196,6 +196,37 @@ func TestRunnerPassesRunMetadataAndContextToModelRequests(t *testing.T) {
 	}
 }
 
+func TestRunnerAppliesSystemPromptExtenderEachTurn(t *testing.T) {
+	model := &mockModel{responses: []ModelResponse{
+		{ToolCalls: []ToolCallRequest{{ID: "call-1", Name: "time.now"}}},
+		{FinalText: "done"},
+	}}
+	tools := &mockTools{results: map[string]ToolCallResult{"call-1": {ID: "call-1", Output: "2026-02-19T00:00:00Z"}}}
+
+	callCount := 0
+	ext := func(_ context.Context, basePrompt string, _ []ChatMessage, _ string, _ []ToolCallResult) string {
+		callCount++
+		return appendPromptDirective(basePrompt, "--- RELEVANT MEMORY ---\n[MEM-1] Test memory\n------------------------")
+	}
+
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 3}
+	out, err := runner.Run(context.Background(), RunInput{Message: "hello", SystemPromptExt: ext})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if out.FinalText != "done" {
+		t.Fatalf("unexpected final text: %q", out.FinalText)
+	}
+	if callCount < 2 {
+		t.Fatalf("expected extender to run for each model turn, got %d", callCount)
+	}
+	for i, req := range model.reqs {
+		if !strings.Contains(req.SystemPrompt, "RELEVANT MEMORY") {
+			t.Fatalf("model request %d missing recall block: %q", i, req.SystemPrompt)
+		}
+	}
+}
+
 func TestRunnerToolIterationCap(t *testing.T) {
 	model := &mockModel{
 		responses: []ModelResponse{

@@ -31,6 +31,9 @@ What works now:
 - dashboard admin scheduler APIs (jobs CRUD + pause/resume control)
 - global run queue saturation guard with explicit overload response (`429`)
 - canonical tool error codes with machine-readable persistence
+- end-to-end memory lifecycle (event stream -> checkpoint -> recall injection -> maintenance -> proactive hooks)
+- optional embedding-backed semantic hybrid memory search (OpenRouter/OpenAI-compatible `/embeddings`)
+- admin memory observability (`/api/admin/memory/<agent>`) including health and embedding coverage stats
 
 What is not production-ready:
 - compatibility and schema stability

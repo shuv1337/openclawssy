@@ -206,3 +206,86 @@ func TestValidateRejectsInvalidAgentProfileProvider(t *testing.T) {
 		t.Fatal("expected validation error for invalid agent profile provider")
 	}
 }
+
+func TestMemoryDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Memory.Enabled {
+		t.Fatal("expected memory.enabled=false by default")
+	}
+	if cfg.Memory.MaxWorkingItems != 200 {
+		t.Fatalf("expected memory.max_working_items=200, got %d", cfg.Memory.MaxWorkingItems)
+	}
+	if cfg.Memory.MaxPromptTokens != 1200 {
+		t.Fatalf("expected memory.max_prompt_tokens=1200, got %d", cfg.Memory.MaxPromptTokens)
+	}
+	if cfg.Memory.AutoCheckpoint {
+		t.Fatal("expected memory.auto_checkpoint=false by default")
+	}
+	if !cfg.Memory.ProactiveEnabled {
+		t.Fatal("expected memory.proactive_enabled=true by default")
+	}
+	if cfg.Memory.EventBufferSize != 256 {
+		t.Fatalf("expected memory.event_buffer_size=256, got %d", cfg.Memory.EventBufferSize)
+	}
+	if cfg.Memory.EmbeddingsEnabled {
+		t.Fatal("expected memory.embeddings_enabled=false by default")
+	}
+	if cfg.Memory.EmbeddingProvider != "openrouter" {
+		t.Fatalf("expected memory.embedding_provider=openrouter, got %q", cfg.Memory.EmbeddingProvider)
+	}
+	if cfg.Memory.EmbeddingModel != "text-embedding-3-small" {
+		t.Fatalf("expected memory.embedding_model=text-embedding-3-small, got %q", cfg.Memory.EmbeddingModel)
+	}
+}
+
+func TestApplyDefaultsSetsMemoryDefaults(t *testing.T) {
+	cfg := Config{}
+	cfg.ApplyDefaults()
+	if cfg.Memory.MaxWorkingItems != 200 {
+		t.Fatalf("expected memory.max_working_items default 200, got %d", cfg.Memory.MaxWorkingItems)
+	}
+	if cfg.Memory.MaxPromptTokens != 1200 {
+		t.Fatalf("expected memory.max_prompt_tokens default 1200, got %d", cfg.Memory.MaxPromptTokens)
+	}
+	if cfg.Memory.EventBufferSize != 256 {
+		t.Fatalf("expected memory.event_buffer_size default 256, got %d", cfg.Memory.EventBufferSize)
+	}
+	if cfg.Memory.EmbeddingProvider != "openrouter" {
+		t.Fatalf("expected memory.embedding_provider default openrouter, got %q", cfg.Memory.EmbeddingProvider)
+	}
+	if cfg.Memory.EmbeddingModel != "text-embedding-3-small" {
+		t.Fatalf("expected memory.embedding_model default text-embedding-3-small, got %q", cfg.Memory.EmbeddingModel)
+	}
+}
+
+func TestValidateRejectsInvalidMemoryConfig(t *testing.T) {
+	cfg := Default()
+	cfg.Memory.MaxWorkingItems = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for memory.max_working_items")
+	}
+
+	cfg = Default()
+	cfg.Memory.MaxPromptTokens = 10
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for memory.max_prompt_tokens")
+	}
+
+	cfg = Default()
+	cfg.Memory.EventBufferSize = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for memory.event_buffer_size")
+	}
+
+	cfg = Default()
+	cfg.Memory.EmbeddingProvider = "bogus"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for memory.embedding_provider")
+	}
+
+	cfg = Default()
+	cfg.Memory.EmbeddingModel = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for memory.embedding_model")
+	}
+}
