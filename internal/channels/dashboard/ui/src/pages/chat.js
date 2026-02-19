@@ -1534,11 +1534,18 @@ function renderChatPage() {
 
   const input = document.createElement("textarea");
   input.className = "chat-input";
+  input.setAttribute("aria-label", "Chat input");
   input.placeholder = "Ask the agent to investigate, summarize, or run a workflow...";
   input.value = chatViewState.draft;
   input.rows = 3;
   input.addEventListener("input", () => {
     chatViewState.draft = input.value;
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      void sendMessage();
+    }
   });
 
   const composerActions = document.createElement("div");
@@ -1549,6 +1556,7 @@ function renderChatPage() {
 
   const agentPicker = document.createElement("select");
   agentPicker.className = "settings-select";
+  agentPicker.setAttribute("aria-label", "Select agent");
   chatViewState.availableAgents.forEach((agentID) => {
     const option = document.createElement("option");
     option.value = agentID;
