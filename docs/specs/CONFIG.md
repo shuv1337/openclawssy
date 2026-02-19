@@ -94,6 +94,23 @@ Provider API key env defaults:
       "api_key_env": "OPENAI_COMPAT_API_KEY"
     }
   },
+  "agents": {
+    "enabled_agent_ids": [],
+    "allow_inter_agent_messaging": true,
+    "allow_agent_model_overrides": true,
+    "self_improvement_enabled": false,
+    "profiles": {
+      "default": {
+        "enabled": true,
+        "self_improvement": false,
+        "model": {
+          "provider": "openai",
+          "name": "gpt-4o-mini",
+          "max_tokens": 12000
+        }
+      }
+    }
+  },
   "chat": {
     "enabled": true,
     "default_agent_id": "default",
@@ -135,6 +152,14 @@ Provider API key env defaults:
 - `model.max_tokens` is validated in the range `1..20000`.
 - Runtime enforces this cap on provider requests.
 - Long chat history is compacted by runtime before context exhaustion.
+
+## Agent Profiles and Control
+- `agents.enabled_agent_ids` is an optional allowlist; when set, only listed agents can run.
+- `agents.profiles.<agent_id>.enabled=false` disables that specific agent.
+- `agents.allow_agent_model_overrides=true` allows `agents.profiles.<agent_id>.model` to override provider/model settings per agent.
+- `agents.allow_inter_agent_messaging` toggles `agent.message.send` and `agent.message.inbox` workflows.
+- `agents.self_improvement_enabled` gates prompt file mutation tools (`agent.prompt.update`).
+- `agents.profiles.<agent_id>.self_improvement=true` must also be set for that agent before prompt mutation is allowed.
 
 ## Output Notes
 - `output.thinking_mode` supports: `never`, `on_error`, `always`.

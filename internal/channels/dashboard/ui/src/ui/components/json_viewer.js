@@ -14,24 +14,53 @@ export function renderJSONViewer(container, value, options = {}) {
   label.textContent = title;
   label.className = "json-viewer-title";
 
+  const controls = document.createElement("div");
+  controls.className = "chat-composer-actions";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "Search JSON";
+  search.className = "settings-search";
+  const searchMeta = document.createElement("span");
+  searchMeta.className = "muted";
+  searchMeta.textContent = "";
+  controls.append(search, searchMeta);
+
   const pre = document.createElement("pre");
   const text = safeStringify(value);
-  if (text.length > maxChars) {
-    pre.textContent = `${text.slice(0, maxChars)}\n...truncated...`;
-    pre.dataset.full = text;
+  const isLong = text.length > maxChars;
+  let expanded = !isLong;
+  let visibleText = isLong ? `${text.slice(0, maxChars)}\n...truncated...` : text;
 
+  const setRenderedText = () => {
+    pre.textContent = visibleText;
+    const query = search.value.trim().toLowerCase();
+    if (!query) {
+      searchMeta.textContent = "";
+      return;
+    }
+    const haystack = visibleText.toLowerCase();
+    const first = haystack.indexOf(query);
+    searchMeta.textContent = first >= 0 ? `match at char ${first + 1}` : "no match in current view";
+  };
+
+  if (isLong) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "button-link";
     button.textContent = "Expand";
     button.addEventListener("click", () => {
-      pre.textContent = pre.dataset.full || text;
-      button.remove();
+      expanded = !expanded;
+      visibleText = expanded ? text : `${text.slice(0, maxChars)}\n...truncated...`;
+      button.textContent = expanded ? "Collapse" : "Expand";
+      setRenderedText();
     });
-    container.append(label, button, pre);
-    return;
+    controls.append(button);
   }
 
-  pre.textContent = text;
-  container.append(label, pre);
+  search.addEventListener("input", () => {
+    setRenderedText();
+  });
+
+  setRenderedText();
+  container.append(label, controls, pre);
 }

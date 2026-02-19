@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -33,7 +32,7 @@ func registerConfigTools(reg *Registry, configuredPath string) error {
 
 func configGet(configuredPath string) Handler {
 	return func(_ context.Context, req Request) (map[string]any, error) {
-		cfgPath, err := resolveConfigPath(req.Workspace, configuredPath)
+		cfgPath, err := resolveOpenClawssyPath(req.Workspace, configuredPath, "config", "config.json")
 		if err != nil {
 			return nil, err
 		}
@@ -65,7 +64,7 @@ func configGet(configuredPath string) Handler {
 
 func configSet(configuredPath string) Handler {
 	return func(_ context.Context, req Request) (map[string]any, error) {
-		cfgPath, err := resolveConfigPath(req.Workspace, configuredPath)
+		cfgPath, err := resolveOpenClawssyPath(req.Workspace, configuredPath, "config", "config.json")
 		if err != nil {
 			return nil, err
 		}
@@ -115,22 +114,6 @@ func redactedConfigForTool(cfg config.Config) config.Config {
 	redacted.Secrets.StoreFile = ""
 	redacted.Secrets.MasterKeyFile = ""
 	return redacted
-}
-
-func resolveConfigPath(workspace, configuredPath string) (string, error) {
-	if strings.TrimSpace(configuredPath) != "" {
-		return configuredPath, nil
-	}
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		return "", errors.New("workspace is required to resolve config path")
-	}
-	wsAbs, err := filepath.Abs(workspace)
-	if err != nil {
-		return "", err
-	}
-	rootDir := filepath.Dir(wsAbs)
-	return filepath.Join(rootDir, ".openclawssy", "config.json"), nil
 }
 
 func applyConfigFieldUpdate(cfg *config.Config, field string, value any) error {
@@ -231,6 +214,30 @@ func applyConfigFieldUpdate(cfg *config.Config, field string, value any) error {
 			return errors.New("shell.enable_exec cannot be true when sandbox.active is false")
 		}
 		cfg.Shell.EnableExec = b
+	case "agents.self_improvement_enabled":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.SelfImprovementEnabled = b
+	case "agents.allow_inter_agent_messaging":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.AllowInterAgentMessaging = b
+	case "agents.allow_agent_model_overrides":
+		b, err := requireBool(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.AllowAgentModelOverrides = b
+	case "agents.enabled_agent_ids":
+		items, err := requireStringSlice(value, field)
+		if err != nil {
+			return err
+		}
+		cfg.Agents.EnabledAgentIDs = items
 	default:
 		return fmt.Errorf("field is not mutable: %s", field)
 	}
@@ -264,6 +271,14 @@ func configGetField(cfg config.Config, field string) (any, bool) {
 		return cfg.Network.AllowLocalhosts, true
 	case "shell.enable_exec":
 		return cfg.Shell.EnableExec, true
+	case "agents.self_improvement_enabled":
+		return cfg.Agents.SelfImprovementEnabled, true
+	case "agents.allow_inter_agent_messaging":
+		return cfg.Agents.AllowInterAgentMessaging, true
+	case "agents.allow_agent_model_overrides":
+		return cfg.Agents.AllowAgentModelOverrides, true
+	case "agents.enabled_agent_ids":
+		return cfg.Agents.EnabledAgentIDs, true
 	case "config":
 		return cfg, true
 	default:

@@ -2,6 +2,7 @@ package chatstore
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"openclawssy/internal/fsutil"
 )
 
 var ErrSessionNotFound = errors.New("chatstore: session not found")
@@ -27,13 +30,21 @@ const (
 	messageScanBufferMax  = 8 * 1024 * 1024
 )
 
+const maxMetaCacheSize = 10000
+
 type Store struct {
 	agentsRoot string
 
 	// mu guards all process-local state and writes. This does not protect against
 	// concurrent writers from other processes.
-	mu    sync.RWMutex
-	index map[string]string
+	mu        sync.RWMutex
+	index     map[string]string
+	metaCache map[string]cachedSession
+}
+
+type cachedSession struct {
+	session Session
+	modTime time.Time
 }
 
 type Session struct {
@@ -81,7 +92,11 @@ func NewStore(agentsRoot string) (*Store, error) {
 		return nil, fmt.Errorf("chatstore: create agents root: %w", err)
 	}
 
-	s := &Store{agentsRoot: absRoot, index: make(map[string]string)}
+	s := &Store{
+		agentsRoot: absRoot,
+		index:      make(map[string]string),
+		metaCache:  make(map[string]cachedSession),
+	}
 	if err := s.loadIndex(); err != nil {
 		return nil, err
 	}
@@ -146,9 +161,6 @@ func (s *Store) ListSessions(agentID, userID, roomID, channel string) ([]Session
 		return nil, err
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	chatRoot := s.chatRoot(agentID)
 	entries, err := os.ReadDir(chatRoot)
 	if err != nil {
@@ -166,14 +178,49 @@ func (s *Store) ListSessions(agentID, userID, roomID, channel string) ([]Session
 		if entry.Name() == "_active" {
 			continue
 		}
-		metaPath := filepath.Join(chatRoot, entry.Name(), "meta.json")
-		session, err := readSessionMeta(metaPath)
+		sessionID := entry.Name()
+		metaPath := filepath.Join(chatRoot, sessionID, "meta.json")
+
+		fi, err := os.Stat(metaPath)
 		if err != nil {
-			if errors.Is(err, ErrSessionNotFound) {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, err
+			return nil, fmt.Errorf("chatstore: list sessions stat: %w", err)
 		}
+
+		s.mu.RLock()
+		cached, found := s.metaCache[sessionID]
+		s.mu.RUnlock()
+
+		var session Session
+		if found && fi.ModTime().Equal(cached.modTime) {
+			session = cached.session
+		} else {
+			// Although file system writes are atomic (rename), acquire RLock to
+			// coordinate with in-process writers and respect the lock contract.
+			s.mu.RLock()
+			session, err = readSessionMeta(metaPath)
+			s.mu.RUnlock()
+			if err != nil {
+				if errors.Is(err, ErrSessionNotFound) {
+					continue
+				}
+				return nil, err
+			}
+
+			s.mu.Lock()
+			if len(s.metaCache) >= maxMetaCacheSize {
+				// Simple random eviction to prevent unbounded growth
+				for k := range s.metaCache {
+					delete(s.metaCache, k)
+					break
+				}
+			}
+			s.metaCache[sessionID] = cachedSession{session: session, modTime: fi.ModTime()}
+			s.mu.Unlock()
+		}
+
 		if userID != "" && session.UserID != userID {
 			continue
 		}
@@ -280,18 +327,24 @@ func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, erro
 		}
 		defer f.Close()
 
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, messageScanBufferInit), messageScanBufferMax)
+		scanner, err := NewReverseScanner(f, messageScanBufferInit, messageScanBufferMax)
+		if err != nil {
+			return fmt.Errorf("chatstore: init scanner: %w", err)
+		}
+
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
 				continue
 			}
 			var m Message
-			if err := json.Unmarshal([]byte(line), &m); err != nil {
+			if err := json.Unmarshal(line, &m); err != nil {
 				continue
 			}
 			all = append(all, m)
+			if len(all) >= limit {
+				break
+			}
 		}
 		if err := scanner.Err(); err != nil {
 			if errors.Is(err, bufio.ErrTooLong) {
@@ -304,10 +357,12 @@ func (s *Store) ReadRecentMessages(sessionID string, limit int) ([]Message, erro
 		return nil, err
 	}
 
-	if len(all) <= limit {
-		return all, nil
+	// Reverse the collected messages to restore chronological order
+	for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
+		all[i], all[j] = all[j], all[i]
 	}
-	return append([]Message(nil), all[len(all)-limit:]...), nil
+
+	return all, nil
 }
 
 func (s *Store) GetSession(sessionID string) (Session, error) {
@@ -399,6 +454,92 @@ func (s *Store) SetActiveSessionPointer(agentID, channel, userID, roomID, sessio
 	})
 }
 
+func (s *Store) SetActiveAgentPointer(channel, userID, roomID, agentID string) error {
+	if err := validateSegment("channel", channel); err != nil {
+		return err
+	}
+	if err := validateSegment("user_id", userID); err != nil {
+		return err
+	}
+	if err := validateSegment("room_id", roomID); err != nil {
+		return err
+	}
+	if err := validateSegment("agent_id", agentID); err != nil {
+		return err
+	}
+
+	path := s.activeAgentPointerPath(channel, userID, roomID)
+	payload := map[string]string{"agent_id": agentID}
+	return withCrossProcessLock(path+".lock", lockAcquireTimeout, func() error {
+		return writeJSONFile(path, payload)
+	})
+}
+
+func (s *Store) GetActiveAgentPointer(channel, userID, roomID string) (string, error) {
+	if err := validateSegment("channel", channel); err != nil {
+		return "", err
+	}
+	if err := validateSegment("user_id", userID); err != nil {
+		return "", err
+	}
+	if err := validateSegment("room_id", roomID); err != nil {
+		return "", err
+	}
+
+	path := s.activeAgentPointerPath(channel, userID, roomID)
+	lockPath := path + ".lock"
+	var b []byte
+	if err := withCrossProcessLock(lockPath, lockAcquireTimeout, func() error {
+		readBytes, err := readFileWithBackup(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return ErrSessionNotFound
+			}
+			return fmt.Errorf("chatstore: read active agent pointer: %w", err)
+		}
+		b = readBytes
+		return nil
+	}); err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			return "", ErrSessionNotFound
+		}
+		return "", err
+	}
+	var payload struct {
+		AgentID string `json:"agent_id"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return "", fmt.Errorf("chatstore: parse active agent pointer: %w", err)
+	}
+	if strings.TrimSpace(payload.AgentID) == "" {
+		return "", ErrSessionNotFound
+	}
+	return payload.AgentID, nil
+}
+
+func (s *Store) ListAgents() ([]string, error) {
+	entries, err := os.ReadDir(s.agentsRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || strings.HasPrefix(name, "_") {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (s *Store) GetActiveSessionPointer(agentID, channel, userID, roomID string) (string, error) {
 	if err := validateSegment("agent_id", agentID); err != nil {
 		return "", err
@@ -483,6 +624,10 @@ func (s *Store) activePointerPath(agentID, channel, userID, roomID string) strin
 	return filepath.Join(s.chatRoot(agentID), "_active", channel, userID, roomID+".json")
 }
 
+func (s *Store) activeAgentPointerPath(channel, userID, roomID string) string {
+	return filepath.Join(s.agentsRoot, "_routing", "active_agents", channel, userID, roomID+".json")
+}
+
 func (s *Store) sessionDirByIDLocked(sessionID string) (string, error) {
 	if dir, ok := s.index[sessionID]; ok {
 		return dir, nil
@@ -528,6 +673,7 @@ func writeJSONFile(path string, value any) error {
 	}
 	b = append(b, '\n')
 
+	// Ensure parent directory exists before backup/write
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("chatstore: create parent dir: %w", err)
@@ -537,31 +683,7 @@ func writeJSONFile(path string, value any) error {
 		_ = os.WriteFile(path+".bak", existing, 0o600)
 	}
 
-	tmp, err := os.CreateTemp(dir, ".tmp-chatstore-*")
-	if err != nil {
-		return fmt.Errorf("chatstore: create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-
-	if _, err := tmp.Write(b); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chatstore: write temp file: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chatstore: sync temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("chatstore: close temp file: %w", err)
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return fmt.Errorf("chatstore: chmod temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("chatstore: rename temp file: %w", err)
-	}
-	return nil
+	return fsutil.WriteFileAtomic(path, b, 0o600)
 }
 
 func readFileWithBackup(path string) ([]byte, error) {

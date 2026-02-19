@@ -341,6 +341,18 @@ func TestNormalizeToolArgsPolicyGrantAliases(t *testing.T) {
 	}
 }
 
+func TestNormalizeToolArgsSecretsAliases(t *testing.T) {
+	args := normalizeToolArgs("secrets.get", map[string]any{"name": "PERPLEXITY_API_KEY"})
+	if args["key"] != "provider/perplexity/api_key" {
+		t.Fatalf("expected PERPLEXITY_API_KEY to normalize to canonical provider key, got %#v", args["key"])
+	}
+
+	args = normalizeToolArgs("secrets.set", map[string]any{"env_var": "OPENROUTER_API_KEY", "value": "x"})
+	if args["key"] != "provider/openrouter/api_key" {
+		t.Fatalf("expected OPENROUTER_API_KEY to normalize to canonical provider key, got %#v", args["key"])
+	}
+}
+
 func TestAllowedToolsIncludesHTTPRequestWhenNetworkEnabled(t *testing.T) {
 	e := &Engine{}
 	cfg := config.Default()

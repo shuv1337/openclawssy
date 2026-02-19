@@ -49,47 +49,55 @@ const (
 )
 
 var toolNameAliases = map[string]string{
-	"fs.read":          "fs.read",
-	"fs.list":          "fs.list",
-	"fs.write":         "fs.write",
-	"fs.append":        "fs.append",
-	"fs.delete":        "fs.delete",
-	"fs.move":          "fs.move",
-	"fs.rename":        "fs.move",
-	"fs.edit":          "fs.edit",
-	"code.search":      "code.search",
-	"config.get":       "config.get",
-	"config.set":       "config.set",
-	"secrets.get":      "secrets.get",
-	"secrets.set":      "secrets.set",
-	"secrets.list":     "secrets.list",
-	"skill.list":       "skill.list",
-	"skill.read":       "skill.read",
-	"skill.get":        "skill.read",
-	"scheduler.list":   "scheduler.list",
-	"scheduler.add":    "scheduler.add",
-	"scheduler.remove": "scheduler.remove",
-	"scheduler.pause":  "scheduler.pause",
-	"scheduler.resume": "scheduler.resume",
-	"session.list":     "session.list",
-	"session.close":    "session.close",
-	"agent.list":       "agent.list",
-	"agent.create":     "agent.create",
-	"agent.switch":     "agent.switch",
-	"policy.list":      "policy.list",
-	"policy.grant":     "policy.grant",
-	"policy.revoke":    "policy.revoke",
-	"run.list":         "run.list",
-	"run.get":          "run.get",
-	"run.cancel":       "run.cancel",
-	"metrics.get":      "metrics.get",
-	"http.request":     "http.request",
-	"net.fetch":        "http.request",
-	"time.now":         "time.now",
-	"shell.exec":       "shell.exec",
-	"bash.exec":        "shell.exec",
-	"terminal.exec":    "shell.exec",
-	"terminal.run":     "shell.exec",
+	"fs.read":              "fs.read",
+	"fs.list":              "fs.list",
+	"fs.write":             "fs.write",
+	"fs.append":            "fs.append",
+	"fs.delete":            "fs.delete",
+	"fs.move":              "fs.move",
+	"fs.rename":            "fs.move",
+	"fs.edit":              "fs.edit",
+	"code.search":          "code.search",
+	"config.get":           "config.get",
+	"config.set":           "config.set",
+	"secrets.get":          "secrets.get",
+	"secrets.set":          "secrets.set",
+	"secrets.list":         "secrets.list",
+	"skill.list":           "skill.list",
+	"skill.read":           "skill.read",
+	"skill.get":            "skill.read",
+	"scheduler.list":       "scheduler.list",
+	"scheduler.add":        "scheduler.add",
+	"scheduler.remove":     "scheduler.remove",
+	"scheduler.pause":      "scheduler.pause",
+	"scheduler.resume":     "scheduler.resume",
+	"session.list":         "session.list",
+	"session.close":        "session.close",
+	"agent.list":           "agent.list",
+	"agent.create":         "agent.create",
+	"agent.switch":         "agent.switch",
+	"agent.profile.get":    "agent.profile.get",
+	"agent.profile.set":    "agent.profile.set",
+	"agent.message.send":   "agent.message.send",
+	"agent.message.inbox":  "agent.message.inbox",
+	"agent.run":            "agent.run",
+	"agent.prompt.read":    "agent.prompt.read",
+	"agent.prompt.update":  "agent.prompt.update",
+	"agent.prompt.suggest": "agent.prompt.suggest",
+	"policy.list":          "policy.list",
+	"policy.grant":         "policy.grant",
+	"policy.revoke":        "policy.revoke",
+	"run.list":             "run.list",
+	"run.get":              "run.get",
+	"run.cancel":           "run.cancel",
+	"metrics.get":          "metrics.get",
+	"http.request":         "http.request",
+	"net.fetch":            "http.request",
+	"time.now":             "time.now",
+	"shell.exec":           "shell.exec",
+	"bash.exec":            "shell.exec",
+	"terminal.exec":        "shell.exec",
+	"terminal.run":         "shell.exec",
 }
 
 var toolNotAllowedReasonRE = regexp.MustCompile(`tool "([^"]+)" not allowed`)
@@ -97,7 +105,11 @@ var toolNotAllowedReasonRE = regexp.MustCompile(`tool "([^"]+)" not allowed`)
 type SecretLookup func(name string) (string, bool, error)
 
 func NewProviderModel(cfg config.Config, lookup SecretLookup) (*ProviderModel, error) {
-	pName := strings.ToLower(strings.TrimSpace(cfg.Model.Provider))
+	return NewProviderModelForConfig(cfg, cfg.Model, lookup)
+}
+
+func NewProviderModelForConfig(cfg config.Config, modelCfg config.ModelConfig, lookup SecretLookup) (*ProviderModel, error) {
+	pName := strings.ToLower(strings.TrimSpace(modelCfg.Provider))
 	endpoint, err := providerEndpoint(cfg, pName)
 	if err != nil {
 		return nil, err
@@ -128,14 +140,14 @@ func NewProviderModel(cfg config.Config, lookup SecretLookup) (*ProviderModel, e
 		headers[k] = v
 	}
 
-	responseMaxTokens := cfg.Model.MaxTokens
+	responseMaxTokens := modelCfg.MaxTokens
 	if responseMaxTokens <= 0 || responseMaxTokens > maxResponseTokens {
 		responseMaxTokens = maxResponseTokens
 	}
 
 	return &ProviderModel{
 		providerName:      pName,
-		modelName:         cfg.Model.Name,
+		modelName:         modelCfg.Name,
 		baseURL:           base,
 		apiKey:            apiKey,
 		headers:           headers,
@@ -958,16 +970,20 @@ func parseToolDirective(message string, allowedTools []string) (agent.ModelRespo
 	}
 	args := map[string]any{}
 	if len(parts) == 2 {
-		if err := json.Unmarshal([]byte(parts[1]), &args); err != nil {
+		parsed, err := parseToolArgsJSONRelaxed(parts[1])
+		if err != nil {
 			return agent.ModelResponse{}, fmt.Errorf("invalid tool args JSON: %w", err)
 		}
+		args = parsed
 	}
+	args = normalizeToolArgs(toolName, args)
 	argBytes, _ := json.Marshal(args)
 	return agent.ModelResponse{ToolCalls: []agent.ToolCallRequest{{ID: "tool-1", Name: toolName, Arguments: argBytes}}}, nil
 }
 
 func parseToolCallsFromResponse(content string, allowedTools []string, trace *runTraceCollector) ([]agent.ToolCallRequest, bool, string) {
 	parsedCalls, diag := toolparse.ParseToolCalls(content, allowedTools)
+	parsedCalls = normalizeParsedToolCalls(parsedCalls)
 	if len(parsedCalls) > maxToolCallsPerReply {
 		parsedCalls = parsedCalls[:maxToolCallsPerReply]
 	}
@@ -978,6 +994,177 @@ func parseToolCallsFromResponse(content string, allowedTools []string, trace *ru
 	}
 	parseFailure := len(parsedCalls) == 0 && len(diag.Rejected) > 0
 	return parsedCalls, parseFailure, summarizeParseFailureReasons(diag.Rejected)
+}
+
+func normalizeParsedToolCalls(calls []agent.ToolCallRequest) []agent.ToolCallRequest {
+	if len(calls) == 0 {
+		return calls
+	}
+	out := make([]agent.ToolCallRequest, 0, len(calls))
+	for _, call := range calls {
+		normalized := call
+		args := map[string]any{}
+		if err := json.Unmarshal(call.Arguments, &args); err == nil {
+			args = normalizeToolArgs(call.Name, args)
+			if b, err := json.Marshal(args); err == nil {
+				normalized.Arguments = b
+			}
+		}
+		out = append(out, normalized)
+	}
+	return dedupeToolCalls(out)
+}
+
+func parseToolArgsJSONRelaxed(raw string) (map[string]any, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return map[string]any{}, nil
+	}
+
+	args := map[string]any{}
+	if err := json.Unmarshal([]byte(trimmed), &args); err == nil {
+		return args, nil
+	} else {
+		parseErr := err
+		repaired := repairLikelyJSONObject(trimmed)
+		if repaired == "" || repaired == trimmed {
+			return nil, parseErr
+		}
+		if err := json.Unmarshal([]byte(repaired), &args); err != nil {
+			return nil, err
+		}
+		return args, nil
+	}
+}
+
+func repairLikelyJSONObject(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return ""
+	}
+	text = strings.Trim(text, "`")
+	text = strings.TrimSpace(text)
+
+	if !strings.HasPrefix(text, "{") {
+		start := strings.Index(text, "{")
+		if start >= 0 {
+			text = strings.TrimSpace(text[start:])
+		}
+	}
+
+	if !strings.HasPrefix(text, "{") {
+		return strings.TrimSpace(text)
+	}
+
+	text = stripTrailingJSONCommas(text)
+	text = closeOpenJSONDelimiters(text)
+	return strings.TrimSpace(text)
+}
+
+func stripTrailingJSONCommas(text string) string {
+	if text == "" {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	inString := false
+	escaped := false
+
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		if inString {
+			b.WriteByte(ch)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == ',' {
+			j := i + 1
+			for j < len(text) {
+				next := text[j]
+				if next == ' ' || next == '\n' || next == '\r' || next == '\t' {
+					j++
+					continue
+				}
+				break
+			}
+			if j < len(text) && (text[j] == '}' || text[j] == ']') {
+				continue
+			}
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
+func closeOpenJSONDelimiters(text string) string {
+	if text == "" {
+		return text
+	}
+	inString := false
+	escaped := false
+	stack := make([]byte, 0, 16)
+
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		if ch == '{' || ch == '[' {
+			stack = append(stack, ch)
+			continue
+		}
+		if ch == '}' || ch == ']' {
+			if len(stack) == 0 {
+				continue
+			}
+			last := stack[len(stack)-1]
+			if (ch == '}' && last == '{') || (ch == ']' && last == '[') {
+				stack = stack[:len(stack)-1]
+			}
+		}
+	}
+
+	if inString {
+		text += `"`
+	}
+	for i := len(stack) - 1; i >= 0; i-- {
+		if stack[i] == '{' {
+			text += "}"
+		} else if stack[i] == '[' {
+			text += "]"
+		}
+	}
+	return text
 }
 
 func summarizeParseFailureReasons(rejected []toolparse.Extraction) string {

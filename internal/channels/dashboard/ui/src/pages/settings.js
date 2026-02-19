@@ -1,7 +1,10 @@
+import { captureFocusSnapshot, restoreFocusSnapshot } from "../ui/focus_restore.js";
+
 const CATEGORY_DEFS = [
   { key: "general", title: "General", summary: "Server, workspace, and output defaults." },
   { key: "model", title: "Model Provider", summary: "Model selection and provider endpoint settings." },
   { key: "chat", title: "Chat/Discord", summary: "Runtime chat and Discord connector controls." },
+  { key: "agents", title: "Agents", summary: "Per-agent activation, model overrides, and self-improvement controls." },
   { key: "sandbox", title: "Sandbox/Shell", summary: "Sandbox and shell execution constraints." },
   { key: "network", title: "Network", summary: "Network policy allowlist and localhost behavior." },
   { key: "scheduler", title: "Scheduler", summary: "Job catch-up and concurrency limits." },
@@ -33,6 +36,8 @@ const settingsState = {
   touchedFields: new Set(),
   advancedRaw: "",
   advancedRawError: "",
+  selectedAgentProfile: "",
+  lastAppliedRouteHint: "",
 };
 
 function cloneJSON(value) {
@@ -74,6 +79,42 @@ function parseLineList(value) {
     .split(/\n|,/) 
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function parseSettingsRouteHint() {
+  const hash = asString(window.location.hash).replace(/^#/, "");
+  const [rawPath, rawQuery = ""] = hash.split("?");
+  const path = asTrimmedString(rawPath);
+  if (path !== "/settings" && path !== "settings") {
+    return null;
+  }
+  const query = asTrimmedString(rawQuery);
+  if (!query) {
+    return null;
+  }
+  return { signature: `${path}?${query}`, params: new URLSearchParams(query) };
+}
+
+function applySettingsRouteHint() {
+  const hint = parseSettingsRouteHint();
+  if (!hint) {
+    return;
+  }
+  if (hint.signature === settingsState.lastAppliedRouteHint) {
+    return;
+  }
+
+  const category = asTrimmedString(hint.params.get("category"));
+  if (category && CATEGORY_LOOKUP[category]) {
+    settingsState.selectedCategory = category;
+  }
+
+  const profile = asTrimmedString(hint.params.get("profile"));
+  if (profile) {
+    settingsState.selectedAgentProfile = profile;
+  }
+
+  settingsState.lastAppliedRouteHint = hint.signature;
 }
 
 function normalizeConfigShape(input) {
@@ -152,6 +193,25 @@ function normalizeConfigShape(input) {
 
   if (!cfg.secrets || typeof cfg.secrets !== "object") {
     cfg.secrets = {};
+  }
+
+  if (!cfg.agents || typeof cfg.agents !== "object") {
+    cfg.agents = {};
+  }
+  if (!Array.isArray(cfg.agents.enabled_agent_ids)) {
+    cfg.agents.enabled_agent_ids = [];
+  }
+  if (!cfg.agents.profiles || typeof cfg.agents.profiles !== "object" || Array.isArray(cfg.agents.profiles)) {
+    cfg.agents.profiles = {};
+  }
+  if (typeof cfg.agents.allow_inter_agent_messaging !== "boolean") {
+    cfg.agents.allow_inter_agent_messaging = true;
+  }
+  if (typeof cfg.agents.allow_agent_model_overrides !== "boolean") {
+    cfg.agents.allow_agent_model_overrides = true;
+  }
+  if (typeof cfg.agents.self_improvement_enabled !== "boolean") {
+    cfg.agents.self_improvement_enabled = false;
   }
 
   return cfg;
@@ -373,6 +433,30 @@ function validateDraftConfig(draft) {
     setFieldError("network.allowed_domains", "Allowed domains cannot contain empty entries.");
   }
 
+  const enabledAgentIDs = Array.isArray(draft?.agents?.enabled_agent_ids) ? draft.agents.enabled_agent_ids : [];
+  if (enabledAgentIDs.some((item) => !asTrimmedString(item))) {
+    setFieldError("agents.enabled_agent_ids", "Enabled agent IDs cannot contain empty entries.");
+  }
+  const profiles = draft?.agents?.profiles && typeof draft.agents.profiles === "object" ? draft.agents.profiles : {};
+  Object.entries(profiles).forEach(([agentID, profile]) => {
+    if (!asTrimmedString(agentID)) {
+      setFieldError("agents.profiles", "Profile keys must be non-empty agent IDs.");
+      return;
+    }
+    const provider = asTrimmedString(profile?.model?.provider).toLowerCase();
+    if (provider && !PROVIDERS.includes(provider)) {
+      setFieldError(`agents.profiles.${agentID}.model.provider`, "Profile model provider must match a supported provider.");
+    }
+    const maxTokensProfile = profile?.model?.max_tokens;
+    if (
+      maxTokensProfile !== undefined &&
+      maxTokensProfile !== null &&
+      (!Number.isInteger(Number(maxTokensProfile)) || Number(maxTokensProfile) < 0 || Number(maxTokensProfile) > 20000)
+    ) {
+      setFieldError(`agents.profiles.${agentID}.model.max_tokens`, "Profile max tokens must be an integer between 0 and 20000.");
+    }
+  });
+
   if (Object.keys(fieldErrors).length > 0) {
     formErrors.push("Fix validation errors before saving.");
   }
@@ -394,7 +478,7 @@ function updateDraft(path, value, options = {}) {
   setByPath(settingsState.draftConfig, path, value, options);
   settingsState.draftConfig = normalizeConfigShape(settingsState.draftConfig);
   settingsState.advancedRaw = `${JSON.stringify(settingsState.draftConfig, null, 2)}\n`;
-  rerender();
+  rerender({ preserveFocus: true });
 }
 
 function categoryMatchesSearch(category, query, draft) {
@@ -418,6 +502,8 @@ function getCategorySnapshot(categoryKey, draft) {
       return { model: draft.model, providers: draft.providers };
     case "chat":
       return { chat: draft.chat, discord: draft.discord };
+    case "agents":
+      return { agents: draft.agents };
     case "sandbox":
       return { sandbox: draft.sandbox, shell: draft.shell };
     case "network":
@@ -479,6 +565,7 @@ function appendTextField({ parent, query, title, path, helpText = "", placeholde
   const input = document.createElement("input");
   input.type = inputType;
   input.className = "settings-input";
+  input.setAttribute("data-focus-id", `settings:${path}`);
   input.value = asString(getByPath(settingsState.draftConfig, path));
   input.placeholder = placeholder;
   input.readOnly = readOnly;
@@ -510,6 +597,7 @@ function appendNumberField({
   const input = document.createElement("input");
   input.type = "number";
   input.className = "settings-input";
+  input.setAttribute("data-focus-id", `settings:${path}`);
   input.step = step;
   const value = getByPath(settingsState.draftConfig, path);
   input.value = value === undefined || value === null ? "" : String(value);
@@ -538,6 +626,7 @@ function appendSelectField({ parent, query, title, path, options, helpText = "",
   const field = createField({ title, path, helpText, errorText });
   const select = document.createElement("select");
   select.className = "settings-select";
+  select.setAttribute("data-focus-id", `settings:${path}`);
   const current = asTrimmedString(getByPath(settingsState.draftConfig, path)).toLowerCase();
   options.forEach((option) => {
     const entry = document.createElement("option");
@@ -584,6 +673,7 @@ function appendListField({ parent, query, title, path, helpText = "", placeholde
   const field = createField({ title, path, helpText, errorText });
   const input = document.createElement("textarea");
   input.className = "settings-textarea";
+  input.setAttribute("data-focus-id", `settings:${path}`);
   input.rows = 4;
   input.placeholder = placeholder;
   input.value = toLineList(getByPath(settingsState.draftConfig, path));
@@ -915,6 +1005,187 @@ function buildSandboxCategory(panel, fieldErrors) {
   });
 }
 
+function resolveSelectedProfileKey() {
+  const profiles = settingsState.draftConfig?.agents?.profiles || {};
+  const keys = Object.keys(profiles).sort();
+  if (settingsState.selectedAgentProfile && keys.includes(settingsState.selectedAgentProfile)) {
+    return settingsState.selectedAgentProfile;
+  }
+  const preferred = asTrimmedString(settingsState.draftConfig?.chat?.default_agent_id) || "default";
+  if (keys.includes(preferred)) {
+    settingsState.selectedAgentProfile = preferred;
+    return preferred;
+  }
+  if (keys.length > 0) {
+    settingsState.selectedAgentProfile = keys[0];
+    return keys[0];
+  }
+  settingsState.selectedAgentProfile = preferred;
+  const next = cloneJSON(settingsState.draftConfig);
+  next.agents.profiles[preferred] = next.agents.profiles[preferred] || {};
+  settingsState.draftConfig = normalizeConfigShape(next);
+  settingsState.advancedRaw = `${JSON.stringify(settingsState.draftConfig, null, 2)}\n`;
+  return preferred;
+}
+
+function buildAgentsCategory(panel, fieldErrors) {
+  const query = settingsState.searchQuery;
+  appendCheckboxField({
+    parent: panel,
+    query,
+    title: "Allow inter-agent messaging",
+    path: "agents.allow_inter_agent_messaging",
+    helpText: "Enables agent.message.send, agent.message.inbox, and agent.run workflows.",
+    fieldErrors,
+  });
+  appendCheckboxField({
+    parent: panel,
+    query,
+    title: "Allow per-agent model overrides",
+    path: "agents.allow_agent_model_overrides",
+    helpText: "Allows agents.profiles.<id>.model to override global model config.",
+    fieldErrors,
+  });
+  appendCheckboxField({
+    parent: panel,
+    query,
+    title: "Enable self-improvement globally",
+    path: "agents.self_improvement_enabled",
+    helpText: "Must be true before any agent can modify its own prompt files.",
+    fieldErrors,
+  });
+  appendListField({
+    parent: panel,
+    query,
+    title: "Enabled agent IDs allowlist",
+    path: "agents.enabled_agent_ids",
+    helpText: "Optional allowlist. When populated, only listed agents can execute runs.",
+    placeholder: "default\nplanner\nreviewer",
+    fieldErrors,
+  });
+
+  const selected = resolveSelectedProfileKey();
+  const profiles = settingsState.draftConfig?.agents?.profiles || {};
+  const selectedProfile = profiles[selected] || {};
+
+  const header = document.createElement("h4");
+  header.className = "settings-subheading";
+  header.textContent = "Agent Profile Editor";
+  panel.append(header);
+
+  const picker = createField({ title: "Profile agent", path: "agents.profiles", helpText: "Edit per-agent activation and model override values." });
+  const select = document.createElement("select");
+  select.className = "settings-select";
+  Object.keys(profiles)
+    .sort()
+    .forEach((agentID) => {
+      const option = document.createElement("option");
+      option.value = agentID;
+      option.textContent = agentID;
+      option.selected = agentID === selected;
+      select.append(option);
+    });
+  select.addEventListener("change", () => {
+    settingsState.selectedAgentProfile = asTrimmedString(select.value);
+    rerender();
+  });
+  picker.append(select);
+
+  const addRow = document.createElement("div");
+  addRow.className = "settings-advanced-actions";
+  const addInput = document.createElement("input");
+  addInput.className = "settings-input";
+  addInput.placeholder = "new-agent-id";
+  const addButton = document.createElement("button");
+  addButton.type = "button";
+  addButton.className = "layout-toggle";
+  addButton.textContent = "Add Profile";
+  addButton.addEventListener("click", () => {
+    const nextID = asTrimmedString(addInput.value);
+    if (!nextID) return;
+    const next = cloneJSON(settingsState.draftConfig);
+    next.agents = next.agents || {};
+    next.agents.profiles = next.agents.profiles || {};
+    if (!next.agents.profiles[nextID]) {
+      next.agents.profiles[nextID] = {};
+    }
+    settingsState.draftConfig = normalizeConfigShape(next);
+    settingsState.selectedAgentProfile = nextID;
+    settingsState.advancedRaw = `${JSON.stringify(settingsState.draftConfig, null, 2)}\n`;
+    rerender();
+  });
+  addRow.append(addInput, addButton);
+  picker.append(addRow);
+  panel.append(picker);
+
+  appendCheckboxField({ parent: panel, query, title: "Profile enabled", path: `agents.profiles.${selected}.enabled`, helpText: "Toggle this agent profile on/off.", fieldErrors });
+  appendCheckboxField({ parent: panel, query, title: "Profile self-improvement", path: `agents.profiles.${selected}.self_improvement`, helpText: "Allows this agent to modify its own prompt files when global switch is on.", fieldErrors });
+  appendSelectField({
+    parent: panel,
+    query,
+    title: "Profile model provider",
+    path: `agents.profiles.${selected}.model.provider`,
+    helpText: "Optional override provider for this agent profile.",
+    options: [{ value: "", label: "(inherit global)" }, ...PROVIDERS.map((provider) => ({ value: provider, label: provider }))],
+    fieldErrors,
+  });
+  appendTextField({
+    parent: panel,
+    query,
+    title: "Profile model name",
+    path: `agents.profiles.${selected}.model.name`,
+    helpText: "Optional override model name for this agent profile.",
+    placeholder: "(inherit global)",
+    fieldErrors,
+  });
+  appendNumberField({
+    parent: panel,
+    query,
+    title: "Profile model max tokens",
+    path: `agents.profiles.${selected}.model.max_tokens`,
+    helpText: "Optional override max tokens. Set 0/empty to inherit global.",
+    placeholder: "0",
+    fieldErrors,
+  });
+
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "layout-toggle";
+  clear.textContent = "Clear Profile Model Overrides";
+  clear.addEventListener("click", () => {
+    const next = cloneJSON(settingsState.draftConfig);
+    next.agents.profiles[selected] = next.agents.profiles[selected] || {};
+    delete next.agents.profiles[selected].model;
+    settingsState.draftConfig = normalizeConfigShape(next);
+    settingsState.advancedRaw = `${JSON.stringify(settingsState.draftConfig, null, 2)}\n`;
+    rerender();
+  });
+  panel.append(clear);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "layout-toggle";
+  remove.textContent = "Remove Profile";
+  remove.addEventListener("click", () => {
+    const next = cloneJSON(settingsState.draftConfig);
+    if (next.agents && next.agents.profiles) {
+      delete next.agents.profiles[selected];
+    }
+    settingsState.draftConfig = normalizeConfigShape(next);
+    settingsState.selectedAgentProfile = "";
+    settingsState.advancedRaw = `${JSON.stringify(settingsState.draftConfig, null, 2)}\n`;
+    rerender();
+  });
+  panel.append(remove);
+
+  const summary = document.createElement("p");
+  summary.className = "muted";
+  summary.textContent = `Editing profile: ${selected}. enabled=${String(Boolean(selectedProfile.enabled))}, self_improvement=${String(
+    Boolean(selectedProfile.self_improvement)
+  )}.`;
+  panel.append(summary);
+}
+
 function buildNetworkCategory(panel, fieldErrors) {
   const query = settingsState.searchQuery;
   appendCheckboxField({
@@ -1048,6 +1319,7 @@ function buildAdvancedCategory(panel, diffRows) {
 
   const rawInput = document.createElement("textarea");
   rawInput.className = "settings-raw-editor";
+  rawInput.setAttribute("data-focus-id", "settings:advanced.raw");
   rawInput.rows = 20;
   rawInput.value = settingsState.advancedRaw;
   rawInput.addEventListener("input", () => {
@@ -1202,6 +1474,9 @@ function renderCategoryPanel(categoryKey, fieldErrors, diffRows) {
     case "chat":
       buildChatCategory(panel, fieldErrors);
       break;
+    case "agents":
+      buildAgentsCategory(panel, fieldErrors);
+      break;
     case "sandbox":
       buildSandboxCategory(panel, fieldErrors);
       break;
@@ -1231,11 +1506,15 @@ function renderCategoryPanel(categoryKey, fieldErrors, diffRows) {
   return panel;
 }
 
-function rerender() {
+function rerender(options = {}) {
   if (!settingsState.container || !settingsState.container.isConnected) {
     return;
   }
+  const focusSnapshot = options.preserveFocus ? captureFocusSnapshot(settingsState.container) : null;
   renderSettingsPage();
+  if (focusSnapshot) {
+    restoreFocusSnapshot(settingsState.container, focusSnapshot);
+  }
 }
 
 async function loadConfig() {
@@ -1296,6 +1575,8 @@ async function saveConfig() {
 }
 
 function renderSettingsPage() {
+  applySettingsRouteHint();
+
   const container = settingsState.container;
   container.innerHTML = "";
 
@@ -1354,11 +1635,12 @@ function renderSettingsPage() {
   const searchInput = document.createElement("input");
   searchInput.type = "search";
   searchInput.className = "settings-input";
+  searchInput.setAttribute("data-focus-id", "settings:search");
   searchInput.placeholder = "Search categories, fields, or values";
   searchInput.value = settingsState.searchQuery;
   searchInput.addEventListener("input", () => {
     settingsState.searchQuery = searchInput.value;
-    rerender();
+    rerender({ preserveFocus: true });
   });
   searchField.append(searchLabel, searchInput);
 

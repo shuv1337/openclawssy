@@ -77,6 +77,52 @@ func TestDashboardStaticAssetRouteServesEmbeddedFiles(t *testing.T) {
 	}
 }
 
+func TestDashboardStaticAssetRouteServesToolSchemasJSON(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/static/src/data/tool_schemas.json", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("expected json content type, got %q", got)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode schema payload: %v", err)
+	}
+	if _, ok := payload["fs.read"].(map[string]any); !ok {
+		t.Fatalf("expected fs.read schema entry, got %#v", payload["fs.read"])
+	}
+	if _, ok := payload["shell.exec"].(map[string]any); !ok {
+		t.Fatalf("expected shell.exec schema entry, got %#v", payload["shell.exec"])
+	}
+	fsRead := payload["fs.read"].(map[string]any)
+	required, ok := fsRead["required"].([]any)
+	if !ok || len(required) == 0 || required[0] != "path" {
+		t.Fatalf("expected fs.read.required to include path, got %#v", fsRead["required"])
+	}
+}
+
+func TestDashboardStaticAssetRouteMissingToolSchemasFileNotFound(t *testing.T) {
+	h := New(t.TempDir(), httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/dashboard/static/src/data/tool_schemas_missing.json", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected %d, got %d", http.StatusNotFound, rr.Code)
+	}
+}
+
 func TestDebugRunTraceEndpoint(t *testing.T) {
 	store := httpchannel.NewInMemoryRunStore()
 	_, err := store.Create(context.Background(), httpchannel.Run{
@@ -141,6 +187,39 @@ func TestAdminStatusEndpoint(t *testing.T) {
 	}
 	if payload["run_count"] != float64(1) {
 		t.Fatalf("expected run_count=1, got %#v", payload["run_count"])
+	}
+}
+
+func TestAdminStatusEndpointIncludesConfiguredModelStamp(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.Model.Provider = "openai"
+	cfg.Model.Name = "gpt-4.1-mini"
+	if err := config.Save(filepath.Join(root, ".openclawssy", "config.json"), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/status", nil)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected %d, got %d", http.StatusOK, rr.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	model, ok := payload["model"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected model map in payload, got %#v", payload["model"])
+	}
+	if model["provider"] != "openai" || model["name"] != "gpt-4.1-mini" {
+		t.Fatalf("unexpected model stamp: %#v", model)
 	}
 }
 
@@ -415,6 +494,100 @@ func TestListChatSessionsEndpointPagination(t *testing.T) {
 	}
 	if len(payload.Sessions) != 1 {
 		t.Fatalf("expected one paged session, got %d", len(payload.Sessions))
+	}
+}
+
+func TestAdminAgentsEndpointListAndSetActive(t *testing.T) {
+	root := t.TempDir()
+	enabled := true
+	cfg := config.Default()
+	cfg.Agents.AllowInterAgentMessaging = true
+	cfg.Agents.AllowAgentModelOverrides = true
+	cfg.Agents.SelfImprovementEnabled = true
+	cfg.Agents.Profiles = map[string]config.AgentProfile{
+		"alpha": {
+			Enabled:         &enabled,
+			SelfImprovement: true,
+			Model: config.ModelConfig{
+				Provider:  "openai",
+				Name:      "gpt-4.1-mini",
+				MaxTokens: 1024,
+			},
+		},
+	}
+	if err := config.Save(filepath.Join(root, ".openclawssy", "config.json"), cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	store, err := chatstore.NewStore(filepath.Join(root, ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	if _, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"}); err != nil {
+		t.Fatalf("create default session: %v", err)
+	}
+	if _, err := store.CreateSession(chatstore.CreateSessionInput{AgentID: "alpha", Channel: "dashboard", UserID: "dashboard_user", RoomID: "dashboard"}); err != nil {
+		t.Fatalf("create alpha session: %v", err)
+	}
+
+	h := New(root, httpchannel.NewInMemoryRunStore())
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/admin/agents?channel=dashboard&user_id=dashboard_user&room_id=dashboard", nil)
+	listResp := httptest.NewRecorder()
+	mux.ServeHTTP(listResp, listReq)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("expected list agents status 200, got %d (%s)", listResp.Code, listResp.Body.String())
+	}
+	var listed map[string]any
+	if err := json.Unmarshal(listResp.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode list payload: %v", err)
+	}
+	if listed["selected_agent"] != "default" {
+		t.Fatalf("expected selected_agent default on first list, got %#v", listed["selected_agent"])
+	}
+
+	setReq := httptest.NewRequest(http.MethodPost, "/api/admin/agents", bytes.NewBufferString(`{"channel":"dashboard","user_id":"dashboard_user","room_id":"dashboard","agent_id":"alpha"}`))
+	setReq.Header.Set("Content-Type", "application/json")
+	setResp := httptest.NewRecorder()
+	mux.ServeHTTP(setResp, setReq)
+	if setResp.Code != http.StatusOK {
+		t.Fatalf("expected set active agent status 200, got %d (%s)", setResp.Code, setResp.Body.String())
+	}
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "/api/admin/agents?channel=dashboard&user_id=dashboard_user&room_id=dashboard", nil)
+	verifyResp := httptest.NewRecorder()
+	mux.ServeHTTP(verifyResp, verifyReq)
+	if verifyResp.Code != http.StatusOK {
+		t.Fatalf("expected verify status 200, got %d", verifyResp.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(verifyResp.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode verify payload: %v", err)
+	}
+	if payload["active_agent"] != "alpha" {
+		t.Fatalf("expected active_agent alpha, got %#v", payload["active_agent"])
+	}
+	if payload["selected_agent"] != "alpha" {
+		t.Fatalf("expected selected_agent alpha, got %#v", payload["selected_agent"])
+	}
+	profileContext, ok := payload["profile_context"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected profile_context object, got %#v", payload["profile_context"])
+	}
+	if profileContext["agent_id"] != "alpha" || profileContext["exists"] != true {
+		t.Fatalf("unexpected profile context header: %#v", profileContext)
+	}
+	if profileContext["model_provider"] != "openai" || profileContext["model_name"] != "gpt-4.1-mini" {
+		t.Fatalf("expected profile model override fields, got %#v", profileContext)
+	}
+	agentsConfig, ok := payload["agents_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected agents_config object, got %#v", payload["agents_config"])
+	}
+	if agentsConfig["allow_agent_model_overrides"] != true || agentsConfig["self_improvement_enabled"] != true {
+		t.Fatalf("unexpected agents_config payload: %#v", agentsConfig)
 	}
 }
 

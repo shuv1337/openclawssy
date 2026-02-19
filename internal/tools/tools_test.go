@@ -89,6 +89,20 @@ type shOnlyFallbackShell struct {
 	calls []string
 }
 
+type fakeAgentRunner struct {
+	lastInput AgentRunInput
+	result    AgentRunOutput
+	err       error
+}
+
+func (f *fakeAgentRunner) ExecuteSubAgent(_ context.Context, input AgentRunInput) (AgentRunOutput, error) {
+	f.lastInput = input
+	if f.err != nil {
+		return AgentRunOutput{}, f.err
+	}
+	return f.result, nil
+}
+
 func (s *shOnlyFallbackShell) Exec(ctx context.Context, command string, args []string) (string, string, int, error) {
 	_ = ctx
 	s.calls = append(s.calls, command)
@@ -347,7 +361,7 @@ func TestCoreFsTools(t *testing.T) {
 func TestShellExecTool(t *testing.T) {
 	reg := NewRegistry(fakePolicy{}, nil)
 	reg.SetShellExecutor(fakeShell{})
-	reg.SetShellAllowedCommands([]string{"*"})
+	reg.SetShellAllowedCommands([]string{"echo"})
 	if err := RegisterCore(reg); err != nil {
 		t.Fatalf("register core: %v", err)
 	}
@@ -367,7 +381,7 @@ func TestShellExecFallsBackToShWhenBashUnavailable(t *testing.T) {
 	reg := NewRegistry(fakePolicy{}, nil)
 	shell := &fallbackShell{}
 	reg.SetShellExecutor(shell)
-	reg.SetShellAllowedCommands([]string{"*"})
+	reg.SetShellAllowedCommands([]string{"bash"})
 	if err := RegisterCore(reg); err != nil {
 		t.Fatalf("register core: %v", err)
 	}
@@ -393,7 +407,7 @@ func TestShellExecFallsBackToShWhenBashBinaryMissing(t *testing.T) {
 	reg := NewRegistry(fakePolicy{}, nil)
 	shell := &shOnlyFallbackShell{}
 	reg.SetShellExecutor(shell)
-	reg.SetShellAllowedCommands([]string{"*"})
+	reg.SetShellAllowedCommands([]string{"bash"})
 	if err := RegisterCore(reg); err != nil {
 		t.Fatalf("register core: %v", err)
 	}
@@ -418,7 +432,7 @@ func TestShellExecFallsBackToShWhenBashBinaryMissing(t *testing.T) {
 func TestShellExecTreatsExitStatusAsResultNotToolFailure(t *testing.T) {
 	reg := NewRegistry(fakePolicy{}, nil)
 	reg.SetShellExecutor(exitStatusShell{})
-	reg.SetShellAllowedCommands([]string{"*"})
+	reg.SetShellAllowedCommands([]string{"bash"})
 	if err := RegisterCore(reg); err != nil {
 		t.Fatalf("register core: %v", err)
 	}
@@ -1338,6 +1352,27 @@ func TestHTTPRequestToolRedirectRechecksAllowlist(t *testing.T) {
 	}
 }
 
+func TestHostAllowedByDomainListNormalizesURLStyleCandidates(t *testing.T) {
+	allowed := []string{
+		"https://api.perplexity.ai/chat/completions",
+		"api.openai.com:443",
+		"*.openrouter.ai",
+	}
+
+	if !hostAllowedByDomainList("api.perplexity.ai", allowed) {
+		t.Fatal("expected host to match URL-style allowlist entry")
+	}
+	if !hostAllowedByDomainList("api.openai.com", allowed) {
+		t.Fatal("expected host to match allowlist entry with port")
+	}
+	if !hostAllowedByDomainList("api.openrouter.ai", allowed) {
+		t.Fatal("expected subdomain to match wildcard allowlist entry")
+	}
+	if hostAllowedByDomainList("evil.example.com", allowed) {
+		t.Fatal("did not expect non-allowlisted host to match")
+	}
+}
+
 func setupNetworkToolRegistry(t *testing.T, mutate func(*config.Config)) (string, string, *Registry) {
 	t.Helper()
 	root := t.TempDir()
@@ -1610,6 +1645,87 @@ func TestAgentSwitchCreateIfMissing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(agentsPath, "new-agent", "SOUL.md")); err != nil {
 		t.Fatalf("expected switched missing agent to be scaffolded: %v", err)
+	}
+}
+
+func TestAgentRunUsesConfiguredRunner(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	cfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	cfg := config.Default()
+	cfg.Workspace.Root = ws
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config fixture: %v", err)
+	}
+	runner := &fakeAgentRunner{result: AgentRunOutput{RunID: "run_sub", FinalText: "done", Provider: "zai", Model: "GLM-4.7"}}
+	enforcer := policy.NewEnforcer(ws, map[string][]string{"agent": {"agent.run", "agent.list", "agent.create", "agent.switch"}})
+	reg := NewRegistry(enforcer, nil)
+	if err := RegisterCoreWithOptions(reg, CoreOptions{EnableShellExec: true, ConfigPath: cfgPath, AgentsPath: filepath.Join(root, ".openclawssy", "agents"), AgentRunner: runner}); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+	res, err := reg.Execute(context.Background(), "agent", "agent.run", ws, map[string]any{"agent_id": "agent", "message": "hello"})
+	if err != nil {
+		t.Fatalf("agent.run: %v", err)
+	}
+	if got := res["run_id"]; got != "run_sub" {
+		t.Fatalf("expected run_sub, got %#v", got)
+	}
+	if runner.lastInput.TargetAgentID != "agent" || runner.lastInput.Message != "hello" {
+		t.Fatalf("unexpected runner input: %#v", runner.lastInput)
+	}
+}
+
+func TestAgentPromptUpdateCrossAgentRequiresPolicyAdmin(t *testing.T) {
+	ws, root, agentsPath, cfgPath, reg := setupAgentToolRegistry(t, policy.NewEnforcer("", map[string][]string{"worker": {"agent.prompt.update"}}))
+	if _, err := createAgentScaffold(filepath.Join(agentsPath, "alpha"), false); err != nil {
+		t.Fatalf("seed alpha scaffold: %v", err)
+	}
+	if _, err := createAgentScaffold(filepath.Join(agentsPath, "beta"), false); err != nil {
+		t.Fatalf("seed beta scaffold: %v", err)
+	}
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	cfg.Agents.SelfImprovementEnabled = true
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if _, err := reg.Execute(context.Background(), "worker", "agent.profile.set", ws, map[string]any{"agent_id": "worker", "self_improvement": true}); err == nil {
+		// no-op: worker lacks agent.profile.set by policy in this fixture
+	}
+	_, err = reg.Execute(context.Background(), "worker", "agent.prompt.update", ws, map[string]any{"agent_id": "beta", "file": "SOUL.md", "content": "x"})
+	if err == nil {
+		t.Fatal("expected cross-agent prompt update to require policy.admin")
+	}
+
+	adminReg := NewRegistry(policy.NewEnforcer("", map[string][]string{"admin": {"agent.prompt.update", "agent.create", "agent.profile.set", "policy.admin"}}), nil)
+	root = t.TempDir()
+	adminWS := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(adminWS, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	adminCfgPath := filepath.Join(root, ".openclawssy", "config.json")
+	adminCfg := config.Default()
+	adminCfg.Workspace.Root = adminWS
+	adminCfg.Agents.SelfImprovementEnabled = true
+	if err := config.Save(adminCfgPath, adminCfg); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	if err := RegisterCoreWithOptions(adminReg, CoreOptions{EnableShellExec: true, ConfigPath: adminCfgPath, AgentsPath: filepath.Join(root, ".openclawssy", "agents")}); err != nil {
+		t.Fatalf("register core admin: %v", err)
+	}
+	if _, err := adminReg.Execute(context.Background(), "admin", "agent.create", adminWS, map[string]any{"agent_id": "alpha"}); err != nil {
+		t.Fatalf("admin create alpha: %v", err)
+	}
+	if _, err := adminReg.Execute(context.Background(), "admin", "agent.profile.set", adminWS, map[string]any{"agent_id": "alpha", "self_improvement": true}); err != nil {
+		t.Fatalf("set profile self improvement: %v", err)
+	}
+	if _, err := adminReg.Execute(context.Background(), "admin", "agent.prompt.update", adminWS, map[string]any{"agent_id": "alpha", "file": "SOUL.md", "content": "updated"}); err != nil {
+		t.Fatalf("cross-agent prompt update with policy.admin should succeed, got %v", err)
 	}
 }
 
@@ -2170,5 +2286,52 @@ func TestRunCancelTool_NilTracker(t *testing.T) {
 	_, err := reg.Execute(context.Background(), "agent", "run.cancel", ".", map[string]any{"run_id": "run-123"})
 	if err == nil {
 		t.Fatal("expected error when tracker is nil")
+	}
+}
+
+func TestCodeSearchSkipsBinaryFiles(t *testing.T) {
+	ws := t.TempDir()
+	// Create a binary file (contains null byte)
+	if err := os.WriteFile(filepath.Join(ws, "binary.bin"), []byte("hello\x00world"), 0o600); err != nil {
+		t.Fatalf("write binary file: %v", err)
+	}
+	// Create a text file
+	if err := os.WriteFile(filepath.Join(ws, "text.txt"), []byte("hello world"), 0o600); err != nil {
+		t.Fatalf("write text file: %v", err)
+	}
+
+	reg := NewRegistry(fakePolicy{}, nil)
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
+	}
+
+	res, err := reg.Execute(context.Background(), "agent", "code.search", ws, map[string]any{"pattern": "hello"})
+	if err != nil {
+		t.Fatalf("code.search: %v", err)
+	}
+
+	matches, ok := res["matches"].([]map[string]any)
+	if !ok {
+		t.Fatalf("expected matches list, got %#v", res["matches"])
+	}
+
+	// Should only find match in text.txt
+	foundBinary := false
+	foundText := false
+	for _, m := range matches {
+		path := m["path"].(string)
+		if path == "binary.bin" {
+			foundBinary = true
+		}
+		if path == "text.txt" {
+			foundText = true
+		}
+	}
+
+	if foundBinary {
+		t.Fatalf("expected binary file to be skipped, but found match in binary.bin")
+	}
+	if !foundText {
+		t.Fatalf("expected match in text.txt, but not found")
 	}
 }

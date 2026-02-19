@@ -30,6 +30,7 @@ type Engine struct {
 	workspaceDir string
 	agentsDir    string
 	runTracker   *RunTracker
+	chatStore    *chatstore.Store
 
 	runLimitMu  sync.Mutex
 	runLimitCap int
@@ -100,11 +101,24 @@ func NewEngine(rootDir string) (*Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("runtime: resolve root: %w", err)
 	}
+
+	agentsDir := filepath.Join(absRoot, ".openclawssy", "agents")
+	// Ensure agentsDir exists so NewStore succeeds even on fresh init
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		return nil, fmt.Errorf("runtime: create agents dir: %w", err)
+	}
+
+	chatStore, err := chatstore.NewStore(agentsDir)
+	if err != nil {
+		return nil, fmt.Errorf("runtime: init chat store: %w", err)
+	}
+
 	return &Engine{
 		rootDir:      absRoot,
 		workspaceDir: filepath.Join(absRoot, "workspace"),
-		agentsDir:    filepath.Join(absRoot, ".openclawssy", "agents"),
+		agentsDir:    agentsDir,
 		runTracker:   NewRunTracker(),
+		chatStore:    chatStore,
 	}, nil
 }
 
@@ -125,9 +139,9 @@ func (e *Engine) Init(agentID string, force bool) error {
 	}
 
 	files := map[string]string{
-		"SOUL.md":     "# SOUL\n\nMission and behavior contract for this agent.\n",
-		"RULES.md":    "# RULES\n\n- Follow workspace-only write policy.\n- Respect tool capabilities.\n",
-		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now.\n",
+		"SOUL.md":     "# SOUL\n\nYou are Openclawssy, a high-accountability software engineering agent.\n\n## Mission\n- Deliver correct, verifiable outcomes with minimal user friction.\n- Prefer concrete execution and evidence over speculation.\n- Keep users informed with concise, actionable updates.\n\n## Quality Bar\n- Validate assumptions against repository context before making changes.\n- Preserve user intent and existing architecture unless directed otherwise.\n- When uncertain, pick the safest reasonable default and explain tradeoffs.\n",
+		"RULES.md":    "# RULES\n\n- Follow workspace-only write policy and capability boundaries.\n- Never expose secrets in plain text output.\n- Keep responses concise, factual, and directly tied to user goals.\n- Run targeted verification for non-trivial changes whenever feasible.\n- If blocked by missing credentials or irreversible choices, ask one precise question with a recommended default.\n",
+		"TOOLS.md":    "# TOOLS\n\nEnabled core tools: fs.read, fs.list, fs.write, fs.append, fs.delete, fs.move, fs.edit, code.search, config.get, config.set, secrets.get, secrets.set, secrets.list, skill.list, skill.read, scheduler.list, scheduler.add, scheduler.remove, scheduler.pause, scheduler.resume, session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now.\n",
 		"SPECPLAN.md": "# SPECPLAN\n\nDescribe specs and acceptance requirements before coding.\n",
 		"DEVPLAN.md":  "# DEVPLAN\n\n- [ ] Implement task\n- [ ] Add tests\n- [ ] Update handoff\n",
 		"HANDOFF.md":  "# HANDOFF\n\nStatus: initialized\n\nNext:\n- Define first run objective.\n",
@@ -181,6 +195,10 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	if err != nil {
 		return RunResult{}, fmt.Errorf("runtime: load config: %w", err)
 	}
+	if !isAgentEnabled(cfg, agentID) {
+		return RunResult{}, fmt.Errorf("runtime: agent %q is inactive by configuration", agentID)
+	}
+	selectedModel := resolveAgentModelConfig(cfg, agentID)
 	releaseSlot, err := e.acquireRunSlot(cfg.Engine.MaxConcurrentRuns)
 	if err != nil {
 		return RunResult{}, err
@@ -225,7 +243,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		_ = aud.Close()
 	}()
 
-	startEvent := map[string]any{"run_id": runID, "agent_id": agentID, "message": message}
+	startEvent := map[string]any{"run_id": runID, "agent_id": agentID, "message": message, "model_provider": selectedModel.Provider, "model_name": selectedModel.Name}
 	if source != "" {
 		startEvent["source"] = source
 	}
@@ -258,6 +276,8 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		DefaultGrants:   allowedTools,
 		RunsPath:        filepath.Join(e.rootDir, ".openclawssy", "runs.json"),
 		RunTracker:      e.runTracker,
+		WorkspaceRoot:   e.workspaceDir,
+		AgentRunner:     &subAgentRunner{engine: e},
 	}); err != nil {
 		return RunResult{}, fmt.Errorf("runtime: register core tools: %w", err)
 	}
@@ -286,7 +306,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 		return secretStore.Get(name)
 	}
 
-	model, err := NewProviderModel(cfg, lookup)
+	model, err := NewProviderModelForConfig(cfg, selectedModel, lookup)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -300,10 +320,7 @@ func (e *Engine) ExecuteWithInput(ctx context.Context, in ExecuteInput) (RunResu
 	modelMessages := []agent.ChatMessage{{Role: "user", Content: runMessage}}
 	var conversationStore *chatstore.Store
 	if sessionID != "" {
-		conversationStore, err = chatstore.NewStore(e.agentsDir)
-		if err != nil {
-			return RunResult{}, fmt.Errorf("runtime: init chat store: %w", err)
-		}
+		conversationStore = e.chatStore
 		sessionMeta, sessionErr := conversationStore.GetSession(sessionID)
 		if sessionErr != nil {
 			return RunResult{}, fmt.Errorf("runtime: load session: %w", sessionErr)
@@ -806,11 +823,10 @@ func (b *modelTextProgressBatcher) Flush() {
 }
 
 func (e *Engine) loadSessionMessages(sessionID string, limit int) ([]agent.ChatMessage, error) {
-	store, err := chatstore.NewStore(e.agentsDir)
-	if err != nil {
-		return nil, fmt.Errorf("runtime: init chat store: %w", err)
+	if e.chatStore == nil {
+		return nil, errors.New("runtime: chat store not initialized")
 	}
-	history, err := store.ReadRecentMessages(sessionID, chatstore.ClampHistoryCount(limit, maxSessionContextMessageCap))
+	history, err := e.chatStore.ReadRecentMessages(sessionID, chatstore.ClampHistoryCount(limit, maxSessionContextMessageCap))
 	if err != nil {
 		return nil, fmt.Errorf("runtime: read chat history: %w", err)
 	}
@@ -987,9 +1003,9 @@ func hasTrailingUserMessage(messages []agent.ChatMessage, currentMessage string)
 }
 
 func (e *Engine) appendRunConversation(sessionID, runID string, out agent.RunOutput, includeToolMessages bool) error {
-	store, err := chatstore.NewStore(e.agentsDir)
-	if err != nil {
-		return fmt.Errorf("runtime: init chat store: %w", err)
+	store := e.chatStore
+	if store == nil {
+		return errors.New("runtime: chat store not initialized")
 	}
 	if includeToolMessages {
 		for _, rec := range out.ToolCalls {
@@ -1105,17 +1121,17 @@ func toolCallingBestPracticesDocWithAgentTools() string {
 	)
 	doc = strings.Replace(doc,
 		"session.list, session.close, run.list, run.get, http.request, time.now, shell.exec.",
-		"session.list, session.close, agent.list, agent.create, agent.switch, run.list, run.get, run.cancel, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, http.request, time.now, shell.exec.",
 		1,
 	)
 	doc = strings.Replace(doc,
-		"session.list, session.close, agent.list, agent.create, agent.switch, run.list, run.get, run.cancel, http.request, time.now, shell.exec.",
-		"session.list, session.close, agent.list, agent.create, agent.switch, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, run.list, run.get, run.cancel, http.request, time.now, shell.exec.",
+		"session.list, session.close, agent.list, agent.create, agent.switch, agent.profile.get, agent.profile.set, agent.message.send, agent.message.inbox, agent.run, agent.prompt.read, agent.prompt.update, agent.prompt.suggest, policy.list, policy.grant, policy.revoke, run.list, run.get, run.cancel, metrics.get, http.request, time.now, shell.exec.",
 		1,
 	)
 	doc = strings.Replace(doc,
 		"- Use run.list to enumerate runs with filtering (agent_id, status) and paginatio...",
-		"- Use agent.list to inspect available agents, agent.create to scaffold missing agents, and agent.switch to update chat/discord defaults safely.\n- Use policy.list/policy.grant/policy.revoke for capability governance; only agents with policy.admin should mutate grants.\n- Use run.list to enumerate runs with filtering (agent_id, status), use run.get for details, and use run.cancel to stop a running task when needed.\n- Use metrics.get to inspect run-level and per-tool duration/error trends.",
+		"- Use agent.list to inspect available agents, agent.create to scaffold missing agents, and agent.switch to update chat/discord defaults safely.\n- Use agent.profile.get/agent.profile.set for per-agent activation and model/provider controls.\n- Use agent.message.send/agent.message.inbox for structured inter-agent collaboration and agent.run for direct subagent execution.\n- Use agent.prompt.read/agent.prompt.suggest for prompt governance, and use agent.prompt.update only when self-improvement controls allow it.\n- Use policy.list/policy.grant/policy.revoke for capability governance; only agents with policy.admin should mutate grants.\n- Use run.list to enumerate runs with filtering (agent_id, status), use run.get for details, and use run.cancel to stop a running task when needed.\n- Use metrics.get to inspect run-level and per-tool duration/error trends.",
 		1,
 	)
 	return doc
@@ -1256,6 +1272,22 @@ func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
 				args["pattern"] = value
 			}
 		}
+	case "secrets.get", "secrets.set":
+		aliasKeys := []string{"name", "secret", "secret_key", "secretKey", "env", "env_var", "token"}
+		if getStringArg(args, "key") == "" {
+			for _, key := range aliasKeys {
+				if value := getStringArg(args, key); value != "" {
+					args["key"] = strings.TrimSpace(value)
+					break
+				}
+			}
+		}
+		if key := canonicalRuntimeSecretKey(getStringArg(args, "key")); key != "" {
+			args["key"] = key
+		}
+		for _, alias := range aliasKeys {
+			delete(args, alias)
+		}
 	case "skill.read":
 		if getStringArg(args, "name") == "" {
 			for _, key := range []string{"skill", "skill_name", "skillName", "id"} {
@@ -1299,11 +1331,20 @@ func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
 				}
 			}
 		}
-	case "agent.create", "agent.switch":
+	case "agent.create", "agent.switch", "agent.run", "agent.prompt.read", "agent.prompt.update", "agent.prompt.suggest", "agent.profile.get", "agent.profile.set":
 		if getStringArg(args, "agent_id") == "" {
 			for _, key := range []string{"id", "agent", "name", "agentId"} {
 				if value := getStringArg(args, key); value != "" {
 					args["agent_id"] = strings.TrimSpace(value)
+					break
+				}
+			}
+		}
+	case "agent.message.send":
+		if getStringArg(args, "to_agent_id") == "" {
+			for _, key := range []string{"agent_id", "target_agent_id", "target", "to", "toAgentId"} {
+				if value := getStringArg(args, key); value != "" {
+					args["to_agent_id"] = strings.TrimSpace(value)
 					break
 				}
 			}
@@ -1343,6 +1384,27 @@ func normalizeToolArgs(toolName string, args map[string]any) map[string]any {
 	}
 
 	return args
+}
+
+func canonicalRuntimeSecretKey(raw string) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return ""
+	}
+	lower := strings.ToLower(key)
+	if strings.HasPrefix(lower, "provider/") && strings.HasSuffix(lower, "/api_key") {
+		return lower
+	}
+	upper := strings.ToUpper(key)
+	if strings.HasSuffix(upper, "_API_KEY") {
+		provider := strings.TrimSuffix(upper, "_API_KEY")
+		provider = strings.ReplaceAll(provider, "_", "-")
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "" {
+			return fmt.Sprintf("provider/%s/api_key", provider)
+		}
+	}
+	return key
 }
 
 func getStringArg(args map[string]any, key string) string {
@@ -1414,7 +1476,7 @@ func sanitizePathArg(path string) string {
 }
 
 func (e *Engine) allowedTools(cfg config.Config) []string {
-	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.append", "fs.delete", "fs.move", "fs.edit", "code.search", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "skill.list", "skill.read", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "agent.list", "agent.create", "agent.switch", "policy.list", "policy.grant", "policy.revoke", "run.list", "run.get", "run.cancel", "metrics.get", "time.now"}
+	toolsList := []string{"fs.read", "fs.list", "fs.write", "fs.append", "fs.delete", "fs.move", "fs.edit", "code.search", "config.get", "config.set", "secrets.get", "secrets.set", "secrets.list", "skill.list", "skill.read", "scheduler.list", "scheduler.add", "scheduler.remove", "scheduler.pause", "scheduler.resume", "session.list", "session.close", "agent.list", "agent.create", "agent.switch", "agent.profile.get", "agent.profile.set", "agent.message.send", "agent.message.inbox", "agent.run", "agent.prompt.read", "agent.prompt.update", "agent.prompt.suggest", "policy.list", "policy.grant", "policy.revoke", "run.list", "run.get", "run.cancel", "metrics.get", "time.now"}
 	if cfg.Network.Enabled {
 		toolsList = append(toolsList, "http.request")
 	}
@@ -1463,8 +1525,85 @@ func (e *Engine) effectiveCapabilities(agentID string, allowedTools []string) []
 	return policy.NormalizeCapabilities(out)
 }
 
+func isAgentEnabled(cfg config.Config, agentID string) bool {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return false
+	}
+	if len(cfg.Agents.EnabledAgentIDs) > 0 {
+		enabled := false
+		for _, item := range cfg.Agents.EnabledAgentIDs {
+			if strings.TrimSpace(item) == agentID {
+				enabled = true
+				break
+			}
+		}
+		if !enabled {
+			return false
+		}
+	}
+	profile, ok := cfg.Agents.Profiles[agentID]
+	if !ok || profile.Enabled == nil {
+		return true
+	}
+	return *profile.Enabled
+}
+
+func resolveAgentModelConfig(cfg config.Config, agentID string) config.ModelConfig {
+	selected := cfg.Model
+	if !cfg.Agents.AllowAgentModelOverrides {
+		return selected
+	}
+	profile, ok := cfg.Agents.Profiles[strings.TrimSpace(agentID)]
+	if !ok {
+		return selected
+	}
+	override := profile.Model
+	if strings.TrimSpace(override.Provider) != "" {
+		selected.Provider = strings.TrimSpace(override.Provider)
+	}
+	if strings.TrimSpace(override.Name) != "" {
+		selected.Name = strings.TrimSpace(override.Name)
+	}
+	if override.Temperature != 0 {
+		selected.Temperature = override.Temperature
+	}
+	if override.MaxTokens > 0 {
+		selected.MaxTokens = override.MaxTokens
+	}
+	return selected
+}
+
 type sandboxShellExecutor struct {
 	provider sandbox.Provider
+}
+
+type subAgentRunner struct {
+	engine *Engine
+}
+
+func (s *subAgentRunner) ExecuteSubAgent(ctx context.Context, input tools.AgentRunInput) (tools.AgentRunOutput, error) {
+	if s == nil || s.engine == nil {
+		return tools.AgentRunOutput{}, errors.New("runtime: engine is not configured")
+	}
+	result, err := s.engine.ExecuteWithInput(ctx, ExecuteInput{
+		AgentID:      strings.TrimSpace(input.TargetAgentID),
+		Message:      input.Message,
+		Source:       strings.TrimSpace(input.Source),
+		ThinkingMode: strings.TrimSpace(input.ThinkingMode),
+	})
+	if err != nil {
+		return tools.AgentRunOutput{}, err
+	}
+	return tools.AgentRunOutput{
+		RunID:        result.RunID,
+		FinalText:    result.FinalText,
+		ArtifactPath: result.ArtifactPath,
+		DurationMS:   result.DurationMS,
+		ToolCalls:    result.ToolCalls,
+		Provider:     result.Provider,
+		Model:        result.Model,
+	}, nil
 }
 
 func (s *sandboxShellExecutor) Exec(_ context.Context, command string, args []string) (string, string, int, error) {

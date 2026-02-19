@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
+
+	"openclawssy/internal/fsutil"
 	"sync"
 	"time"
 )
@@ -23,6 +24,12 @@ type Job struct {
 	SessionID string `json:"session_id,omitempty"`
 	Enabled   bool   `json:"enabled"`
 	LastRun   string `json:"lastRun"`
+}
+
+type jobUpdate struct {
+	JobID   string
+	RunAt   time.Time
+	Disable bool
 }
 
 type RunFunc func(agentID string, message string)
@@ -170,7 +177,7 @@ func (s *Store) saveLocked() error {
 	}
 	body = append(body, '\n')
 
-	if err := atomicWriteFile(s.path, body, 0o600); err != nil {
+	if err := fsutil.WriteFileAtomic(s.path, body, 0o600); err != nil {
 		return err
 	}
 
@@ -197,6 +204,31 @@ func (s *Store) updateAfterRun(job Job, runAt time.Time, disable bool) error {
 	}
 	s.jobs[job.ID] = cur
 	return s.saveLocked()
+}
+
+func (s *Store) batchUpdateAfterRun(updates []jobUpdate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.reloadLocked(); err != nil {
+		return err
+	}
+	dirty := false
+	for _, u := range updates {
+		cur, ok := s.jobs[u.JobID]
+		if !ok {
+			continue
+		}
+		cur.LastRun = u.RunAt.UTC().Format(time.RFC3339)
+		if u.Disable {
+			cur.Enabled = false
+		}
+		s.jobs[u.JobID] = cur
+		dirty = true
+	}
+	if dirty {
+		return s.saveLocked()
+	}
+	return nil
 }
 
 func (s *Store) SetPaused(paused bool) error {
@@ -342,6 +374,7 @@ func (e *Executor) check(now time.Time) {
 	}
 
 	jobsCh := make(chan dueJob)
+	updatesCh := make(chan jobUpdate, len(dueJobs))
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -349,7 +382,7 @@ func (e *Executor) check(now time.Time) {
 			defer wg.Done()
 			for item := range jobsCh {
 				e.runJobFunc(item.job)
-				_ = e.store.updateAfterRun(item.job, now, item.disableAfterRun)
+				updatesCh <- jobUpdate{JobID: item.job.ID, RunAt: now, Disable: item.disableAfterRun}
 			}
 		}()
 	}
@@ -358,6 +391,15 @@ func (e *Executor) check(now time.Time) {
 	}
 	close(jobsCh)
 	wg.Wait()
+	close(updatesCh)
+
+	var updates []jobUpdate
+	for update := range updatesCh {
+		updates = append(updates, update)
+	}
+	if len(updates) > 0 {
+		_ = e.store.batchUpdateAfterRun(updates)
+	}
 }
 
 func isMissedRun(job Job, now time.Time) bool {
@@ -430,40 +472,4 @@ func parseLastRun(raw string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("scheduler: invalid lastRun %q", raw)
 	}
 	return t, nil
-}
-
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("scheduler: ensure directory: %w", err)
-	}
-
-	tmpFile, err := os.CreateTemp(dir, ".tmp-scheduler-*")
-	if err != nil {
-		return fmt.Errorf("scheduler: create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-
-	defer func() {
-		_ = os.Remove(tmpPath)
-	}()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("scheduler: write temp file: %w", err)
-	}
-	if err := tmpFile.Sync(); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("scheduler: sync temp file: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return fmt.Errorf("scheduler: close temp file: %w", err)
-	}
-	if err := os.Chmod(tmpPath, perm); err != nil {
-		return fmt.Errorf("scheduler: chmod temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("scheduler: rename temp file: %w", err)
-	}
-	return nil
 }

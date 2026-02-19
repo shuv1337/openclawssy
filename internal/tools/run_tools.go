@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strings"
 
 	httpchannel "openclawssy/internal/channels/http"
@@ -74,36 +73,9 @@ func runList(runsPath string) Handler {
 
 		runs = filtered
 
-		limit := getIntArg(req.Args, "limit", defaultRunListLimit)
-		if limit <= 0 {
-			limit = defaultRunListLimit
-		}
-		if limit > maxRunListLimit {
-			limit = maxRunListLimit
-		}
-
-		offset := getIntArg(req.Args, "offset", 0)
-		if offset < 0 {
-			offset = 0
-		}
-		if offset > len(runs) {
-			offset = len(runs)
-		}
-
-		total := len(runs)
-		end := offset + limit
-		if end > len(runs) {
-			end = len(runs)
-		}
-		runs = runs[offset:end]
-
-		return map[string]any{
-			"runs":   runs,
-			"total":  total,
-			"limit":  limit,
-			"offset": offset,
-			"count":  len(runs),
-		}, nil
+		sliced, meta := paginate(runs, req.Args, defaultRunListLimit, maxRunListLimit)
+		meta["runs"] = sliced
+		return meta, nil
 	}
 }
 
@@ -138,25 +110,9 @@ func runGet(runsPath string) Handler {
 }
 
 func openRunStore(workspace, configuredPath string) (*httpchannel.FileRunStore, error) {
-	path, err := resolveRunsPath(workspace, configuredPath)
+	path, err := resolveOpenClawssyPath(workspace, configuredPath, "runs", "runs.json")
 	if err != nil {
 		return nil, err
 	}
 	return httpchannel.NewFileRunStore(path)
-}
-
-func resolveRunsPath(workspace, configuredPath string) (string, error) {
-	if strings.TrimSpace(configuredPath) != "" {
-		return configuredPath, nil
-	}
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		return "", errors.New("workspace is required to resolve runs path")
-	}
-	wsAbs, err := filepath.Abs(workspace)
-	if err != nil {
-		return "", err
-	}
-	rootDir := filepath.Dir(wsAbs)
-	return filepath.Join(rootDir, ".openclawssy", "runs.json"), nil
 }

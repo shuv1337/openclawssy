@@ -190,3 +190,19 @@ func TestRedactedClearsSensitiveFieldsOnly(t *testing.T) {
 		t.Fatalf("expected non-sensitive model name preserved, got %q", redacted.Model.Name)
 	}
 }
+
+func TestValidateRejectsInvalidEnabledAgentID(t *testing.T) {
+	cfg := Default()
+	cfg.Agents.EnabledAgentIDs = []string{"default", "../evil"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid enabled agent id")
+	}
+}
+
+func TestValidateRejectsInvalidAgentProfileProvider(t *testing.T) {
+	cfg := Default()
+	cfg.Agents.Profiles["default"] = AgentProfile{Model: ModelConfig{Provider: "bogus", Name: "x"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid agent profile provider")
+	}
+}

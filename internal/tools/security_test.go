@@ -2,31 +2,43 @@ package tools
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
-func TestShellExecDefaultDeny(t *testing.T) {
+func TestShellExecDeniesEmptyAllowedList(t *testing.T) {
 	reg := NewRegistry(fakePolicy{}, nil)
 	reg.SetShellExecutor(fakeShell{})
+	// No allowed commands set explicitly, so it's empty by default.
+
 	if err := RegisterCore(reg); err != nil {
 		t.Fatalf("register core: %v", err)
 	}
 
-	// Case 1: Empty allowlist should deny (currently it allows)
 	_, err := reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
 		"command": "echo",
-		"args":    []any{"hello"},
+		"args":    []any{"should be denied if list is empty"},
 	})
 
-	// Current behavior: err is nil
-	// Desired behavior: err is not nil and indicates denied
 	if err == nil {
-		t.Errorf("expected error when allowlist is empty, but command was allowed")
+		t.Fatal("expected policy denied error for empty allowed list, got success")
+	}
+	if !strings.Contains(err.Error(), "command is not allowed") {
+		t.Fatalf("expected 'command is not allowed' error, got %v", err)
+	}
+}
+
+func TestShellExecWildcardAndSpecificAllowlist(t *testing.T) {
+	reg := NewRegistry(fakePolicy{}, nil)
+	reg.SetShellExecutor(fakeShell{})
+
+	if err := RegisterCore(reg); err != nil {
+		t.Fatalf("register core: %v", err)
 	}
 
-	// Case 2: Explicit "*" should allow
+	// Explicit "*" should allow.
 	reg.SetShellAllowedCommands([]string{"*"})
-	_, err = reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
+	_, err := reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
 		"command": "echo",
 		"args":    []any{"hello"},
 	})
@@ -34,7 +46,7 @@ func TestShellExecDefaultDeny(t *testing.T) {
 		t.Errorf("expected command to be allowed with '*', got error: %v", err)
 	}
 
-	// Case 3: Specific allowlist
+	// Specific allowlist should only allow listed commands.
 	reg.SetShellAllowedCommands([]string{"ls"})
 	_, err = reg.Execute(context.Background(), "agent", "shell.exec", ".", map[string]any{
 		"command": "ls",

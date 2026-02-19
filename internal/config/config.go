@@ -21,6 +21,7 @@ type Config struct {
 	Workspace WorkspaceConfig `json:"workspace"`
 	Model     ModelConfig     `json:"model"`
 	Providers ProvidersConfig `json:"providers"`
+	Agents    AgentsConfig    `json:"agents"`
 	Chat      ChatConfig      `json:"chat"`
 	Discord   DiscordConfig   `json:"discord"`
 	Secrets   SecretsConfig   `json:"secrets"`
@@ -101,6 +102,20 @@ type ModelConfig struct {
 	Name        string  `json:"name"`
 	Temperature float64 `json:"temperature,omitempty"`
 	MaxTokens   int     `json:"max_tokens,omitempty"`
+}
+
+type AgentProfile struct {
+	Enabled         *bool       `json:"enabled,omitempty"`
+	Model           ModelConfig `json:"model,omitempty"`
+	SelfImprovement bool        `json:"self_improvement,omitempty"`
+}
+
+type AgentsConfig struct {
+	EnabledAgentIDs          []string                `json:"enabled_agent_ids,omitempty"`
+	AllowInterAgentMessaging bool                    `json:"allow_inter_agent_messaging"`
+	AllowAgentModelOverrides bool                    `json:"allow_agent_model_overrides"`
+	SelfImprovementEnabled   bool                    `json:"self_improvement_enabled"`
+	Profiles                 map[string]AgentProfile `json:"profiles,omitempty"`
 }
 
 type ProviderEndpointConfig struct {
@@ -208,6 +223,12 @@ func Default() Config {
 				APIKeyEnv: "OPENAI_COMPAT_API_KEY",
 			},
 		},
+		Agents: AgentsConfig{
+			AllowInterAgentMessaging: true,
+			AllowAgentModelOverrides: true,
+			SelfImprovementEnabled:   false,
+			Profiles:                 map[string]AgentProfile{},
+		},
 		Chat: ChatConfig{
 			Enabled:               true,
 			DefaultAgentID:        "default",
@@ -273,6 +294,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Chat.DefaultAgentID == "" {
 		c.Chat.DefaultAgentID = d.Chat.DefaultAgentID
+	}
+	if len(c.Agents.Profiles) == 0 && len(d.Agents.Profiles) == 0 {
+		c.Agents.Profiles = map[string]AgentProfile{}
 	}
 	if c.Chat.RateLimitPerMin == 0 {
 		c.Chat.RateLimitPerMin = d.Chat.RateLimitPerMin
@@ -353,6 +377,28 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Workspace.Root) == "" {
 		return errors.New("workspace.root cannot be empty")
 	}
+	for _, agentID := range c.Agents.EnabledAgentIDs {
+		if err := validateAgentID(agentID); err != nil {
+			return fmt.Errorf("agents.enabled_agent_ids: %w", err)
+		}
+	}
+	for agentID, profile := range c.Agents.Profiles {
+		if err := validateAgentID(agentID); err != nil {
+			return fmt.Errorf("agents.profiles.%s: %w", agentID, err)
+		}
+		if strings.TrimSpace(profile.Model.Provider) != "" {
+			provider := strings.ToLower(strings.TrimSpace(profile.Model.Provider))
+			supported := map[string]bool{
+				"openai": true, "openrouter": true, "requesty": true, "zai": true, "generic": true,
+			}
+			if !supported[provider] {
+				return fmt.Errorf("agents.profiles.%s.model.provider unsupported: %q", agentID, profile.Model.Provider)
+			}
+		}
+		if profile.Model.MaxTokens < 0 || profile.Model.MaxTokens > 20000 {
+			return fmt.Errorf("agents.profiles.%s.model.max_tokens must be between 0 and 20000", agentID)
+		}
+	}
 
 	if !IsValidThinkingMode(c.Output.ThinkingMode) {
 		return fmt.Errorf("output.thinking_mode must be one of never|on_error|always")
@@ -423,6 +469,17 @@ func (c Config) Validate() error {
 		return errors.New("secrets.store_file and secrets.master_key_file are required")
 	}
 
+	return nil
+}
+
+func validateAgentID(raw string) error {
+	agentID := strings.TrimSpace(raw)
+	if agentID == "" {
+		return errors.New("agent id cannot be empty")
+	}
+	if strings.Contains(agentID, "..") || strings.ContainsRune(agentID, '/') || strings.ContainsRune(agentID, '\\') {
+		return fmt.Errorf("invalid agent id: %q", raw)
+	}
 	return nil
 }
 

@@ -767,6 +767,41 @@ func TestProviderModelReturnsFriendlyMessageWhenToolPayloadIsInvalid(t *testing.
 	}
 }
 
+func TestParseToolDirectiveRepairsTruncatedJSON(t *testing.T) {
+	resp, err := parseToolDirective(`/tool secrets.get {"name":"PERPLEXITY_API_KEY"`, []string{"secrets.get"})
+	if err != nil {
+		t.Fatalf("expected relaxed parse to recover from truncated json, got %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("expected one tool call, got %d", len(resp.ToolCalls))
+	}
+	args := map[string]any{}
+	if err := json.Unmarshal(resp.ToolCalls[0].Arguments, &args); err != nil {
+		t.Fatalf("decode normalized args: %v", err)
+	}
+	if args["key"] != "provider/perplexity/api_key" {
+		t.Fatalf("expected canonical key normalization, got %#v", args["key"])
+	}
+}
+
+func TestParseToolCallsFromResponseNormalizesAndDedupesEquivalentSecretsCalls(t *testing.T) {
+	content := "```json\n[{\"tool_name\":\"secrets.get\",\"arguments\":{\"name\":\"PERPLEXITY_API_KEY\"}},{\"tool_name\":\"secrets.get\",\"arguments\":{\"key\":\"provider/perplexity/api_key\"}}]\n```"
+	calls, parseFailure, reason := parseToolCallsFromResponse(content, []string{"secrets.get"}, nil)
+	if parseFailure {
+		t.Fatalf("expected no parse failure, got reason %q", reason)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected equivalent secret lookups to dedupe to one call, got %d", len(calls))
+	}
+	args := map[string]any{}
+	if err := json.Unmarshal(calls[0].Arguments, &args); err != nil {
+		t.Fatalf("decode normalized args: %v", err)
+	}
+	if args["key"] != "provider/perplexity/api_key" {
+		t.Fatalf("expected canonical key argument, got %#v", args["key"])
+	}
+}
+
 func TestProviderModelRejectsShellExecWhenNotAllowed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

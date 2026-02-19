@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -41,17 +42,13 @@ func TestWriteAtomic_ExistingFile(t *testing.T) {
 	newData := []byte("new content")
 	mode := os.FileMode(0o600)
 
-	// Create initial file
 	if err := os.WriteFile(path, oldData, mode); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
-
-	// Overwrite atomicity
 	if err := WriteAtomic(path, newData, mode); err != nil {
 		t.Fatalf("WriteAtomic failed: %v", err)
 	}
 
-	// Verify main file
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
@@ -60,7 +57,6 @@ func TestWriteAtomic_ExistingFile(t *testing.T) {
 		t.Errorf("got %q, want %q", got, newData)
 	}
 
-	// Verify backup file (WriteAtomic creates a .bak of the existing file)
 	bakPath := path + ".bak"
 	gotBak, err := os.ReadFile(bakPath)
 	if err != nil {
@@ -97,5 +93,62 @@ func TestWriteAtomic_UnwritableDir(t *testing.T) {
 	path := filepath.Join(unwritable, "test.txt")
 	if err := WriteAtomic(path, []byte("data"), 0o644); err == nil {
 		t.Error("expected error writing to unwritable directory, got nil")
+	}
+}
+
+func TestWriteAtomic_MkdirAllError(t *testing.T) {
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+
+	// Create a file where we want a directory to be.
+	if err := os.WriteFile(blocked, []byte("block"), 0o644); err != nil {
+		t.Fatalf("failed to create blocking file: %v", err)
+	}
+
+	target := filepath.Join(blocked, "file")
+	err := WriteAtomic(target, []byte("data"), 0o644)
+	if err == nil {
+		t.Error("expected error when directory path is blocked by a file")
+	}
+}
+
+func TestWriteAtomic_WriteError(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(targetDir, 0o500); err != nil {
+		t.Fatalf("failed to create readonly dir: %v", err)
+	}
+	defer os.Chmod(targetDir, 0o755)
+
+	target := filepath.Join(targetDir, "file")
+	err := WriteAtomic(target, []byte("data"), 0o644)
+	if err == nil {
+		t.Error("expected error when writing to read-only directory")
+	}
+}
+
+func TestWriteAtomic_BackupError(t *testing.T) {
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "readonly_with_file")
+
+	if err := os.Mkdir(targetDir, 0o755); err != nil {
+		t.Fatalf("failed to create dir: %v", err)
+	}
+
+	target := filepath.Join(targetDir, "file")
+	if err := os.WriteFile(target, []byte("original"), 0o644); err != nil {
+		t.Fatalf("failed to create original file: %v", err)
+	}
+
+	if err := os.Chmod(targetDir, 0o500); err != nil {
+		t.Fatalf("failed to make dir readonly: %v", err)
+	}
+	defer os.Chmod(targetDir, 0o755)
+
+	err := WriteAtomic(target, []byte("new"), 0o644)
+	if err == nil {
+		t.Error("expected error when writing backup in read-only directory")
+	} else if !strings.Contains(err.Error(), "write backup") {
+		t.Errorf("expected 'write backup' error, got: %v", err)
 	}
 }

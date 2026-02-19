@@ -14,9 +14,11 @@ const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "canceled"]);
 
 const chatViewState = {
   draft: "",
+  lastPrompt: "",
   transcript: [],
   sendPending: false,
   sendError: null,
+  debugCopyStatus: "",
 
   currentRunID: "",
   currentRunStatus: "idle",
@@ -63,6 +65,13 @@ const chatViewState = {
   container: null,
   apiClient: null,
   store: null,
+  availableAgents: [CHAT_DEFAULTS.agentID],
+  selectedAgentID: CHAT_DEFAULTS.agentID,
+  activeAgentID: CHAT_DEFAULTS.agentID,
+  switchAgentPending: false,
+  switchAgentError: "",
+  agentProfileContext: null,
+  agentGlobalConfig: null,
 };
 
 function safeText(value) {
@@ -137,6 +146,98 @@ function isTerminalStatus(status) {
   return TERMINAL_RUN_STATUSES.has(safeText(status).toLowerCase());
 }
 
+function settingsProfileHash(agentID) {
+  const params = new URLSearchParams();
+  params.set("category", "agents");
+  const selected = safeText(agentID);
+  if (selected) {
+    params.set("profile", selected);
+  }
+  return `#/settings?${params.toString()}`;
+}
+
+function copyToClipboardWithFallback(text) {
+  const value = String(text || "");
+  if (!value) {
+    return Promise.reject(new Error("Nothing to copy"));
+  }
+  if (navigator?.clipboard?.writeText) {
+    return navigator.clipboard.writeText(value);
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = value;
+      textarea.setAttribute("readonly", "readonly");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.append(textarea);
+      textarea.focus();
+      textarea.select();
+      const copied = document.execCommand("copy");
+      textarea.remove();
+      if (!copied) {
+        reject(new Error("Copy command failed"));
+        return;
+      }
+      resolve();
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+function debugBundlePayload() {
+  const lastError = chatViewState.store?.getState?.().lastError || null;
+  return {
+    context: {
+      user_id: CHAT_DEFAULTS.userID,
+      room_id: CHAT_DEFAULTS.roomID,
+      selected_agent_id: safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID,
+      active_agent_id: safeText(chatViewState.activeAgentID),
+    },
+    run: {
+      id: safeText(chatViewState.currentRunID),
+      status: safeText(chatViewState.currentRunStatus),
+      session_id: safeText(chatViewState.currentSessionID),
+      updated_at: safeText(chatViewState.currentRunLastUpdatedAt),
+      last_output_preview: compactText(chatViewState.currentRunLastOutput, 600),
+    },
+    activity: {
+      polling: Boolean(chatViewState.polling),
+      latest_tool: chatViewState.latestToolActivity,
+      loop_risk: chatViewState.loopRisk,
+      last_error_summary: safeText(chatViewState.lastErrorSummary),
+      send_error: chatViewState.sendError || null,
+      global_last_error: lastError,
+    },
+    transcript_tail: chatViewState.transcript.slice(-10),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+async function copyDebugBundle() {
+  try {
+    const payload = debugBundlePayload();
+    const formatted = `${JSON.stringify(payload, null, 2)}\n`;
+    await copyToClipboardWithFallback(formatted);
+    chatViewState.debugCopyStatus = "Debug bundle copied.";
+  } catch (error) {
+    chatViewState.debugCopyStatus = `Copy failed: ${error?.message || String(error)}`;
+  }
+  rerenderIfActive();
+}
+
+function retryLastPrompt() {
+  const message = safeText(chatViewState.lastPrompt);
+  if (!message || chatViewState.sendPending) {
+    return;
+  }
+  chatViewState.draft = message;
+  chatViewState.debugCopyStatus = "";
+  void sendMessage();
+}
+
 function transcriptFingerprint() {
   return chatViewState.transcript
     .map((item) => `${item?.role}:${item?.pending ? "p" : "d"}:${(item?.content || "").length}`)
@@ -185,7 +286,7 @@ function pollSessionMessagesPath(sessionID) {
 
 function listSessionsPath() {
   const params = new URLSearchParams({
-    agent_id: CHAT_DEFAULTS.agentID,
+    agent_id: safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID,
     user_id: CHAT_DEFAULTS.userID,
     room_id: CHAT_DEFAULTS.roomID,
     channel: "dashboard",
@@ -193,6 +294,120 @@ function listSessionsPath() {
     offset: "0",
   });
   return `/api/admin/chat/sessions?${params.toString()}`;
+}
+
+async function refreshAvailableAgents() {
+  try {
+    const params = new URLSearchParams({
+      channel: "dashboard",
+      user_id: CHAT_DEFAULTS.userID,
+      room_id: CHAT_DEFAULTS.roomID,
+    });
+    const requestedAgent = safeText(chatViewState.selectedAgentID);
+    if (requestedAgent) {
+      params.set("agent_id", requestedAgent);
+    }
+    const payload = await chatViewState.apiClient.get(
+      `/api/admin/agents?${params.toString()}`
+    );
+
+    const agents = Array.isArray(payload?.agents)
+      ? payload.agents.map((item) => safeText(item)).filter((item) => !!item)
+      : [];
+    if (agents.length) {
+      chatViewState.availableAgents = agents;
+    }
+    const active = safeText(payload?.active_agent);
+    if (active) {
+      chatViewState.activeAgentID = active;
+    }
+
+    const selected = safeText(payload?.selected_agent) || active;
+    chatViewState.agentProfileContext =
+      payload?.profile_context && typeof payload.profile_context === "object" ? payload.profile_context : null;
+    chatViewState.agentGlobalConfig =
+      payload?.agents_config && typeof payload.agents_config === "object" ? payload.agents_config : null;
+
+    if (selected) {
+      chatViewState.selectedAgentID = selected;
+    } else if (!chatViewState.availableAgents.includes(chatViewState.selectedAgentID)) {
+      chatViewState.selectedAgentID = chatViewState.availableAgents[0] || CHAT_DEFAULTS.agentID;
+    }
+  } catch (_error) {
+    if (!chatViewState.availableAgents.length) {
+      chatViewState.availableAgents = [CHAT_DEFAULTS.agentID];
+    }
+  }
+}
+
+function resetViewForAgentSwitch() {
+  stopPolling();
+  clearIdleSessionTimer();
+  chatViewState.currentRunID = "";
+  chatViewState.currentRunStatus = "idle";
+  chatViewState.currentRunStartedAtMs = 0;
+  chatViewState.currentRunLastUpdatedAt = "";
+  chatViewState.currentRunLastOutput = "";
+  chatViewState.currentSessionID = "";
+  chatViewState.latestToolActivity = null;
+  chatViewState.lastErrorSummary = "";
+  chatViewState.sendError = null;
+  chatViewState.debugCopyStatus = "";
+  chatViewState.transcript = [];
+  chatViewState.loopRisk = {
+    level: "low",
+    score: 0,
+    reasons: [],
+    repeatCount: 0,
+    failureCount: 0,
+    windowSize: 0,
+  };
+}
+
+async function switchAgent(nextAgentID) {
+  const agentID = safeText(nextAgentID) || CHAT_DEFAULTS.agentID;
+  if (chatViewState.switchAgentPending) {
+    return;
+  }
+  chatViewState.switchAgentPending = true;
+  chatViewState.switchAgentError = "";
+  rerenderIfActive();
+
+  try {
+    const payload = await chatViewState.apiClient.post("/api/admin/agents", {
+      channel: "dashboard",
+      user_id: CHAT_DEFAULTS.userID,
+      room_id: CHAT_DEFAULTS.roomID,
+      agent_id: agentID,
+    });
+
+    const agents = Array.isArray(payload?.agents)
+      ? payload.agents.map((item) => safeText(item)).filter((item) => !!item)
+      : [];
+    if (agents.length) {
+      chatViewState.availableAgents = agents;
+    }
+    chatViewState.selectedAgentID = safeText(payload?.selected_agent) || safeText(payload?.active_agent) || agentID;
+    chatViewState.activeAgentID = safeText(payload?.active_agent) || chatViewState.selectedAgentID;
+    chatViewState.agentProfileContext =
+      payload?.profile_context && typeof payload.profile_context === "object" ? payload.profile_context : null;
+    chatViewState.agentGlobalConfig =
+      payload?.agents_config && typeof payload.agents_config === "object" ? payload.agents_config : null;
+
+    resetViewForAgentSwitch();
+
+    const sessionID = await ensureCurrentSessionID();
+    if (sessionID) {
+      const sessionPayload = await chatViewState.apiClient.get(pollSessionMessagesPath(sessionID));
+      applySessionMessagesPayload(sessionPayload);
+    }
+    startIdleSessionWatch();
+  } catch (err) {
+    chatViewState.switchAgentError = err?.message || String(err);
+  } finally {
+    chatViewState.switchAgentPending = false;
+    rerenderIfActive();
+  }
 }
 
 function normalizeSessionTranscript(messages) {
@@ -1165,7 +1380,9 @@ async function sendMessage() {
   }
 
   chatViewState.sendPending = true;
+  chatViewState.lastPrompt = message;
   chatViewState.sendError = null;
+  chatViewState.debugCopyStatus = "";
   pushUserAndPendingAssistant(message);
   chatViewState.draft = "";
   rerenderIfActive();
@@ -1174,7 +1391,7 @@ async function sendMessage() {
     const payload = await chatViewState.apiClient.post("/v1/chat/messages", {
       user_id: CHAT_DEFAULTS.userID,
       room_id: CHAT_DEFAULTS.roomID,
-      agent_id: CHAT_DEFAULTS.agentID,
+      agent_id: safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID,
       message,
     });
 
@@ -1328,14 +1545,62 @@ function renderChatPage() {
   composerActions.className = "chat-composer-actions";
   const defaultsMeta = document.createElement("span");
   defaultsMeta.className = "muted";
-  defaultsMeta.textContent = `Defaults: ${CHAT_DEFAULTS.userID} / ${CHAT_DEFAULTS.roomID} / ${CHAT_DEFAULTS.agentID}`;
+  defaultsMeta.textContent = `Context: ${CHAT_DEFAULTS.userID} / ${CHAT_DEFAULTS.roomID} / ${safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID}`;
+
+  const agentPicker = document.createElement("select");
+  agentPicker.className = "settings-select";
+  chatViewState.availableAgents.forEach((agentID) => {
+    const option = document.createElement("option");
+    option.value = agentID;
+    option.textContent = agentID;
+    option.selected = agentID === (safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID);
+    agentPicker.append(option);
+  });
+  agentPicker.addEventListener("change", () => {
+    void switchAgent(agentPicker.value);
+  });
+  agentPicker.disabled = chatViewState.switchAgentPending || chatViewState.sendPending;
+
+  const refreshAgentsButton = document.createElement("button");
+  refreshAgentsButton.type = "button";
+  refreshAgentsButton.className = "layout-toggle";
+  refreshAgentsButton.textContent = "Refresh agents";
+  refreshAgentsButton.addEventListener("click", () => {
+    void (async () => {
+      await refreshAvailableAgents();
+      rerenderIfActive();
+    })();
+  });
+  refreshAgentsButton.disabled = chatViewState.switchAgentPending;
+
+  const stopPollingButton = document.createElement("button");
+  stopPollingButton.type = "button";
+  stopPollingButton.className = "layout-toggle";
+  stopPollingButton.textContent = "Stop polling";
+  stopPollingButton.disabled = !chatViewState.polling;
+  stopPollingButton.addEventListener("click", () => {
+    stopPolling();
+    chatViewState.currentRunStatus = "paused";
+    replacePendingAssistant("Polling stopped by user. Run may still be executing in the backend.");
+    chatViewState.debugCopyStatus = "Polling stopped.";
+    rerenderIfActive();
+  });
+
+  const retryButton = document.createElement("button");
+  retryButton.type = "button";
+  retryButton.className = "layout-toggle";
+  retryButton.textContent = "Retry";
+  retryButton.disabled = chatViewState.sendPending || !safeText(chatViewState.lastPrompt);
+  retryButton.addEventListener("click", () => {
+    retryLastPrompt();
+  });
 
   const sendButton = document.createElement("button");
   sendButton.type = "submit";
   sendButton.className = "chat-send-button";
   sendButton.textContent = chatViewState.sendPending ? "Sending..." : "Send";
   sendButton.disabled = chatViewState.sendPending;
-  composerActions.append(defaultsMeta, sendButton);
+  composerActions.append(defaultsMeta, agentPicker, refreshAgentsButton, stopPollingButton, retryButton, sendButton);
 
   if (chatViewState.sendError) {
     const sendError = document.createElement("p");
@@ -1346,12 +1611,65 @@ function renderChatPage() {
     composer.append(input, composerActions);
   }
 
+  if (chatViewState.switchAgentError) {
+    const switchError = document.createElement("p");
+    switchError.className = "chat-send-error";
+    switchError.textContent = `Agent switch failed: ${chatViewState.switchAgentError}`;
+    composer.append(switchError);
+  }
+
+  if (chatViewState.debugCopyStatus) {
+    const debugStatus = document.createElement("p");
+    debugStatus.className = "muted";
+    debugStatus.textContent = chatViewState.debugCopyStatus;
+    composer.append(debugStatus);
+  }
+
   transcriptPane.append(transcriptTitle, transcript, composer);
 
   const activityPane = document.createElement("aside");
   activityPane.className = "chat-activity-pane";
   const activityTitle = document.createElement("h3");
   activityTitle.textContent = "Live Activity";
+
+  const agentControlCard = document.createElement("section");
+  agentControlCard.className = "chat-activity-card";
+  const agentControlTitle = document.createElement("h4");
+  agentControlTitle.textContent = "Agent Control";
+  const selectedMeta = document.createElement("p");
+  selectedMeta.className = "chat-activity-meta";
+  selectedMeta.textContent = `Selected: ${safeText(chatViewState.selectedAgentID) || CHAT_DEFAULTS.agentID} · Active pointer: ${safeText(chatViewState.activeAgentID) || "-"}`;
+  const profileContext = chatViewState.agentProfileContext || {};
+  const profileInfo = document.createElement("p");
+  profileInfo.className = "muted";
+  const profileEnabled =
+    typeof profileContext.enabled === "boolean" ? String(profileContext.enabled) : "(inherit true)";
+  const profileSelfImprovement =
+    typeof profileContext.self_improvement === "boolean" ? String(profileContext.self_improvement) : "false";
+  const hasProfile = Boolean(profileContext.exists);
+  profileInfo.textContent = `Profile: ${hasProfile ? "explicit" : "inherited"} · enabled=${profileEnabled} · self_improvement=${profileSelfImprovement}`;
+  const modelInfo = document.createElement("p");
+  modelInfo.className = "muted";
+  const provider = safeText(profileContext.model_provider);
+  const name = safeText(profileContext.model_name);
+  const maxTokens = Number(profileContext.model_max_tokens) || 0;
+  if (provider || name || maxTokens > 0) {
+    modelInfo.textContent = `Model override: ${provider || "(provider unset)"} / ${name || "(name unset)"}${maxTokens > 0 ? ` · max_tokens ${maxTokens}` : ""}`;
+  } else {
+    modelInfo.textContent = "Model override: none (uses global model).";
+  }
+  const globalInfo = document.createElement("p");
+  globalInfo.className = "muted";
+  const globalConfig = chatViewState.agentGlobalConfig || {};
+  globalInfo.textContent = `Global: model_overrides=${String(Boolean(globalConfig.allow_agent_model_overrides))} · inter_agent_messaging=${String(Boolean(globalConfig.allow_inter_agent_messaging))} · self_improvement_global=${String(Boolean(globalConfig.self_improvement_enabled))}`;
+  const openSettingsButton = document.createElement("button");
+  openSettingsButton.type = "button";
+  openSettingsButton.className = "layout-toggle";
+  openSettingsButton.textContent = "Edit profile in Settings";
+  openSettingsButton.addEventListener("click", () => {
+    window.location.hash = settingsProfileHash(chatViewState.selectedAgentID);
+  });
+  agentControlCard.append(agentControlTitle, selectedMeta, profileInfo, modelInfo, globalInfo, openSettingsButton);
 
   const runID = safeText(chatViewState.currentRunID);
   const status = safeText(chatViewState.currentRunStatus) || "idle";
@@ -1366,6 +1684,17 @@ function renderChatPage() {
   const sessionMeta = document.createElement("p");
   sessionMeta.className = "chat-activity-meta muted";
   sessionMeta.textContent = `Session: ${sessionID || "(pending)"}${updatedAt ? ` · updated ${formatDateTime(updatedAt)}` : ""}`;
+
+  const debugActions = document.createElement("div");
+  debugActions.className = "chat-composer-actions";
+  const copyDebugButton = document.createElement("button");
+  copyDebugButton.type = "button";
+  copyDebugButton.className = "layout-toggle";
+  copyDebugButton.textContent = "Copy debug bundle";
+  copyDebugButton.addEventListener("click", () => {
+    void copyDebugBundle();
+  });
+  debugActions.append(copyDebugButton);
 
   const latestToolCard = document.createElement("section");
   latestToolCard.className = "chat-activity-card";
@@ -1425,7 +1754,7 @@ function renderChatPage() {
     riskCard.append(reasonList);
   }
 
-  activityPane.append(activityTitle, runMeta, sessionMeta, latestToolCard, errorCard, riskCard);
+  activityPane.append(activityTitle, agentControlCard, runMeta, sessionMeta, debugActions, latestToolCard, errorCard, riskCard);
 
   page.append(transcriptPane, activityPane);
   container.append(heading, note, page);
@@ -1462,6 +1791,7 @@ export const chatPage = {
     chatViewState.store = store;
     ensureRouteWatcher();
 
+    await refreshAvailableAgents();
     renderChatPage();
     startIdleSessionWatch();
 

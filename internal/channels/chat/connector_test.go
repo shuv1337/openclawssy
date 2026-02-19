@@ -281,3 +281,43 @@ func TestConnectorClosedSessionGetsReplacedAndCannotResume(t *testing.T) {
 		t.Fatalf("expected closed session message, got %q", res.Response)
 	}
 }
+
+func TestConnectorAgentSwitchCommand(t *testing.T) {
+	store, err := chatstore.NewStore(filepath.Join(t.TempDir(), ".openclawssy", "agents"))
+	if err != nil {
+		t.Fatalf("new chat store: %v", err)
+	}
+	_, err = store.CreateSession(chatstore.CreateSessionInput{AgentID: "default", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("seed default session: %v", err)
+	}
+	_, err = store.CreateSession(chatstore.CreateSessionInput{AgentID: "alpha", Channel: "dashboard", UserID: "u1", RoomID: "dashboard"})
+	if err != nil {
+		t.Fatalf("seed alpha session: %v", err)
+	}
+
+	queuedAgent := ""
+	connector := &Connector{
+		Store:          store,
+		DefaultAgentID: "default",
+		Queue: func(ctx context.Context, agentID, message, source, sessionID, thinkingMode string) (QueuedRun, error) {
+			queuedAgent = agentID
+			return QueuedRun{ID: "run-1", Status: "queued"}, nil
+		},
+	}
+
+	res, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "/agent alpha"})
+	if err != nil {
+		t.Fatalf("agent switch command: %v", err)
+	}
+	if !strings.Contains(res.Response, "alpha") {
+		t.Fatalf("expected switch response to mention alpha, got %q", res.Response)
+	}
+
+	if _, err := connector.HandleMessage(context.Background(), Message{UserID: "u1", RoomID: "dashboard", Source: "dashboard", Text: "hello"}); err != nil {
+		t.Fatalf("queue message after switch: %v", err)
+	}
+	if queuedAgent != "alpha" {
+		t.Fatalf("expected queued agent alpha, got %q", queuedAgent)
+	}
+}

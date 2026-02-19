@@ -855,3 +855,32 @@ func TestRunnerEscalatesGuidanceAfterIntermittentFailuresInRecoveryMode(t *testi
 		t.Fatalf("expected escalation after 8 tool calls, got %d", len(out.ToolCalls))
 	}
 }
+
+func TestRunnerAsksPermissionToAddAllowedDomainAfterRepeatedNetworkDeny(t *testing.T) {
+	responses := make([]ModelResponse, 0, 6)
+	toolResults := make(map[string]ToolCallResult, 6)
+	for i := 1; i <= 6; i++ {
+		id := "call-" + strconv.Itoa(i)
+		args := `{"method":"POST","url":"https://api.perplexity.ai/chat/completions"}`
+		responses = append(responses, ModelResponse{ToolCalls: []ToolCallRequest{{ID: id, Name: "http.request", Arguments: []byte(args)}}})
+		toolResults[id] = ToolCallResult{ID: id, Error: `internal.error (http.request): host "api.perplexity.ai" is not in network.allowed_domains`}
+	}
+
+	model := &mockModel{responses: responses}
+	tools := &mockTools{results: toolResults}
+	runner := Runner{Model: model, ToolExecutor: tools, MaxToolIterations: 120}
+
+	out, err := runner.Run(context.Background(), RunInput{Message: "use the perplexity skill to search the ussyverse"})
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if !strings.Contains(out.FinalText, "need your permission first") {
+		t.Fatalf("expected permission prompt, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "api.perplexity.ai") {
+		t.Fatalf("expected blocked host guidance, got %q", out.FinalText)
+	}
+	if !strings.Contains(out.FinalText, "config.set") {
+		t.Fatalf("expected config.set guidance, got %q", out.FinalText)
+	}
+}

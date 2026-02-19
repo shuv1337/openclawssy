@@ -43,100 +43,127 @@ func registerNetworkTools(reg *Registry, configuredPath string) error {
 	return nil
 }
 
+type preparedHTTPRequest struct {
+	Client   *http.Client
+	Request  *http.Request
+	MaxBytes int
+}
+
 func httpRequest(configuredPath string) Handler {
 	return func(ctx context.Context, req Request) (map[string]any, error) {
-		cfgPath, err := resolveConfigPath(req.Workspace, configuredPath)
-		if err != nil {
-			return nil, err
-		}
-		cfg, err := config.LoadOrDefault(cfgPath)
-		if err != nil {
-			return nil, err
-		}
-		if !cfg.Network.Enabled {
-			return nil, errors.New("network is disabled (set network.enabled=true)")
-		}
-
-		urlText, err := getString(req.Args, "url")
-		if err != nil {
-			return nil, err
-		}
-		parsedURL, err := parseAndValidateNetworkURL(urlText, cfg.Network)
+		prep, err := prepareRequest(ctx, req, configuredPath)
 		if err != nil {
 			return nil, err
 		}
 
-		method := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", req.Args["method"])))
-		if method == "" || method == "<NIL>" {
-			method = http.MethodGet
-		}
-
-		bodyBytes, err := httpRequestBody(req.Args)
-		if err != nil {
-			return nil, err
-		}
-
-		timeout := durationFromMS(req.Args["timeout_ms"], defaultHTTPRequestTimeout)
-		if timeout <= 0 {
-			timeout = defaultHTTPRequestTimeout
-		}
-
-		maxBytes := intFromAny(req.Args["max_response_bytes"], defaultHTTPResponseBytes)
-		if maxBytes <= 0 {
-			maxBytes = defaultHTTPResponseBytes
-		}
-		if maxBytes > maxHTTPResponseBytes {
-			maxBytes = maxHTTPResponseBytes
-		}
-
-		httpClient := &http.Client{
-			Timeout: timeout,
-			CheckRedirect: func(redirectReq *http.Request, via []*http.Request) error {
-				if len(via) >= maxHTTPRedirects {
-					return errors.New("stopped after too many redirects")
-				}
-				if _, err := parseAndValidateNetworkURL(redirectReq.URL.String(), cfg.Network); err != nil {
-					return err
-				}
-				return nil
-			},
-		}
-
-		httpReq, err := http.NewRequestWithContext(ctx, method, parsedURL.String(), bytes.NewReader(bodyBytes))
-		if err != nil {
-			return nil, err
-		}
-		for key, value := range parseRequestHeaders(req.Args["headers"]) {
-			httpReq.Header.Set(key, value)
-		}
-
-		resp, err := httpClient.Do(httpReq)
+		resp, err := executeRequest(prep.Client, prep.Request)
 		if err != nil {
 			return nil, err
 		}
 		defer resp.Body.Close()
 
-		limited := io.LimitReader(resp.Body, int64(maxBytes+1))
-		readBody, err := io.ReadAll(limited)
-		if err != nil {
-			return nil, err
-		}
-		truncated := false
-		if len(readBody) > maxBytes {
-			truncated = true
-			readBody = readBody[:maxBytes]
-		}
-
-		return map[string]any{
-			"status":             resp.StatusCode,
-			"headers":            flattenHeaders(resp.Header),
-			"body":               string(readBody),
-			"bytes_read":         len(readBody),
-			"truncated":          truncated,
-			"url":                resp.Request.URL.String(),
-			"max_response_bytes": maxBytes,
-		}, nil
+		return processResponse(resp, prep.MaxBytes)
 	}
+}
+
+func prepareRequest(ctx context.Context, req Request, configuredPath string) (*preparedHTTPRequest, error) {
+	cfgPath, err := resolveOpenClawssyPath(req.Workspace, configuredPath, "config", "config.json")
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.LoadOrDefault(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	if !cfg.Network.Enabled {
+		return nil, errors.New("network is disabled (set network.enabled=true)")
+	}
+
+	urlText, err := getString(req.Args, "url")
+	if err != nil {
+		return nil, err
+	}
+	parsedURL, err := parseAndValidateNetworkURL(urlText, cfg.Network)
+	if err != nil {
+		return nil, err
+	}
+
+	method := strings.ToUpper(strings.TrimSpace(fmt.Sprintf("%v", req.Args["method"])))
+	if method == "" || method == "<NIL>" {
+		method = http.MethodGet
+	}
+
+	bodyBytes, err := httpRequestBody(req.Args)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := durationFromMS(req.Args["timeout_ms"], defaultHTTPRequestTimeout)
+	if timeout <= 0 {
+		timeout = defaultHTTPRequestTimeout
+	}
+
+	maxBytes := intFromAny(req.Args["max_response_bytes"], defaultHTTPResponseBytes)
+	if maxBytes <= 0 {
+		maxBytes = defaultHTTPResponseBytes
+	}
+	if maxBytes > maxHTTPResponseBytes {
+		maxBytes = maxHTTPResponseBytes
+	}
+
+	httpClient := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(redirectReq *http.Request, via []*http.Request) error {
+			if len(via) >= maxHTTPRedirects {
+				return errors.New("stopped after too many redirects")
+			}
+			if _, err := parseAndValidateNetworkURL(redirectReq.URL.String(), cfg.Network); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, method, parsedURL.String(), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range parseRequestHeaders(req.Args["headers"]) {
+		httpReq.Header.Set(key, value)
+	}
+
+	return &preparedHTTPRequest{
+		Client:   httpClient,
+		Request:  httpReq,
+		MaxBytes: maxBytes,
+	}, nil
+}
+
+func executeRequest(client *http.Client, req *http.Request) (*http.Response, error) {
+	return client.Do(req)
+}
+
+func processResponse(resp *http.Response, maxBytes int) (map[string]any, error) {
+	limited := io.LimitReader(resp.Body, int64(maxBytes+1))
+	readBody, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	truncated := false
+	if len(readBody) > maxBytes {
+		truncated = true
+		readBody = readBody[:maxBytes]
+	}
+
+	return map[string]any{
+		"status":             resp.StatusCode,
+		"headers":            flattenHeaders(resp.Header),
+		"body":               string(readBody),
+		"bytes_read":         len(readBody),
+		"truncated":          truncated,
+		"url":                resp.Request.URL.String(),
+		"max_response_bytes": maxBytes,
+	}, nil
 }
 
 func parseAndValidateNetworkURL(rawURL string, netCfg config.NetworkConfig) (*url.URL, error) {
@@ -189,16 +216,7 @@ func hostAllowedByDomainList(host string, allowedDomains []string) bool {
 		return false
 	}
 	for _, raw := range allowedDomains {
-		candidate := strings.ToLower(strings.TrimSpace(raw))
-		if candidate == "" {
-			continue
-		}
-		if strings.HasPrefix(candidate, "*.") {
-			candidate = strings.TrimPrefix(candidate, "*.")
-		}
-		if strings.HasPrefix(candidate, ".") {
-			candidate = strings.TrimPrefix(candidate, ".")
-		}
+		candidate := normalizeAllowedDomainCandidate(raw)
 		if candidate == "" {
 			continue
 		}
@@ -207,6 +225,49 @@ func hostAllowedByDomainList(host string, allowedDomains []string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAllowedDomainCandidate(raw string) string {
+	candidate := strings.ToLower(strings.TrimSpace(raw))
+	if candidate == "" {
+		return ""
+	}
+	if strings.HasPrefix(candidate, "*.") {
+		candidate = strings.TrimPrefix(candidate, "*.")
+	}
+	if strings.HasPrefix(candidate, ".") {
+		candidate = strings.TrimPrefix(candidate, ".")
+	}
+
+	if strings.Contains(candidate, "://") {
+		if parsed, err := url.Parse(candidate); err == nil {
+			if host := strings.TrimSpace(parsed.Hostname()); host != "" {
+				candidate = host
+			}
+		}
+	} else {
+		if parsed, err := url.Parse("https://" + candidate); err == nil {
+			if host := strings.TrimSpace(parsed.Hostname()); host != "" {
+				candidate = host
+			}
+		}
+	}
+
+	if host, port, err := net.SplitHostPort(candidate); err == nil {
+		if host != "" && port != "" {
+			candidate = host
+		}
+	} else if idx := strings.LastIndex(candidate, ":"); idx > 0 && !strings.Contains(candidate, "]") {
+		if _, convErr := strconv.Atoi(candidate[idx+1:]); convErr == nil {
+			candidate = candidate[:idx]
+		}
+	}
+
+	candidate = strings.TrimSpace(strings.Trim(candidate, "[]"))
+	if strings.HasPrefix(candidate, ".") {
+		candidate = strings.TrimPrefix(candidate, ".")
+	}
+	return candidate
 }
 
 func parseRequestHeaders(raw any) map[string]string {

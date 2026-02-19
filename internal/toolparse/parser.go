@@ -11,47 +11,55 @@ import (
 )
 
 var toolAliases = map[string]string{
-	"fs.read":          "fs.read",
-	"fs.list":          "fs.list",
-	"fs.write":         "fs.write",
-	"fs.append":        "fs.append",
-	"fs.delete":        "fs.delete",
-	"fs.move":          "fs.move",
-	"fs.rename":        "fs.move",
-	"fs.edit":          "fs.edit",
-	"code.search":      "code.search",
-	"config.get":       "config.get",
-	"config.set":       "config.set",
-	"secrets.get":      "secrets.get",
-	"secrets.set":      "secrets.set",
-	"secrets.list":     "secrets.list",
-	"skill.list":       "skill.list",
-	"skill.read":       "skill.read",
-	"skill.get":        "skill.read",
-	"scheduler.list":   "scheduler.list",
-	"scheduler.add":    "scheduler.add",
-	"scheduler.remove": "scheduler.remove",
-	"scheduler.pause":  "scheduler.pause",
-	"scheduler.resume": "scheduler.resume",
-	"session.list":     "session.list",
-	"session.close":    "session.close",
-	"agent.list":       "agent.list",
-	"agent.create":     "agent.create",
-	"agent.switch":     "agent.switch",
-	"policy.list":      "policy.list",
-	"policy.grant":     "policy.grant",
-	"policy.revoke":    "policy.revoke",
-	"run.list":         "run.list",
-	"run.get":          "run.get",
-	"run.cancel":       "run.cancel",
-	"metrics.get":      "metrics.get",
-	"http.request":     "http.request",
-	"net.fetch":        "http.request",
-	"time.now":         "time.now",
-	"shell.exec":       "shell.exec",
-	"bash.exec":        "shell.exec",
-	"terminal.exec":    "shell.exec",
-	"terminal.run":     "shell.exec",
+	"fs.read":              "fs.read",
+	"fs.list":              "fs.list",
+	"fs.write":             "fs.write",
+	"fs.append":            "fs.append",
+	"fs.delete":            "fs.delete",
+	"fs.move":              "fs.move",
+	"fs.rename":            "fs.move",
+	"fs.edit":              "fs.edit",
+	"code.search":          "code.search",
+	"config.get":           "config.get",
+	"config.set":           "config.set",
+	"secrets.get":          "secrets.get",
+	"secrets.set":          "secrets.set",
+	"secrets.list":         "secrets.list",
+	"skill.list":           "skill.list",
+	"skill.read":           "skill.read",
+	"skill.get":            "skill.read",
+	"scheduler.list":       "scheduler.list",
+	"scheduler.add":        "scheduler.add",
+	"scheduler.remove":     "scheduler.remove",
+	"scheduler.pause":      "scheduler.pause",
+	"scheduler.resume":     "scheduler.resume",
+	"session.list":         "session.list",
+	"session.close":        "session.close",
+	"agent.list":           "agent.list",
+	"agent.create":         "agent.create",
+	"agent.switch":         "agent.switch",
+	"agent.profile.get":    "agent.profile.get",
+	"agent.profile.set":    "agent.profile.set",
+	"agent.message.send":   "agent.message.send",
+	"agent.message.inbox":  "agent.message.inbox",
+	"agent.run":            "agent.run",
+	"agent.prompt.read":    "agent.prompt.read",
+	"agent.prompt.update":  "agent.prompt.update",
+	"agent.prompt.suggest": "agent.prompt.suggest",
+	"policy.list":          "policy.list",
+	"policy.grant":         "policy.grant",
+	"policy.revoke":        "policy.revoke",
+	"run.list":             "run.list",
+	"run.get":              "run.get",
+	"run.cancel":           "run.cancel",
+	"metrics.get":          "metrics.get",
+	"http.request":         "http.request",
+	"net.fetch":            "http.request",
+	"time.now":             "time.now",
+	"shell.exec":           "shell.exec",
+	"bash.exec":            "shell.exec",
+	"terminal.exec":        "shell.exec",
+	"terminal.run":         "shell.exec",
 }
 
 type Extraction struct {
@@ -427,7 +435,7 @@ func extractBalancedJSONCandidates(content string) []string {
 
 	candidates := make([]string, 0, 4)
 	start := -1
-	depth := 0
+	stack := make([]rune, 0, 16)
 	inString := false
 	escaped := false
 
@@ -453,17 +461,29 @@ func extractBalancedJSONCandidates(content string) []string {
 		}
 
 		if r == '{' || r == '[' {
-			if depth == 0 {
+			if len(stack) == 0 {
 				start = i
 			}
-			depth++
+			stack = append(stack, r)
 			continue
 		}
 
-		if depth > 0 && (r == '}' || r == ']') {
-			depth--
-			if depth == 0 && start >= 0 {
-				candidates = append(candidates, strings.TrimSpace(content[start:i+1]))
+		if r == '}' || r == ']' {
+			if len(stack) == 0 {
+				continue
+			}
+
+			last := stack[len(stack)-1]
+			if (r == '}' && last == '{') || (r == ']' && last == '[') {
+				stack = stack[:len(stack)-1]
+				if len(stack) == 0 && start >= 0 {
+					candidates = append(candidates, strings.TrimSpace(content[start:i+1]))
+					start = -1
+				}
+			} else {
+				// Mismatch found (e.g. found '}' but expected ']')
+				// Abort current candidate
+				stack = stack[:0]
 				start = -1
 			}
 		}
