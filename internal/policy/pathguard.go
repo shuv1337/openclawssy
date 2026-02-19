@@ -158,7 +158,7 @@ func resolvePath(workspace, target string, write bool) (string, error) {
 		return "", &PathError{Path: target, Reason: "outside workspace"}
 	}
 
-	if write && isProtectedControlPath(candidate) {
+	if isProtectedControlPath(candidate) {
 		return "", &PathError{Path: target, Reason: "protected control-plane path"}
 	}
 
