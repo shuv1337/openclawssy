@@ -98,6 +98,20 @@ func (s *Store) List() []Job {
 	return jobs
 }
 
+// ListUnsorted returns a list of jobs without sorting.
+// This is faster than List() and should be used when order doesn't matter.
+func (s *Store) ListUnsorted() []Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.reloadLocked()
+
+	jobs := make([]Job, 0, len(s.jobs))
+	for _, job := range s.jobs {
+		jobs = append(jobs, job)
+	}
+	return jobs
+}
+
 func (s *Store) Remove(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,11 +181,11 @@ func (s *Store) saveLocked() error {
 	for _, job := range s.jobs {
 		jobs = append(jobs, job)
 	}
-	sort.Slice(jobs, func(i, j int) bool {
-		return jobs[i].ID < jobs[j].ID
-	})
 
-	body, err := json.MarshalIndent(persistedJobs{Paused: s.paused, Jobs: jobs}, "", "  ")
+	// Optimized: Use Marshal instead of MarshalIndent and skip sorting.
+	// This significantly reduces I/O and CPU overhead for frequent updates.
+	// Note: Output is non-deterministic (random map iteration order), which is an intentional trade-off for speed.
+	body, err := json.Marshal(persistedJobs{Paused: s.paused, Jobs: jobs})
 	if err != nil {
 		return fmt.Errorf("scheduler: encode store: %w", err)
 	}
@@ -342,7 +356,7 @@ func (e *Executor) check(now time.Time) {
 	}
 	isFirstCheck := e.firstCheck
 	e.firstCheck = false
-	jobs := e.store.List()
+	jobs := e.store.ListUnsorted()
 	type dueJob struct {
 		job             Job
 		disableAfterRun bool
