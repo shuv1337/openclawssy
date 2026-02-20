@@ -184,6 +184,7 @@ func (s *Store) saveLocked() error {
 
 	// Optimized: Use Marshal instead of MarshalIndent and skip sorting.
 	// This significantly reduces I/O and CPU overhead for frequent updates.
+	// Note: Output is non-deterministic (random map iteration order), which is an intentional trade-off for speed.
 	body, err := json.Marshal(persistedJobs{Paused: s.paused, Jobs: jobs})
 	if err != nil {
 		return fmt.Errorf("scheduler: encode store: %w", err)
