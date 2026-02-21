@@ -262,6 +262,26 @@ func (s *Store) IsPaused() bool {
 	return s.paused
 }
 
+// tickSnapshot returns the paused state and a list of enabled jobs.
+// It is optimized for the scheduler tick loop to avoid multiple lock acquisitions and stat calls.
+func (s *Store) tickSnapshot() (bool, []Job) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.reloadLocked()
+
+	if s.paused {
+		return true, nil
+	}
+
+	jobs := make([]Job, 0, len(s.jobs))
+	for _, job := range s.jobs {
+		if job.Enabled {
+			jobs = append(jobs, job)
+		}
+	}
+	return false, jobs
+}
+
 func (s *Store) SetJobEnabled(id string, enabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -351,21 +371,23 @@ func (e *Executor) Stop() {
 }
 
 func (e *Executor) check(now time.Time) {
-	if e.store == nil || e.store.IsPaused() {
+	if e.store == nil {
 		return
 	}
+
+	paused, jobs := e.store.tickSnapshot()
+	if paused {
+		return
+	}
+
 	isFirstCheck := e.firstCheck
 	e.firstCheck = false
-	jobs := e.store.ListUnsorted()
 	type dueJob struct {
 		job             Job
 		disableAfterRun bool
 	}
 	dueJobs := make([]dueJob, 0, len(jobs))
 	for _, job := range jobs {
-		if !job.Enabled {
-			continue
-		}
 		due, disableAfterRun, err := nextDue(job, now)
 		if err != nil || !due {
 			continue
