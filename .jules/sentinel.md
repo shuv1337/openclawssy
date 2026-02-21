@@ -7,3 +7,8 @@
 **Vulnerability:** The `ResolveReadPath` function allowed read access to sensitive control files (e.g., `master.key`, `secrets.enc`) because the `isProtectedControlPath` check was only applied during write operations.
 **Learning:** Security controls often focus on preventing modification (write), but read access can be just as critical for confidentiality. Access control checks must be consistent across all operations (read/write/execute).
 **Prevention:** Apply the same policy validation logic (e.g., protected path checks) to both read and write operations unless there is a specific reason to differ.
+
+## 2026-02-21 - DNS Rebinding SSRF
+**Vulnerability:** The `http.request` tool checked `isLocalhostHost` on the input hostname string but did not resolve it to an IP. This allowed attackers to use a domain resolving to 127.0.0.1 (e.g., `127.0.0.1.nip.io`) to bypass the `AllowLocalhosts=false` restriction and access internal services.
+**Learning:** String-based hostname validation is insufficient for SSRF protection because DNS can map arbitrary names to private IPs.
+**Prevention:** Always resolve the hostname to an IP address and check the IP against restricted ranges (loopback, private) before connecting. Use a custom `DialContext` to ensure the checked IP is the one actually dialed, preventing TOCTOU (DNS Rebinding) attacks.
